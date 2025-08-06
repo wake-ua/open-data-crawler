@@ -1,0 +1,2 @@
+include opencrawler/*.ini
+include opencrawler/*.txt

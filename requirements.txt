@@ -1,0 +1,7 @@
+requests
+tqdm
+humanize
+frictionless
+chardet
+w3lib
+url-normalize
