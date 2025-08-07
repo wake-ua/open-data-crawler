@@ -1,40 +1,35 @@
 import requests
 import os
-import re
 from urllib.parse import urlparse
 from opendatacrawler import utils
 from opendatacrawler.setup_logger import logger
-
-class DatosGobEsCrawler():
+import traceback
+class CkanCrawler():
     def __init__(self, domain, data_types, user_agent):
         self.domain = domain.rstrip("/")
         self.data_types = data_types
-        
         self.user_agent = user_agent
 
     def get_package_list(self):
         ids = []
-        url = "http://datos.gob.es/virtuoso/sparql"
-
-        params = {"query": "SELECT DISTINCT ?dataset WHERE {?dataset a <http://www.w3.org/ns/dcat#Dataset>}"}
+        url = self.domain+"/api/3/action/package_list"
 
         headers = {
-            "Accept": "application/sparql-results+json",
+            #"Accept": "application/sparql-results+json",
             "User-Agent": self.user_agent,
             "Connection": "keep-alive"
         }
         
         try:
-            response = requests.get(url, verify=False, params=params, headers=headers)
+            response = requests.get(url, verify=False, headers=headers)
             response.raise_for_status()
 
-            for result in response.json().get("results", {}).get("bindings", []):
-                ids.append(result.get("dataset", {}).get("value").split("/")[-1])
+            ids = response.json().get("result", [])
 
-            logger("OK", f"Retrieved {len(ids)} packages from 'datos.gob.es'", level="print")
+            logger("OK", f"Retrieved {len(ids)} packages from '{self.domain}'", level="print")
 
         except requests.RequestException as e:
-            logger("ERROR", "Error fetching package list from 'datos.gob.es'", e)
+            logger("ERROR", f"Error fetching package list from '{self.domain}'", e)
         except Exception as e:
             logger("ERROR", "Unexpected error parsing SPARQL response", e)
 
@@ -84,27 +79,22 @@ class DatosGobEsCrawler():
 
             logger("OK", f"Successfully processed package '{metadata_file_name}'", indent=2)
         except Exception as e:
+            traceback.print_exc()
             logger("ERROR", f"Error processing package '{pkg_id}'", e, indent=2)
 
     def parse_resource(self, data, base_name):
         resource = {}
-        
-        resource["name"] = [
-            {"language": t.get("_lang", "unknown"), "value": t.get("_value", "")}
-            for t in data.get("title", [])
-        ]
 
-        resource["downloadUrl"] = data.get("accessURL") or data.get("downloadURL")
-        resource["sourceHost"] = urlparse(resource["downloadUrl"]).netloc
-
-        resource["mediaType"] = data.get("format", {}).get("value")
-        
+        resource["name"] = data.get("name", None)
+        resource["downloadUrl"] = data.get("url", None)
+        resource["sourceHost"] = urlparse(data.get("url", None)).netloc
+        resource["mediaType"] = data.get("media_type", None)
         resource["fileName"] = utils.generate_short_filename(base_name, ext=utils.get_extension_mime(resource["mediaType"]))
     
         return resource
 
     def get_package(self, dataset_id):
-        url = f"https://datos.gob.es/apidata/catalog/dataset/{dataset_id}"
+        url = self.domain + "/api/3/action/package_show?id=" + dataset_id
         headers = {
             "Accept": "application/json",
             "User-Agent": self.user_agent,
@@ -114,24 +104,18 @@ class DatosGobEsCrawler():
         response = requests.get(url, verify=False, headers=headers)
         response.raise_for_status()
 
-        data = response.json()["result"]["items"][0]
+        data = response.json()["result"]
         metadata = {}
 
         metadata["identifier"] = dataset_id
 
-        metadata["img"] = "https://datos.gob.es/sites/default/files/favicon.png"
+        metadata["img"] = "https://www.ckan.org/img/ckan-logo-256.png"
 
-        metadata["title"] = [
-            {"language": t.get("_lang", "unknown"), "value": re.sub(r"\([^)]*\)", "", t.get("_value", ""))}
-            for t in data.get("title", [])
-        ]
+        metadata["title"] = data.get("title", "")
 
-        metadata["fileName"] = f"meta_{utils.generate_short_filename(f"{self.domain}_{metadata["identifier"]}")}.json"
+        metadata["fileName"] = f"meta_{utils.generate_short_filename(f"{self.domain}_{metadata["identifier"]}-")}.json"
 
-        metadata["description"] = [
-            {"language": d.get("_lang", "unknown"), "value": d.get("_value", "")}
-            for d in data.get("description", [])
-        ]
+        metadata["description"] = data.get("notes", "")
 
         metadata["language"] = data.get("language")
         
@@ -143,27 +127,23 @@ class DatosGobEsCrawler():
         else:
             metadata["theme"] = None
 
-        distributions = data.get("distribution", [])
-        if not isinstance(distributions, list):
-            distributions = [distributions]
 
         resource_list = []
-        for idx, res in enumerate(distributions):
+        for idx, res in enumerate(data.get("resources", [])):
             resource_list.append(self.parse_resource(res, f"{metadata["fileName"]}_{idx}"))
 
         metadata["resources"] = resource_list
-        metadata["modified"] = data.get("modified")
-        metadata["issued"] = data.get("issued")
-        metadata["license"] = data.get("license")
+        metadata["modified"] = data.get("metadata_modified")
+        metadata["issued"] = data.get("metadata_created")
+        metadata["license"] = data.get("license_id", "unknown")
         metadata["source"] = self.domain
 
-        temporal = data.get("temporal", {})
         metadata["temporal"] = {
-            "startDate": temporal.get("startDate"),
-            "endDate": temporal.get("endDate")
+            "startDate": data.get("temporal_begin_date", None),
+            "endDate": data.get("temporal_end_date", None)
         }
 
-        spatial = data.get("spatial")
+        spatial = None
         if spatial:
             if isinstance(spatial, list):
                 geo = [s.split("/")[-1].replace("-", " ") for s in spatial]

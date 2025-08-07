@@ -14,9 +14,6 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-d", "--domain", type=str, required=True,
                         help="A data source (Ex. -d https://domain.example)")
-    parser.add_argument("-m", "--save_meta", required=False,
-                        action=argparse.BooleanOptionalAction,
-                        help="Save dataset metadata (default: not save)")
     parser.add_argument("-t", "--data_types", nargs="+", required=False,
                         help="data types to save (Ex. -t xls pdf) (default: all)")
     parser.add_argument("-c", "--categories", nargs="+", required=False,
@@ -39,7 +36,6 @@ def main():
     args = vars(parser.parse_args())
 
     url = args["domain"]
-    save_meta = args["save_meta"]
     d_types = [c.lower() for c in args["data_types"]] if args["data_types"] else None
     categories = [c.lower() for c in args["categories"]] if args["categories"] else None
     d_path = args["path"]
@@ -88,7 +84,6 @@ def main():
                             categories,
                             d_types,
                             partial,
-                            save_meta,
                             avoid_data
                         ): pkg_id for pkg_id in packages_to_process
                     }
