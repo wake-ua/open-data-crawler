@@ -69,7 +69,7 @@ This is an example of how you may give instructions on setting up your project l
 To get a local copy up and running follow these simple example steps.
 
 ### Requirements
-* You need python 3.9 installed
+* You need python 3.12 installed
 
 * Clone the repo
   ```sh
@@ -79,7 +79,6 @@ To get a local copy up and running follow these simple example steps.
   ```sh
   cd opendatacrawler
   ```
-  
 * Install the requirements from requirements.txt
 
   ```sh
@@ -106,27 +105,19 @@ Use this tool is very simple, you only need to specify the data source and the t
 ### Examples
 #### Dowload all data from a portal:
 ```
-python opendatacrawler -d https://data.smartdublin.ie/
-```
-#### Dowload all data with their metadata:
-```
-python opendatacrawler -d https://data.smartdublin.ie/ -m
-```
-#### Dowload partial dataset (first 50 lines for csv files):
-```
-python opendatacrawler -d https://data.smartdublin.ie/ -pd
+python opendatacrawler -d https://datos.gob.es
 ```
 #### Dowload specific fromat data. For example xls and csv:
 ```
-python opendatacrawler -d https://data.smartdublin.ie/ -t xls csv
+python opendatacrawler -d https://datos.gob.es -t xls csv
 ```
-#### Dowload specifics categories. For example xls and csv:
+#### Dowload specifics categories. For example tourism and transport:
 ```
-python opendatacrawler -d https://data.smartdublin.ie/ -c tourism transport
+python opendatacrawler -d https://datos.gob.es -c tourism transport
 ```
 #### Help with all posible commands:
 ```
-python opendatacrawler -h
+python opendatacrawler -h 
 ```
 
 
@@ -189,12 +180,10 @@ Distributed under the MIT License. See `LICENSE` for more information.
 <!-- CONTACT -->
 ## Contact
 
-
-Paula  \
-
+Paula Margarita García-Tapia Mateo \
 ✉️ paula.garciatapia@ua.es
 
-🙋‍♂️Alberto Berenguer Pastor \
+Alberto Berenguer Pastor \
 ✉️ alberto.berenguer@ua.es
 
 <p align="right">(<a href="#top">back to top</a>)</p>
