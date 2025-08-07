@@ -23,8 +23,8 @@ class OpenDataCrawler():
     
         self.data_types = [x.lower() for x in data_types] if data_types else None
 
-        self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-        #self.user_agent = "curl/8.5.0"
+        #self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+        self.user_agent = "curl/8.5.0"
         
         logger("...", f"Detecting DMS for domain: {self.domain}")
         self.detect_dms()
@@ -54,7 +54,6 @@ class OpenDataCrawler():
             
             try:
                 response = requests.get(full_url, headers=headers, verify=False)
-                print(f"Response from {dms_name}: {response.status_code}")
                 response.raise_for_status()
                
                 if "text/html" not in response.headers.get("Content-Type", ""):
