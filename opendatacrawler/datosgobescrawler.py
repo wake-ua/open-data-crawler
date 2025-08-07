@@ -125,7 +125,7 @@ class DatosGobEsCrawler():
 
         data = response.json()["result"]["items"][0]
         metadata = {}
-
+        print(data)
         metadata["identifier"] = dataset_id
         metadata["fileName"] = metadata_file_name
 
