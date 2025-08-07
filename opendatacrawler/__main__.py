@@ -94,7 +94,7 @@ def main():
                     }
 
                     try:
-                        for future in tqdm(as_completed(futures), total=len(futures), desc="Processing...", colour="green"):
+                        for future in tqdm(as_completed(futures), total=len(packages), initial=len(packages) - len(packages_to_process), desc="Processing...", colour="green"):
                             future.result()
                     except KeyboardInterrupt:
                         logger("WARNING", "Interrupt received. Waiting for threads to finish gracefully... (this may take a while if many threads are active)", level="print")

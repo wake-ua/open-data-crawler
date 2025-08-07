@@ -136,13 +136,12 @@ _For more examples, please refer to the [Documentation](https://example.com)_
 
 
 ## Currently supported portals and sites
-
-- [x] CKAN 
-- [x] Socrata
-- [x] https://ec.europa.eu/eurostat (LIMITED ⚠️)*
-- [x] https://datacatalogapi.worldbank.org/ (LIMITED ⚠️)*
 - [x] https://datos.gob.es
-- [x] OpenDataSoft
+- [] CKAN 
+- [] Socrata
+- [] https://ec.europa.eu/eurostat
+- [] https://datacatalogapi.worldbank.org/
+- [] OpenDataSoft
 
 \* Works with restrictions or download limitations
 
@@ -190,8 +189,12 @@ Distributed under the MIT License. See `LICENSE` for more information.
 <!-- CONTACT -->
 ## Contact
 
+
+Paula  \
+
+✉️ paula.garciatapia@ua.es
+
 🙋‍♂️Alberto Berenguer Pastor \
-📱[@aberenguerpas](https://twitter.com/aberenguerpas) \
 ✉️ alberto.berenguer@ua.es
 
 <p align="right">(<a href="#top">back to top</a>)</p>
