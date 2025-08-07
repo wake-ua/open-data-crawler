@@ -119,7 +119,7 @@ _For more examples, please refer to the [Documentation](https://example.com)_
 
 ## Currently supported portals and sites
 - [x] https://datos.gob.es
-- [] CKAN 
+- [x] CKAN 
 - [] Socrata
 - [] https://ec.europa.eu/eurostat
 - [] https://datacatalogapi.worldbank.org/

@@ -89,7 +89,15 @@ class CkanCrawler():
         resource["downloadUrl"] = data.get("url", None)
         resource["sourceHost"] = urlparse(data.get("url", None)).netloc
         resource["mediaType"] = data.get("media_type", None)
-        resource["fileName"] = utils.generate_short_filename(base_name, ext=utils.get_extension_mime(resource["mediaType"]))
+
+        ext = data.get("media_type", None) 
+        if ext:
+            ext = utils.get_extension_mime(ext)
+        else:
+            ext =  data.get("format").lower()
+
+        resource["mediaType"] = ext
+        resource["fileName"] = utils.generate_short_filename(base_name, ext=ext)
     
         return resource
 
