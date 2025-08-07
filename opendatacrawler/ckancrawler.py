@@ -15,7 +15,7 @@ class CkanCrawler():
         url = self.domain+"/api/3/action/package_list"
 
         headers = {
-            #"Accept": "application/sparql-results+json",
+            "Accept": "application/json",
             "User-Agent": self.user_agent,
             "Connection": "keep-alive"
         }
@@ -88,15 +88,10 @@ class CkanCrawler():
         resource["name"] = data.get("name", None)
         resource["downloadUrl"] = data.get("url", None)
         resource["sourceHost"] = urlparse(data.get("url", None)).netloc
-        resource["mediaType"] = data.get("media_type", None)
 
-        ext = data.get("media_type", None) 
-        if ext:
-            ext = utils.get_extension_mime(ext)
-        else:
-            ext =  data.get("format").lower()
-
-        resource["mediaType"] = ext
+        resource["mediaType"] = data.get("media_type")
+        
+        ext = utils.get_extension_mime(resource["mediaType"]) if resource["mediaType"] else data.get("format", "").lower()
         resource["fileName"] = utils.generate_short_filename(base_name, ext=ext)
     
         return resource
@@ -151,7 +146,7 @@ class CkanCrawler():
             "endDate": data.get("temporal_end_date", None)
         }
 
-        spatial = None
+        spatial = data.get("spatial")
         if spatial:
             if isinstance(spatial, list):
                 geo = [s.split("/")[-1].replace("-", " ") for s in spatial]
