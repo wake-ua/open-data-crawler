@@ -3,9 +3,10 @@ import requests
 import humanize
 import json
 from frictionless import describe
-import utils
-from setup_logger import logger
-from datosgobescrawler import DatosGobEsCrawler
+from opendatacrawler import utils
+from opendatacrawler.setup_logger import logger
+from opendatacrawler.datosgobescrawler import DatosGobEsCrawler
+from opendatacrawler.ckancrawler import CkanCrawler
 
 class OpenDataCrawler():
     def __init__(self, domain, path=None, data_types=None, sec=None):
@@ -22,8 +23,8 @@ class OpenDataCrawler():
     
         self.data_types = [x.lower() for x in data_types] if data_types else None
 
-        #self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-        self.user_agent = "curl/8.5.0"
+        self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+        #self.user_agent = "curl/8.5.0"
         
         logger("...", f"Detecting DMS for domain: {self.domain}")
         self.detect_dms()
@@ -42,7 +43,6 @@ class OpenDataCrawler():
         }
         
         base_url = self.domain.rstrip("/")
-
         headers = {
             "Accept": "application/json",
             "User-Agent": self.user_agent
@@ -50,13 +50,13 @@ class OpenDataCrawler():
         
         for dms_name, endpoint in dms_endpoints.items():
             full_url = base_url + endpoint
-
             logger("...", f"Checking DMS: '{dms_name}' at '{full_url}'", level="print")
             
             try:
                 response = requests.get(full_url, headers=headers, verify=False)
+                print(f"Response from {dms_name}: {response.status_code}")
                 response.raise_for_status()
-        
+               
                 if "text/html" not in response.headers.get("Content-Type", ""):
                     self.dms = dms_name
                     logger("OK", f"DMS detected: '{dms_name}'")
@@ -69,7 +69,7 @@ class OpenDataCrawler():
                 logger("ERROR", f"Failed to reach '{full_url}'", e)
 
         dms_classes = {
-            #"CKAN": CkanCrawler,
+            "CKAN": CkanCrawler,
             #"Socrata": SocrataCrawler,
             #"WorldBank": WorldBankCrawler,
             #"EuroStat": EurostatCrawler,
@@ -91,7 +91,7 @@ class OpenDataCrawler():
                     elif self.dms in ["Socrata", "WorldBank", "dataEuropa", "datosGobEs"]:
                         self.dms_instance = cls(self.domain, self.data_types, self.user_agent)
                     else:
-                        self.dms_instance = cls(self.domain, self.data_types, self.save_path,self.user_agent)
+                        self.dms_instance = cls(self.domain, self.data_types, self.user_agent)
                 except Exception as e:
                     logger("ERROR", f"Error instantiating DMS class for '{self.dms}'", e)
         else:

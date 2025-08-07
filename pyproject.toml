@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opendatacrawler"
+version = "0.1.0"
+description = "Crawler for open data portals"
+authors = [
+  { name="Alberto Berenguer Pastor", email="alberto.berenguer@ua.es" },
+  { name="Paula Margarita García-Tapia Mateo", email="paula.garciatapia@ua.es"}
+  ]
+requires-python = ">=3.12"
+dependencies = [
+  "requests",
+  "tqdm",
+  "humanize",
+  "frictionless",
+  "chardet",
+  "w3lib",
+  "url-normalize"
+]
+
+[project.scripts]
+opendatacrawler = "opendatacrawler.__main__:main"
+
+[tool.setuptools]
+packages = ["opendatacrawler"]
+
+[tool.setuptools.package-data]
+opendatacrawler = ["intro.txt","config.ini"]

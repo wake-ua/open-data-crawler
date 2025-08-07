@@ -6,9 +6,9 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-import utils
-from setup_logger import logger
-from odcrawler import OpenDataCrawler
+from opendatacrawler import utils
+from opendatacrawler.setup_logger import logger
+from opendatacrawler.odcrawler import OpenDataCrawler
 
 def main():
     parser = argparse.ArgumentParser()
@@ -92,7 +92,7 @@ def main():
                     }
 
                     try:
-                        for future in tqdm(as_completed(futures), total=len(futures), desc="Processing...", colour="green"):
+                        for future in tqdm(as_completed(futures), total=len(packages), initial=len(packages) - len(packages_to_process), desc="Processing...", colour="green"):
                             future.result()
                     except KeyboardInterrupt:
                         logger("WARNING", "Interrupt received. Waiting for threads to finish gracefully... (this may take a while if many threads are active)", level="print")
