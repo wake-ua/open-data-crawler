@@ -1,6 +1,7 @@
 import requests
 import os
 import re
+import json
 from urllib.parse import urlparse
 import utils
 from setup_logger import logger
@@ -65,23 +66,30 @@ class DatosGobEsCrawler():
                 resource["path"] = os.path.relpath(path, start=os.getcwd())
                 logger("OK", f"Resource '{resource_file_name}' from package '{metadata_file_name}' saved", indent=4)
 
-    def process_package(self, pkg_id, categories, d_types, partial, save_meta, avoid_data, save_dataset, save_metadata):
-        metadata_file_name = None
+    def process_package(self, pkg_id, categories, d_types, partial, avoid_data, save_dataset, save_metadata, save_path):
+        metadata_file_name = f"meta_{utils.generate_short_filename(f"{self.domain}_{pkg_id}-")}.json"
         try:
-            package = self.get_package(pkg_id)
+            metadata_path = os.path.join(save_path, metadata_file_name)
+
+            if not os.path.exists(metadata_path):
+                package = self.get_package(pkg_id, metadata_file_name)
+            else:
+                logger("INFO", f"Metadata file already exists for package '{metadata_file_name}', loading and updating it if needed.", indent=2)
+                with open(metadata_path, "r", encoding="utf-8") as f:
+                    package = json.load(f)  
+
             if not package:
                 return
             
-            metadata_file_name = package["fileName"]
             exist_cat = not categories or (package.get("theme") and any(cat in package["theme"] for cat in categories))
             logger("...", f"Processing package: '{metadata_file_name}'", indent=2)
 
             if exist_cat and package.get("resources"):
                 for resource in package["resources"]:
-                    self.process_resource(resource, metadata_file_name, d_types, partial, avoid_data, save_dataset)
+                    if not resource.get("path"):
+                        self.process_resource(resource, metadata_file_name, d_types, partial, avoid_data, save_dataset)
 
-                if save_meta:
-                    save_metadata(package)
+                save_metadata(package)
 
             logger("OK", f"Successfully processed package '{metadata_file_name}'", indent=2)
         except Exception as e:
@@ -104,7 +112,7 @@ class DatosGobEsCrawler():
     
         return resource
 
-    def get_package(self, dataset_id):
+    def get_package(self, dataset_id, metadata_file_name):
         url = f"https://datos.gob.es/apidata/catalog/dataset/{dataset_id}"
         headers = {
             "Accept": "application/json",
@@ -119,6 +127,7 @@ class DatosGobEsCrawler():
         metadata = {}
 
         metadata["identifier"] = dataset_id
+        metadata["fileName"] = metadata_file_name
 
         metadata["img"] = "https://datos.gob.es/sites/default/files/favicon.png"
 
@@ -127,7 +136,6 @@ class DatosGobEsCrawler():
             for t in data.get("title", [])
         ]
 
-        metadata["fileName"] = f"meta_{utils.generate_short_filename(f"{self.domain}_{metadata["identifier"]}-")}.json"
 
         metadata["description"] = [
             {"language": d.get("_lang", "unknown"), "value": d.get("_value", "")}

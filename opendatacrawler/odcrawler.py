@@ -197,5 +197,5 @@ class OpenDataCrawler():
         package = self.dms_instance.get_package(id)
         return package
     
-    def process_package(self, pkg_id, categories, d_types, partial, save_meta, avoid_data):
-        return self.dms_instance.process_package(pkg_id, categories, d_types, partial, save_meta, avoid_data, self.save_dataset, self.save_metadata)
+    def process_package(self, pkg_id, categories, d_types, partial, avoid_data):
+        return self.dms_instance.process_package(pkg_id, categories, d_types, partial, avoid_data, self.save_dataset, self.save_metadata, self.save_path)
