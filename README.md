@@ -69,30 +69,21 @@ This is an example of how you may give instructions on setting up your project l
 To get a local copy up and running follow these simple example steps.
 
 ### Requirements
-* You need python 3.12 installed
-
-* Clone the repo
-  ```sh
-  git clone https://github.com/aberenguerpas/opendatacrawler.git
-  ```
-* Move to root directory
-  ```sh
-  cd opendatacrawler
-  ```
-* Install the requirements from requirements.txt
-
-  ```sh
-  pip3 install -r requirements.txt
-  ```
+* You need python 3.9>= installed
 
 * Socrata portals requiere an app token to avoid throttling limits, you can obtain an api key [here](https://support.socrata.com/hc/en-us/articles/210138558-Generating-an-App-Token)
 and set on ```config.ini```
 
 ### Installation
 
-1. Run from the project root
+1. Clone the repo
+  ```sh
+  git clone https://github.com/aberenguerpas/opendatacrawler.git
+  ```
+
+2. Run from the project root
    ```sh
-   python3 setup.py install 
+   python install .
    ```
 <p align="right">(<a href="#top">back to top</a>)</p>
 

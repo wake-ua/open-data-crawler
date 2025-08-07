@@ -2,8 +2,8 @@ import requests
 import os
 import re
 from urllib.parse import urlparse
-import utils
-from setup_logger import logger
+from opendatacrawler import utils
+from opendatacrawler.setup_logger import logger
 
 class DatosGobEsCrawler():
     def __init__(self, domain, data_types, user_agent):

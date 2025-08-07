@@ -3,9 +3,9 @@ import requests
 import humanize
 import json
 from frictionless import describe
-import utils
-from setup_logger import logger
-from datosgobescrawler import DatosGobEsCrawler
+from opendatacrawler import utils
+from opendatacrawler.setup_logger import logger
+from opendatacrawler.datosgobescrawler import DatosGobEsCrawler
 
 class OpenDataCrawler():
     def __init__(self, domain, path=None, data_types=None, sec=None):

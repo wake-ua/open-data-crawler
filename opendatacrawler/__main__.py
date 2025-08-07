@@ -6,9 +6,9 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-import utils
-from setup_logger import logger
-from odcrawler import OpenDataCrawler
+from opendatacrawler import utils
+from opendatacrawler.setup_logger import logger
+from opendatacrawler.odcrawler import OpenDataCrawler
 
 def main():
     parser = argparse.ArgumentParser()

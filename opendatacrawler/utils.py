@@ -4,9 +4,8 @@ import hashlib
 import os
 from w3lib.url import url_query_cleaner
 from url_normalize import url_normalize
-import threading
 import json
-from setup_logger import logger
+from opendatacrawler.setup_logger import logger
 
 def print_intro():
     with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "intro.txt"), "r", encoding="utf-8") as f:
