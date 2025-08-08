@@ -23,8 +23,7 @@ class OpenDataCrawler():
     
         self.data_types = [x.lower() for x in data_types] if data_types else None
 
-        #self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-        self.user_agent = "curl/8.5.0"
+        self.user_agent = None
         
         logger("...", f"Detecting DMS for domain: {self.domain}")
         self.detect_dms()
@@ -43,30 +42,35 @@ class OpenDataCrawler():
         }
         
         base_url = self.domain.rstrip("/")
+
         headers = {
             "Accept": "application/json",
-            "User-Agent": self.user_agent
         }
-        
+
         for dms_name, endpoint in dms_endpoints.items():
             full_url = base_url + endpoint
             logger("...", f"Checking DMS: '{dms_name}' at '{full_url}'", level="print")
-            
+
             try:
-                response = requests.get(full_url, headers=headers, verify=False)
+                response, self.user_agent = utils.make_request(full_url, self.user_agent, headers=headers)
+                if not response:
+                    logger("ERROR", f"Error checking DMS for '{dms_name}': no working User-Agent found")
+                    continue
+                
                 response.raise_for_status()
-               
+
                 if "text/html" not in response.headers.get("Content-Type", ""):
                     self.dms = dms_name
-                    logger("OK", f"DMS detected: '{dms_name}'")
+                    logger("OK", f"DMS detected: '{dms_name}'", level="print")
 
                     if not utils.create_folder(self.save_path):
                         logger("ERROR", f"Can't create folder '{self.save_path}'")
-                        return
                     break
+                
             except requests.RequestException as e:
                 logger("ERROR", f"Failed to reach '{full_url}'", e)
-
+                break
+            
         dms_classes = {
             "CKAN": CkanCrawler,
             #"Socrata": SocrataCrawler,
@@ -94,7 +98,7 @@ class OpenDataCrawler():
                 except Exception as e:
                     logger("ERROR", f"Error instantiating DMS class for '{self.dms}'", e)
         else:
-            logger("ERROR", f"No accessible or supported DMS detected at '{self.domain}", level="print")
+            logger("ERROR", f"No accessible or supported DMS detected at '{self.domain}'", level="print")
 
     def save_dataset(self, url, file_name, partial=False):
         logger("...", f"Attempting to download resource '{file_name}' from: {url}", indent=2)
@@ -103,46 +107,51 @@ class OpenDataCrawler():
             logger("WARNING", f"Resource '{file_name}' skipped (HTML detected): {url}", indent=2)
             return None
 
-        headers = {
-            "Accept": "*/*",
-            "User-Agent": self.user_agent,
-            "Connection": "keep-alive"
-        }
+        for user_agent in utils.get_user_agent_list(self.user_agent):
+            self.user_agent = user_agent
+            headers = {
+                "Accept": "*/*",
+                "User-Agent": self.user_agent,
+                "Connection": "keep-alive"
+            }
 
-        try:
-            with requests.get(url, stream=True, timeout=self.max_sec, verify=False, headers=headers) as response:
-                response.raise_for_status()
+            try:
+                with requests.get(url, stream=True, timeout=self.max_sec, verify=False, headers=headers) as response:
+                    if response.status_code == 403:
+                        logger("WARNING", f"Forbidden with User-Agent: {self.user_agent} - trying next one", indent=2)
+                        continue
 
-                path = os.path.join(self.save_path, file_name)
-                total_bytes = 0
-                line_limit = 50
-                lines_downloaded = 0
+                    response.raise_for_status()
 
-                with open(path, "wb") as outfile:
-                    for chunk in response.iter_content(chunk_size=1024):
-                        if not chunk:
-                            continue
+                    path = os.path.join(self.save_path, file_name)
+                    total_bytes = 0
+                    line_limit = 50
+                    lines_downloaded = 0
 
-                        outfile.write(chunk)
-                        total_bytes += len(chunk)
+                    with open(path, "wb") as outfile:
+                        for chunk in response.iter_content(chunk_size=1024):
+                            if not chunk:
+                                continue
 
-                        if partial:
-                            lines_downloaded += chunk.count(b"\n")
-                            if lines_downloaded >= line_limit:
-                                logger("OK", f"Partial content downloaded (~{line_limit} lines) for '{file_name}'", indent=2)
-                                break
+                            outfile.write(chunk)
+                            total_bytes += len(chunk)
 
-                if not partial and total_bytes == 0:
-                    logger("ERROR", f"No data downloaded for resource '{file_name}'", indent=2)
-                    return None
+                            if partial:
+                                lines_downloaded += chunk.count(b"\n")
+                                if lines_downloaded >= line_limit:
+                                    logger("OK", f"Partial content downloaded (~{line_limit} lines) for '{file_name}'", indent=2)
+                                    break
 
-                return path
+                    if not partial and total_bytes == 0:
+                        logger("ERROR", f"No data downloaded for resource '{file_name}'", indent=2)
+                        return None
 
-        except requests.exceptions.HTTPError as e:
-            logger("ERROR", f"HTTP error downloading '{file_name}' from '{url}'", e, indent=2)
-        except Exception as e:
-            logger("ERROR", f"Exception downloading '{file_name}' from '{url}'", e, indent=2)
-        
+                    return path
+
+            except requests.exceptions.RequestException as e:
+                logger("ERROR", f"Error downloading '{file_name}'", e, indent=2)
+                break
+
         return None
 
     def save_metadata(self, data):
@@ -156,26 +165,29 @@ class OpenDataCrawler():
 
                     if dataset_path and os.path.exists(dataset_path):
                         try:
-                            resource["size"] = humanize.naturalsize(os.path.getsize(dataset_path))
-                            encodings_to_try = [
-                                utils.detect_encoding(dataset_path) or "utf-8",
-                                "latin1",
-                                "iso-8859-1"
-                            ]
+                            if "size" not in resource:
+                                resource["size"] = humanize.naturalsize(os.path.getsize(dataset_path))
+                                
+                            if "schema" not in resource:
+                                encoding_options = [
+                                    utils.detect_encoding(dataset_path) or "utf-8",
+                                    "latin1",
+                                    "iso-8859-1"
+                                ]
 
-                            for encoding in encodings_to_try:
-                                try:
-                                    resource["encoding"] = encoding
-                                    resource_metadata = describe(dataset_path, encoding=encoding).to_dict()
-                                    schema = resource_metadata.get("schema")
+                                for encoding in encoding_options:
+                                    try:
+                                        resource["encoding"] = encoding
+                                        resource_metadata = describe(dataset_path, encoding=encoding).to_dict()
+                                        schema = resource_metadata.get("schema")
 
-                                    if schema:
-                                        resource["schema"] = schema
+                                        if schema:
+                                            resource["schema"] = schema
 
-                                    logger("OK", f"Schema extracted from: {dataset_path} (encoding: {encoding})", indent=3)
-                                    break
-                                except Exception:
-                                    continue
+                                        logger("OK", f"Schema extracted from: {dataset_path} (encoding: {encoding})", indent=3)
+                                        break
+                                    except Exception:
+                                        continue
 
                         except Exception as e:
                             logger("ERROR", f"Error extracting schema from: {dataset_path}", e, indent=3)

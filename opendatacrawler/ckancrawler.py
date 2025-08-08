@@ -4,6 +4,8 @@ from urllib.parse import urlparse
 from opendatacrawler import utils
 from opendatacrawler.setup_logger import logger
 import traceback
+import json
+
 class CkanCrawler():
     def __init__(self, domain, data_types, user_agent):
         self.domain = domain.rstrip("/")
@@ -16,12 +18,15 @@ class CkanCrawler():
 
         headers = {
             "Accept": "application/json",
-            "User-Agent": self.user_agent,
             "Connection": "keep-alive"
         }
         
         try:
-            response = requests.get(url, verify=False, headers=headers)
+            response, self.user_agent = utils.make_request(url, self.user_agent, headers=headers)
+            if not response:
+                logger("ERROR", f"Error fetching package list from '{self.domain}': no working User-Agent found")
+                return ids
+            
             response.raise_for_status()
 
             ids = response.json().get("result", [])
@@ -31,7 +36,7 @@ class CkanCrawler():
         except requests.RequestException as e:
             logger("ERROR", f"Error fetching package list from '{self.domain}'", e)
         except Exception as e:
-            logger("ERROR", "Unexpected error parsing SPARQL response", e)
+            logger("ERROR", f"Unexpected error parsing response from '{self.domain}'", e)
 
         return ids
     
@@ -45,7 +50,7 @@ class CkanCrawler():
             logger("WARNING", f"Skipping resource '{resource_file_name}' of package '{metadata_file_name}'", indent=4)
             return
 
-        download_url = resource.get("downloadUrl")
+        download_url = resource.get("downloadURL")
         media_type = resource.get("mediaType")
 
         if not download_url or not media_type:
@@ -60,33 +65,40 @@ class CkanCrawler():
                 resource["path"] = os.path.relpath(path, start=os.getcwd())
                 logger("OK", f"Resource '{resource_file_name}' from package '{metadata_file_name}' saved", indent=4)
 
-    def process_package(self, pkg_id, categories, d_types, partial, avoid_data, save_dataset, save_metadata):
-        metadata_file_name = None
+    def process_package(self, pkg_id, categories, d_types, partial, avoid_data, save_dataset, save_metadata, save_path):
+        metadata_file_name = f"meta_{utils.generate_short_filename(f"{self.domain}_{pkg_id}")}.json"
         try:
-            package = self.get_package(pkg_id)
+            metadata_path = os.path.join(save_path, metadata_file_name)
+
+            if not os.path.exists(metadata_path):
+                package = self.get_package(pkg_id, metadata_file_name)
+            else:
+                logger("INFO", f"Metadata file already exists for package '{metadata_file_name}', loading and updating it if needed.", indent=2)
+                with open(metadata_path, "r", encoding="utf-8") as f:
+                    package = json.load(f)  
+
             if not package:
                 return
             
-            metadata_file_name = package["fileName"]
             exist_cat = not categories or (package.get("theme") and any(cat in package["theme"] for cat in categories))
             logger("...", f"Processing package: '{metadata_file_name}'", indent=2)
 
             if exist_cat and package.get("resources"):
                 for resource in package["resources"]:
-                    self.process_resource(resource, metadata_file_name, d_types, partial, avoid_data, save_dataset)
+                    if not resource.get("path"):
+                        self.process_resource(resource, metadata_file_name, d_types, partial, avoid_data, save_dataset)
 
                 save_metadata(package)
 
             logger("OK", f"Successfully processed package '{metadata_file_name}'", indent=2)
         except Exception as e:
-            traceback.print_exc()
             logger("ERROR", f"Error processing package '{pkg_id}'", e, indent=2)
 
     def parse_resource(self, data, base_name):
         resource = {}
 
         resource["name"] = data.get("name", None)
-        resource["downloadUrl"] = data.get("url", None)
+        resource["downloadURL"] = data.get("url", None)
         resource["sourceHost"] = urlparse(data.get("url", None)).netloc
 
         resource["mediaType"] = data.get("media_type")
@@ -96,28 +108,30 @@ class CkanCrawler():
     
         return resource
 
-    def get_package(self, dataset_id):
-        url = self.domain + "/api/3/action/package_show?id=" + dataset_id
+    def get_package(self, dataset_id, metadata_file_name):
+        url = f"{self.domain}/api/3/action/package_show?id={dataset_id}"
         headers = {
             "Accept": "application/json",
-            "User-Agent": self.user_agent,
             "Connection": "keep-alive"
         }
 
-        response = requests.get(url, verify=False, headers=headers)
+        response, self.user_agent = utils.make_request(url, self.user_agent, headers=headers)
+        if not response:
+            logger("ERROR", f"No working User-Agent for URL '{url}'")
+            return None
+        
         response.raise_for_status()
 
         data = response.json()["result"]
         metadata = {}
 
         metadata["identifier"] = dataset_id
+        metadata["accessURL"] = url
+        metadata["fileName"] = metadata_file_name
 
         metadata["img"] = "https://www.ckan.org/img/ckan-logo-256.png"
 
         metadata["title"] = data.get("title", "")
-
-        metadata["fileName"] = f"meta_{utils.generate_short_filename(f"{self.domain}_{metadata["identifier"]}-")}.json"
-
         metadata["description"] = data.get("notes", "")
 
         metadata["language"] = data.get("language")
@@ -129,7 +143,6 @@ class CkanCrawler():
             metadata["theme"] = theme.split("/")[-1]
         else:
             metadata["theme"] = None
-
 
         resource_list = []
         for idx, res in enumerate(data.get("resources", [])):
@@ -149,8 +162,7 @@ class CkanCrawler():
         spatial = data.get("spatial")
         if spatial:
             if isinstance(spatial, list):
-                geo = [s.split("/")[-1].replace("-", " ") for s in spatial]
-                metadata["geo"] = "España" if "España" in geo else geo
+                metadata["geo"] = [s.split("/")[-1].replace("-", " ") for s in spatial]
             else:
                 metadata["geo"] = spatial.split("/")[-1].replace("-", " ")
 
