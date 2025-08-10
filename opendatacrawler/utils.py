@@ -6,7 +6,6 @@ from w3lib.url import url_query_cleaner
 from url_normalize import url_normalize
 import json
 import requests
-
 from opendatacrawler.setup_logger import logger
 
 USER_AGENTS = [

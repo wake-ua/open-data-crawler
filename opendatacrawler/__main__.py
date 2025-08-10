@@ -64,7 +64,8 @@ def main():
          
             if resume_data:
                 logger("OK", f"Loaded resume with {len(resume_data)} packages and {len(downloaded_before_res)} downloaded resources", level="print")
-                logger("...", f"Reattempting {len(failed_before_pkgs)} packages with {len(failed_before_res)} failed resources of accepted types ({d_types})", level="print")
+                if failed_before_pkgs:
+                    logger("...", f"Reattempting {len(failed_before_pkgs)} packages with {len(failed_before_res)} failed resources of accepted types ({d_types})", level="print")
                 logger(None, "=" * 80, level="print")
 
             logger("...", f"Obtaining packages from '{url}'...", level="print")

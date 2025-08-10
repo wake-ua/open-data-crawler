@@ -29,7 +29,7 @@ class DatosGobEsCrawler():
         
         try:
             response, self.user_agent = utils.make_request(url, self.user_agent, headers=headers, params=params)
-            if not response:
+            if not self.user_agent:
                 logger("ERROR", f"Error fetching package list from '{self.domain}': no working User-Agent found")
                 return ids
             
@@ -121,7 +121,7 @@ class DatosGobEsCrawler():
         }
 
         response, self.user_agent = utils.make_request(url, self.user_agent, headers=headers)
-        if not response:
+        if not self.user_agent:
             logger("ERROR", f"No working User-Agent for URL '{url}'")
             return None
         

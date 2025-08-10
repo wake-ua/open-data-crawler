@@ -53,7 +53,7 @@ class OpenDataCrawler():
 
             try:
                 response, self.user_agent = utils.make_request(full_url, self.user_agent, headers=headers)
-                if not response:
+                if not self.user_agent:
                     logger("ERROR", f"Error checking DMS for '{dms_name}': no working User-Agent found")
                     continue
                 
