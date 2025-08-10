@@ -149,7 +149,7 @@ class OpenDataCrawler():
                     return path
 
             except requests.exceptions.RequestException as e:
-                logger("ERROR", f"Error downloading '{file_name}'", e, indent=2)
+                logger("ERROR", f"Error downloading '{file_name}' ({url})", e, indent=2)
                 break
 
         return None
