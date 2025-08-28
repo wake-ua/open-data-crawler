@@ -39,7 +39,6 @@ def logger(tag=None, text="", error=None, indent=None, level="log"):
         else:
             logger_obj.debug(final_message)
 
-    #if level == "print" or tag in ["ERROR", "WARNING"]:
     if level == "print":
         print(f"{final_message}")
 
@@ -49,11 +48,19 @@ logger_obj.setLevel(logging.DEBUG)
 log_dir = os.path.join(os.getcwd(), "logs")
 os.makedirs(log_dir, exist_ok=True)
 
-today = datetime.now().strftime("%Y%m%d")
-log_file_path = os.path.join(log_dir, f"debug_{today}.log")
+log_file_path = os.path.join(log_dir, f"debug_{datetime.now().strftime("%Y_%m_%d_%H%Mh")}.log")
 
 file_handler = logging.FileHandler(log_file_path, mode="a", encoding="utf-8")
-formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+formatter = logging.Formatter("%(asctime)s %(levelname)-7s %(threadName)s - %(message)s")
 file_handler.setFormatter(formatter)
 
+class HideMainThreadFilter(logging.Filter):
+    def filter(self, record):
+        if record.threadName == "MainThread":
+            record.threadName = ""
+        else:
+            record.threadName = f" [{record.threadName}]"
+        return True
+
+file_handler.addFilter(HideMainThreadFilter())
 logger_obj.addHandler(file_handler)

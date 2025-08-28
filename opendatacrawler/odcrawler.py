@@ -1,8 +1,8 @@
+import json
 import os
 import requests
 import humanize
-import json
-from frictionless import describe
+from frictionless import describe, Dialect
 from opendatacrawler import utils
 from opendatacrawler.setup_logger import logger
 from opendatacrawler.datosgobescrawler import DatosGobEsCrawler
@@ -14,17 +14,17 @@ class OpenDataCrawler():
         self.dms = None
         self.dms_instance = None
         self.max_sec = sec
-        
+
         base_path = path or os.path.join(os.getcwd(), "data")
         utils.create_folder(base_path)
-        
+
         clean_domain = utils.clean_url(self.domain)
         self.save_path = os.path.join(base_path, clean_domain)
-    
+
         self.data_types = [x.lower() for x in data_types] if data_types else None
 
         self.user_agent = None
-        
+
         logger("...", f"Detecting DMS for domain: {self.domain}")
         self.detect_dms()
 
@@ -40,7 +40,7 @@ class OpenDataCrawler():
             "OpenDataSoft": "/api/v2/catalog",
             "INE": "/wstempus/js/ES/OPERACIONES_DISPONIBLES"
         }
-        
+
         base_url = self.domain.rstrip("/")
 
         headers = {
@@ -53,7 +53,7 @@ class OpenDataCrawler():
 
             try:
                 response, self.user_agent = utils.make_request(full_url, self.user_agent, headers=headers)
-                if not self.user_agent:
+                if not response:
                     logger("ERROR", f"Error checking DMS for '{dms_name}': no working User-Agent found")
                     continue
                 
@@ -165,32 +165,92 @@ class OpenDataCrawler():
 
                     if dataset_path and os.path.exists(dataset_path):
                         try:
-                            if "size" not in resource:
-                                resource["size"] = humanize.naturalsize(os.path.getsize(dataset_path))
-                                
-                            if "schema" not in resource:
-                                encoding_options = [
-                                    utils.detect_encoding(dataset_path) or "utf-8",
-                                    "latin1",
-                                    "iso-8859-1"
-                                ]
-
-                                for encoding in encoding_options:
-                                    try:
-                                        resource["encoding"] = encoding
-                                        resource_metadata = describe(dataset_path, encoding=encoding).to_dict()
-                                        schema = resource_metadata.get("schema")
-
-                                        if schema:
-                                            resource["schema"] = schema
-
-                                        logger("OK", f"Schema extracted from: {dataset_path} (encoding: {encoding})", indent=3)
-                                        break
-                                    except Exception:
-                                        continue
-
+                            mismatch, guessed_extension, detected_mime, no_data = utils.check_mimetype_mismatch(dataset_path)
                         except Exception as e:
-                            logger("ERROR", f"Error extracting schema from: {dataset_path}", e, indent=3)
+                            logger("ERROR", f"Error while checking MIME type for: {dataset_path}", e, indent=3)
+                            continue
+                        try:  
+                            encoding = raw = raw_flags = None
+                            if detected_mime.startswith("text/") or detected_mime in {"application/json", "application/xml"}:
+                                if no_data:
+                                    encoding = "utf-8"
+                                else:
+                                    encoding, raw, raw_flags, no_data = utils.detect_best_encoding(dataset_path)
+
+                                resource["encoding"] = encoding
+                        except Exception as e:
+                            logger("ERROR", f"Error while detecting encoding for: {dataset_path}", e, indent=3)
+                            continue
+
+                        if mismatch or raw or raw_flags or no_data:
+                            resource["crawlerChangesInfo"] = {
+                                "resourceMetadataChanges": [],
+                                "binaryFileChanges": [],
+                                "fileInfo": []
+                            }
+
+                            if mismatch:
+                                logger("WARNING", f"Detected a media type mismatch for file '{dataset_path}', was declared as '{resource.get('mediaType')}', but detected as '{detected_mime}'")
+                                utils.fix_mime_mismatch(resource, guessed_extension, detected_mime)
+                                dataset_path = resource.get("path")
+                            if no_data:
+                                logger("WARNING", f"File '{dataset_path}' has no data or no valid content")
+                                utils.add_tag_explanations(resource, "fileInfo", "no_data")
+                            if raw_flags:
+                                utils.add_tag_explanations(resource, "binaryFileChanges", raw_flags, raw_flags)
+                            
+                            if raw:
+                                with open(dataset_path, "wb") as f:
+                                    f.write(raw)
+                                logger("OK", f"Overwrote cleaned content into '{dataset_path}'")
+                            
+                        if "size" not in resource:
+                            resource["size"] = humanize.naturalsize(os.path.getsize(dataset_path))
+
+                        if dataset_path.endswith((".csv", ".tsv")) and not no_data:
+                            with open(dataset_path, "rb") as f:
+                                raw = f.read()
+
+                            decoded_content = utils.safe_decode(raw, resource["encoding"])
+                            try:
+                                lines_decoded_content, reconstructed_lines = utils.reconstruct_lines(decoded_content)
+                                decoded_content = "\n".join(lines_decoded_content)
+                                if reconstructed_lines > 0:
+                                    with open(dataset_path, "wb") as f:
+                                        f.write(decoded_content.encode(resource["encoding"]).strip())
+
+                                    resource["size"] = humanize.naturalsize(os.path.getsize(dataset_path))
+
+                                    utils.add_tag_explanations(resource, "binaryFileChanges", "reconstructed_lines", {"reconstructed_lines": reconstructed_lines})
+                                    logger("OK", f"Fixed broken multiline values in file '{dataset_path}' by reconstructing logical rows")
+                            except Exception as e:
+                                logger("ERROR", f"Error during reconstruction for file '{dataset_path}'", e, indent=3)
+                                continue
+                        
+                            if decoded_content.count("\n") < 1:
+                                utils.add_tag_explanations(resource, "fileInfo", "one_line")
+                                logger("WARNING", f"File '{dataset_path}' appears to contain only one line, likely not a structured/tabular file")
+                                continue
+                            
+                            try:
+                                delimiter, start_row = utils.detect_delimiter(decoded_content)
+                                resource["delimiter"] = delimiter
+                            except Exception as e:
+                                logger("ERROR", f"Failed to detect delimiter for file '{dataset_path}'", e, indent=3)
+                                continue
+
+                            if start_row:
+                                utils.add_tag_explanations(resource, "fileInfo", "skip_rows", {"skipped_rows": start_row})
+                                dialect = Dialect.from_descriptor({"delimiter": delimiter, "comment_rows":[start_row]})
+                            else:
+                                dialect = Dialect.from_descriptor({"delimiter": delimiter})
+                            
+                            try:
+                                resource_metadata = describe(dataset_path, encoding=resource["encoding"], dialect=dialect).to_dict()
+                                resource["schema"] = resource_metadata.get("schema")
+                                logger("OK", f"Schema extracted from: {dataset_path} (encoding: {encoding})", indent=3)
+                            except Exception as e:
+                                logger("ERROR", f"Error extracting schema from: {dataset_path}", e, indent=3)
 
             with open(meta_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=4)
@@ -198,7 +258,7 @@ class OpenDataCrawler():
             logger("OK", f"Metadata saved successfully to: {meta_path}", indent=2)
 
         except Exception as e:
-            logger("ERROR", f"Failed to save metadata file", e, indent=2)
+            logger("ERROR", "Failed to save metadata file", e, indent=2)
 
     def get_package_list(self):
         packages = self.dms_instance.get_package_list()

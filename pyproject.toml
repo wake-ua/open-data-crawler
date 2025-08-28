@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "opendatacrawler"
-version = "0.1.0"
+version = "0.2.0"
 description = "Crawler for open data portals"
 authors = [
   { name="Alberto Berenguer Pastor", email="alberto.berenguer@ua.es" },
@@ -18,7 +18,10 @@ dependencies = [
   "frictionless",
   "chardet",
   "w3lib",
-  "url-normalize"
+  "url-normalize",
+  "olefile",
+  "python-magic",
+  "ftfy"
 ]
 
 [project.scripts]
@@ -28,4 +31,4 @@ opendatacrawler = "opendatacrawler.__main__:main"
 packages = ["opendatacrawler"]
 
 [tool.setuptools.package-data]
-opendatacrawler = ["intro.txt","config.ini"]
+opendatacrawler = ["config.ini", "resources/*"]

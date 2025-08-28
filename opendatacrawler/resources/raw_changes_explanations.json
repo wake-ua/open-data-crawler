@@ -1,0 +1,36 @@
+{
+    "bom_invalid_or_unreliable": {
+        "reason": "Removed an invalid or misleading Byte Order Mark (BOM) from the file to ensure correct decoding"
+    },
+    "normalized_utf8": {
+        "reason": "The content was re-encoded as UTF-8."
+    },
+    "fixed_data": {
+        "reason": "Successfully corrected unreadable or misencoded characters in FIXED_LINES lines without data loss.",
+        "value": "FIXED_LINES"
+    },
+    "partial_data_loss": {
+        "reason": "Successfully corrected unreadable or misencoded characters in FIXED_LINES lines, but UNRECOVERABLE_LINES lines could not be fully recovered and remain partially corrupted.",
+        "values": {
+            "fixed_lines": "FIXED_LINES",
+            "unrecoverable_lines": "UNRECOVERABLE_LINES"
+        }
+    },
+    "irreversible_data_loss": {
+        "reason": "Detected unreadable or misencoded characters in UNRECOVERABLE_LINES lines that could not be reliably recovered.",
+        "value": "UNRECOVERABLE_LINES"
+    },
+    "no_valid_data": {
+        "reason": "Removed empty or non-usable content from file, with no valid content remaining"
+    },
+    "bom_added_to_match_encoding": {
+        "reason": "Added a Byte Order Mark (BOM) to the file to match the detected encoding and ensure correct decoding"
+    },
+    "raw_strip": {
+        "reason": "Removed leading and/or trailing empty bytes from the raw content to normalize the file structure before decoding"
+    },
+    "reconstructed_lines": {
+        "reason": "Reconstructed RECONSTRUCTED_LINES broken lines caused by embedded newlines inside quoted fields in  structured or tabular content",
+        "value": "RECONSTRUCTED_LINES"
+    }
+}

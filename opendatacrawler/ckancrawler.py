@@ -23,7 +23,7 @@ class CkanCrawler():
         
         try:
             response, self.user_agent = utils.make_request(url, self.user_agent, headers=headers)
-            if not self.user_agent:
+            if not response:
                 logger("ERROR", f"Error fetching package list from '{self.domain}': no working User-Agent found")
                 return ids
             
@@ -75,7 +75,7 @@ class CkanCrawler():
             else:
                 logger("INFO", f"Metadata file already exists for package '{metadata_file_name}', loading and updating it if needed.", indent=2)
                 with open(metadata_path, "r", encoding="utf-8") as f:
-                    package = json.load(f)  
+                    package = json.load(f)
 
             if not package:
                 return
@@ -116,7 +116,7 @@ class CkanCrawler():
         }
 
         response, self.user_agent = utils.make_request(url, self.user_agent, headers=headers)
-        if not self.user_agent:
+        if not response:
             logger("ERROR", f"No working User-Agent for URL '{url}'")
             return None
         

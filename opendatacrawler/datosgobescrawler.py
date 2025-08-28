@@ -5,6 +5,7 @@ import json
 from urllib.parse import urlparse
 from opendatacrawler import utils
 from opendatacrawler.setup_logger import logger
+import threading
 
 class DatosGobEsCrawler():
     def __init__(self, domain, data_types, user_agent):
@@ -29,7 +30,7 @@ class DatosGobEsCrawler():
         
         try:
             response, self.user_agent = utils.make_request(url, self.user_agent, headers=headers, params=params)
-            if not self.user_agent:
+            if not response:
                 logger("ERROR", f"Error fetching package list from '{self.domain}': no working User-Agent found")
                 return ids
             
@@ -121,7 +122,7 @@ class DatosGobEsCrawler():
         }
 
         response, self.user_agent = utils.make_request(url, self.user_agent, headers=headers)
-        if not self.user_agent:
+        if not response:
             logger("ERROR", f"No working User-Agent for URL '{url}'")
             return None
         

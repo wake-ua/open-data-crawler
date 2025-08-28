@@ -47,10 +47,6 @@ def main():
 
     utils.print_intro()
     crawler = None
-
-    # Si en packetes, comprobar si existe metadato_bla, si existe, cogerlo y rellenarlo con la info del nuevo recuros (para no rellenar de más, 
-    # tipo, si, tienes ya el filename en el metadato_
-
     try:
         if utils.check_url(url):
             crawler = OpenDataCrawler(url, path=d_path, data_types=d_types, sec=max_sec)
@@ -80,7 +76,7 @@ def main():
             if packages_to_process:
                 logger("...", f"Processing {len(packages_to_process)} packages...", level="print")
 
-                with ThreadPoolExecutor(max_workers=max_threads) as executor:
+                with ThreadPoolExecutor(max_workers=max_threads, thread_name_prefix="t") as executor:
                     futures = {
                         executor.submit(
                             crawler.process_package,

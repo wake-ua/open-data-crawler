@@ -5,3 +5,6 @@ frictionless
 chardet
 w3lib
 url-normalize
+olefile
+python-magic
+ftfy
