@@ -59,11 +59,20 @@ class CkanCrawler():
 
         ext = resource_file_name.split(".")[-1]
         if not d_types or ext in d_types:
-            path = save_dataset(download_url, resource_file_name, partial)
+            path, tag = save_dataset(download_url, resource_file_name, partial)
 
             if path:
                 resource["path"] = os.path.relpath(path, start=os.getcwd())
                 logger("OK", f"Resource '{resource_file_name}' from package '{metadata_file_name}' saved", indent=4)
+
+            if tag:
+                resource["crawlerChangesInfo"] = {
+                    "resourceMetadataChanges": [],
+                    "binaryFileChanges": [],
+                    "fileInfo": [],
+                    "complete": True
+                }
+                utils.add_tag_explanations(resource, "fileInfo", tag)
 
     def process_package(self, pkg_id, categories, d_types, partial, avoid_data, save_dataset, save_metadata, save_path):
         metadata_file_name = f"meta_{utils.generate_short_filename(f"{self.domain}_{pkg_id}")}.json"

@@ -105,7 +105,7 @@ class OpenDataCrawler():
 
         if url.lower().endswith("html"):
             logger("WARNING", f"Resource '{file_name}' skipped (HTML detected): {url}", indent=2)
-            return None
+            return None, None
 
         for user_agent in utils.get_user_agent_list(self.user_agent):
             self.user_agent = user_agent
@@ -146,13 +146,24 @@ class OpenDataCrawler():
                         logger("ERROR", f"No data downloaded for resource '{file_name}'", indent=2)
                         return None
 
-                    return path
+                    return path, None
 
             except requests.exceptions.RequestException as e:
-                logger("ERROR", f"Error downloading '{file_name}' ({url})", e, indent=2)
-                break
+                status_code = getattr(e.response, "status_code", None)
+                tag = None
 
-        return None
+                if status_code:
+                    if status_code == 400:
+                        tag = "invalid_request"
+                    elif status_code == 403:
+                        tag = "forbidden_resource"
+                    elif status_code == 404:
+                        tag = "missing_resource"
+
+                logger("ERROR", f"Error downloading '{file_name}' ({url})", e, indent=2)
+                return None, tag
+
+        return None, None
 
     def save_metadata(self, data):
         try:
@@ -182,13 +193,13 @@ class OpenDataCrawler():
                             logger("ERROR", f"Error while detecting encoding for: {dataset_path}", e, indent=3)
                             continue
 
-                        if mismatch or raw or raw_flags or no_data:
-                            resource["crawlerChangesInfo"] = {
+                        resource["crawlerChangesInfo"] = {
                                 "resourceMetadataChanges": [],
                                 "binaryFileChanges": [],
                                 "fileInfo": []
                             }
-
+                        
+                        if mismatch or raw or raw_flags or no_data:
                             if mismatch:
                                 logger("WARNING", f"Detected a media type mismatch for file '{dataset_path}', was declared as '{resource.get('mediaType')}', but detected as '{detected_mime}'")
                                 utils.fix_mime_mismatch(resource, guessed_extension, detected_mime)
@@ -203,9 +214,6 @@ class OpenDataCrawler():
                                 with open(dataset_path, "wb") as f:
                                     f.write(raw)
                                 logger("OK", f"Overwrote cleaned content into '{dataset_path}'")
-                            
-                        if "size" not in resource:
-                            resource["size"] = humanize.naturalsize(os.path.getsize(dataset_path))
 
                         if dataset_path.endswith((".csv", ".tsv")) and not no_data:
                             with open(dataset_path, "rb") as f:
@@ -213,13 +221,11 @@ class OpenDataCrawler():
 
                             decoded_content = utils.safe_decode(raw, resource["encoding"])
                             try:
-                                lines_decoded_content, reconstructed_lines = utils.reconstruct_lines(decoded_content)
-                                decoded_content = "\n".join(lines_decoded_content)
+                                decoded_content, reconstructed_lines = utils.check_unbalanced_quotes(decoded_content)
                                 if reconstructed_lines > 0:
+                                    logger("WARNING", f"File '{dataset_path}' appears to contain broken multiline values, fixing")
                                     with open(dataset_path, "wb") as f:
                                         f.write(decoded_content.encode(resource["encoding"]).strip())
-
-                                    resource["size"] = humanize.naturalsize(os.path.getsize(dataset_path))
 
                                     utils.add_tag_explanations(resource, "binaryFileChanges", "reconstructed_lines", {"reconstructed_lines": reconstructed_lines})
                                     logger("OK", f"Fixed broken multiline values in file '{dataset_path}' by reconstructing logical rows")
@@ -251,6 +257,17 @@ class OpenDataCrawler():
                                 logger("OK", f"Schema extracted from: {dataset_path} (encoding: {encoding})", indent=3)
                             except Exception as e:
                                 logger("ERROR", f"Error extracting schema from: {dataset_path}", e, indent=3)
+                            
+                        if "size" not in resource:
+                            resource["size"] = humanize.naturalsize(os.path.getsize(dataset_path))
+
+                        crawler_changes = resource.pop("crawlerChangesInfo", {
+                            "resourceMetadataChanges": [],
+                            "binaryFileChanges": [],
+                            "fileInfo": []
+                        })
+                        crawler_changes["complete"] = True
+                        resource["crawlerChangesInfo"] = crawler_changes
 
             with open(meta_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=4)

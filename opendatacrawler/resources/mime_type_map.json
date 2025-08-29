@@ -27,5 +27,6 @@
     "application/las": "las",
     "application/javascript": "js",
     "application/sparql-results+json": "json",
-    "application/geo+pdf": "pdf"
+    "application/geo+pdf": "pdf",
+    "application/xbrl": "xbrl"
 }

@@ -1,5 +1,5 @@
-import requests
 import os
+import requests
 import re
 import json
 from urllib.parse import urlparse
@@ -11,7 +11,7 @@ class DatosGobEsCrawler():
     def __init__(self, domain, data_types, user_agent):
         self.domain = domain.rstrip("/")
         self.data_types = data_types
-        
+
         self.user_agent = user_agent
 
     def get_package_list(self):
@@ -27,13 +27,13 @@ class DatosGobEsCrawler():
             "User-Agent": self.user_agent,
             "Connection": "keep-alive"
         }
-        
+
         try:
             response, self.user_agent = utils.make_request(url, self.user_agent, headers=headers, params=params)
             if not response:
                 logger("ERROR", f"Error fetching package list from '{self.domain}': no working User-Agent found")
                 return ids
-            
+
             response.raise_for_status()
 
             for result in response.json().get("results", {}).get("bindings", []):
@@ -47,7 +47,7 @@ class DatosGobEsCrawler():
             logger("ERROR", f"Unexpected error parsing response from '{self.domain}'", e)
 
         return ids
-    
+
     def process_resource(self, resource, metadata_file_name, d_types, partial, avoid_data, save_dataset):
         resource_file_name = resource.get("fileName")
         if not resource_file_name:
@@ -67,11 +67,20 @@ class DatosGobEsCrawler():
 
         ext = resource_file_name.split(".")[-1]
         if not d_types or ext in d_types:
-            path = save_dataset(download_url, resource_file_name, partial)
+            path, tag = save_dataset(download_url, resource_file_name, partial)
 
             if path:
                 resource["path"] = os.path.relpath(path, start=os.getcwd())
                 logger("OK", f"Resource '{resource_file_name}' from package '{metadata_file_name}' saved", indent=4)
+
+            if tag:
+                resource["crawlerChangesInfo"] = {
+                    "resourceMetadataChanges": [],
+                    "binaryFileChanges": [],
+                    "fileInfo": [],
+                    "complete": True
+                }
+                utils.add_tag_explanations(resource, "fileInfo", tag)
 
     def process_package(self, pkg_id, categories, d_types, partial, avoid_data, save_dataset, save_metadata, save_path):
         metadata_file_name = f"meta_{utils.generate_short_filename(f"{self.domain}_{pkg_id}")}.json"
@@ -104,14 +113,14 @@ class DatosGobEsCrawler():
 
     def parse_resource(self, data, base_name):
         resource = {}
-        
+
         resource["name"] = utils.extract_multilang_field(data.get("title", []), "_lang", "_value")
 
         resource["downloadURL"] = data.get("accessURL") or data.get("downloadURL")
 
         resource["mediaType"] = data.get("format", {}).get("value")
         resource["fileName"] = utils.generate_short_filename(base_name, ext=utils.get_extension_mime(resource["mediaType"]))
-    
+
         return resource
 
     def get_package(self, dataset_id, metadata_file_name):
@@ -125,7 +134,7 @@ class DatosGobEsCrawler():
         if not response:
             logger("ERROR", f"No working User-Agent for URL '{url}'")
             return None
-        
+
         response.raise_for_status()
 
         data = response.json()["result"]["items"][0]
@@ -134,7 +143,7 @@ class DatosGobEsCrawler():
         metadata["identifier"] = dataset_id
         metadata["accessURL"] = f"https://datos.gob.es/es/catalogo/{dataset_id}"
         metadata["requestURL"] = url
-       
+
         metadata["fileName"] = metadata_file_name
 
         metadata["img"] = "https://datos.gob.es/sites/default/files/favicon.png"
@@ -147,13 +156,13 @@ class DatosGobEsCrawler():
             distributions = [distributions]
 
         metadata["publisher"] = utils.extract_uris_field(data.get("publisher"), utils.DATOSGOBESCRAWLER_PUBLISHER_MAP)[0]
-        
+
         download_url = distributions[0].get("accessURL") or distributions[0].get("downloadURL")
         if download_url:
             metadata["publisher"]["homepage"] = f"https://{urlparse(download_url).netloc}"
- 
+
         metadata["language"] = data.get("language")
-        
+
         metadata["keyword"] = utils.extract_multilang_field(data.get("keyword", []), "_lang", "_value")
 
         metadata["theme"] = utils.extract_uris_field(data.get("theme"), utils.DATOSGOBESCRAWLER_THEME_MAP)
@@ -175,7 +184,7 @@ class DatosGobEsCrawler():
         resource_list = []
         for idx, res in enumerate(distributions):
             resource_list.append(self.parse_resource(res, f"{metadata["fileName"]}_{idx}"))
-        
+
         metadata["resources"] = resource_list
 
         return metadata

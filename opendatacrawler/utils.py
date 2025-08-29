@@ -102,27 +102,29 @@ def recover_resume(save_path, accepted_types=None):
             with open(meta_path, "r", encoding="utf-8") as f:
                 meta = json.load(f)
 
-            failed_resources = []
-            successful_resources = []
+            identifier = meta.get("identifier")
+          
+            failed = []
+            success = []
             for r in meta.get("resources", []):
-                if accepted_types and r.get("fileName", "").split(".")[-1].lower() not in accepted_types:
+                file_name = r.get("fileName", "")
+                if accepted_types and file_name.split(".")[-1].lower() not in accepted_types:
                     continue
 
-                if r.get("path"):
-                    successful_resources.append(r.get("fileName"))
+                if r.get("crawlerChangesInfo", {}).get("complete") is True:
+                    success.append(file_name)
                 else:
-                    failed_resources.append(r.get("fileName"))
+                    failed.append(file_name)
 
-            packages_status[meta.get("identifier")] = {
-                "failed_resources": failed_resources,
-                "successful_resources": successful_resources
+            if failed:
+                failed_packages.add(identifier)
+
+            total_failed.extend(failed)
+            total_successful.extend(success)
+            packages_status[identifier] = {
+                "failed_resources": failed,
+                "successful_resources": success
             }
-
-            total_failed.extend(failed_resources)
-            total_successful.extend(successful_resources)
-
-            if failed_resources:
-                failed_packages.add(meta.get("identifier"))
 
         except Exception as e:
             logger("ERROR", f"Could not read {meta_path}", e)
@@ -153,16 +155,16 @@ def check_encoding_quality(content):
     if is_bad_encoding(content):
         return None
 
-    quality_flags = {
-        "ñÑ": False, "áÁ": False, "àÀ": False, "éÉ": False, "èÈ": False,
-        "íÍ": False, "ìÌ": False, "óÓ": False, "òÒ": False, "úÚ": False,
-        "ùÙ": False, "Çç": False, "¿¡": False, "?!": False, "º": False,
-        "ª": False, "€": False, "üÜ": False, "ïÏ": False, "'": False
-    }
+    quality_flags = dict.fromkeys([
+        "ñ", "Ñ", "á", "Á", "à", "À", "é", "É", "è", "È",
+        "í", "Í", "ì", "Ì", "ó", "Ó", "ò", "Ò", "ú", "Ú",
+        "ù", "Ù", "Ç", "ç", "¿", "¡", "?", "!", "º", "ª",
+        "€", "ü", "Ü", "ï", "Ï", "'"
+    ], False)
 
-    for group in quality_flags:
-        if any(c in content for c in group):
-            quality_flags[group] = True
+    for c in content:
+        if c in quality_flags:
+            quality_flags[c] = True
 
     return quality_flags
 
@@ -177,43 +179,25 @@ def fix_lines(decoded_text):
             fixed_lines.append(line)
             continue
 
-        fixed = fix_text(line)
-        if not is_bad_encoding(fixed):
-            fixed_lines.append(fixed)
-            fixed_count += 1
-            continue
-
-        words = line.split()
-        fixed_words = [fix_text(word) for word in words]
-        fixed_line = " ".join(fixed_words)
-
-        if not is_bad_encoding(fixed_line):
-            fixed_lines.append(fixed_line)
-            fixed_count += 1
-            continue
-
-        cleaned = clean_control_chars(fixed_line)
-        if not is_bad_encoding(cleaned):
-            fixed_lines.append(cleaned)
-            fixed_count += 1
-            continue
-
-        fixed_lines.append(fixed_line)
-        unrecoverable_count += 1
+        for fix_func in [fix_text, lambda x: " ".join(fix_text(w) for w in x.split()), clean_control_chars]:
+            fixed = fix_func(line)
+            if not is_bad_encoding(fixed):
+                fixed_lines.append(fixed)
+                fixed_count += 1
+                break
+        else:
+            fixed_lines.append(line)
+            unrecoverable_count += 1
 
     if fixed_count == 0 and unrecoverable_count == 0:
         return None, None, 0, 0
 
     result = "\n".join(fixed_lines)
-
     if unrecoverable_count > 0 and fixed_count > 0:
         return result, "partial_data_loss", fixed_count, unrecoverable_count
-
     if unrecoverable_count > 0:
         return result, "irreversible_data_loss", fixed_count, unrecoverable_count
-
-    if fixed_count > 0:
-        return result, "fixed_data", fixed_count, unrecoverable_count
+    return result, "fixed_data", fixed_count, unrecoverable_count
 
 def needs_strip(raw_full):
     return raw_full != raw_full.strip()
@@ -248,6 +232,14 @@ def reconstruct_lines(text, max_lines=None):
             break
 
     return lines, reconstructed_lines
+
+def check_unbalanced_quotes(text):
+    for line in text.splitlines():
+        if line.count('"') % 2 != 0:
+            lines, reconstructed_lines = reconstruct_lines(text)
+            return "\n".join(lines), reconstructed_lines
+
+    return text, 0
 
 # == Encoding functions ==
 
@@ -307,7 +299,7 @@ def safe_decode(raw, encoding):
                 except UnicodeDecodeError:
                     continue
         return None
-    except Exception as e:
+    except Exception:
         return None
 
 def detect_best_encoding(file_path, encodings=ENCODING_CANDIDATES, num_bytes=64*1024):
@@ -318,7 +310,8 @@ def detect_best_encoding(file_path, encodings=ENCODING_CANDIDATES, num_bytes=64*
     }
 
     with open(file_path, "rb") as f:
-        raw_sample = f.read(num_bytes)
+        raw_full = f.read()
+    raw_sample = raw_full[:num_bytes]
 
     if not raw_sample:
         raw_flags["tags"].append("no_data")
@@ -327,9 +320,6 @@ def detect_best_encoding(file_path, encodings=ENCODING_CANDIDATES, num_bytes=64*
     if not raw_sample.strip():
         raw_flags["tags"].append("no_valid_data")
         return None, "", raw_flags, True
-
-    with open(file_path, "rb") as f:
-        raw_full = f.read()
 
     if needs_strip(raw_full):
         raw_flags["tags"].append("raw_strip")
@@ -446,7 +436,7 @@ def count_unquoted_delimiters(line, delim):
         i += 1
     return count
 
-NOT_ALLOWED_DELIMITERS = ['"', "'", "_", "(", ")", "<", ">", "-", ".", "/", "+"]
+NOT_ALLOWED_DELIMITERS = ['"', "'", "_", "(", ")", "<", ">", "[", "]", "{", "}", "-", ".", "+", "*", "=", "/", "\\", "&"]
 
 def detect_delimiter(text, max_lines=50, min_consistent_lines=5):
     lines = text.splitlines()[:max_lines]
