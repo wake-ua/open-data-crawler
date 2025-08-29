@@ -92,7 +92,7 @@ class DatosGobEsCrawler():
             else:
                 logger("INFO", f"Metadata file already exists for package '{metadata_file_name}', loading and updating it if needed.", indent=2)
                 with open(metadata_path, "r", encoding="utf-8") as f:
-                    package = json.load(f) 
+                    package = json.load(f)
 
             if not package:
                 return

@@ -26,9 +26,6 @@
     "bom_added_to_match_encoding": {
         "reason": "Added a Byte Order Mark (BOM) to the file to match the detected encoding and ensure correct decoding"
     },
-    "raw_strip": {
-        "reason": "Removed leading and/or trailing empty bytes from the raw content to normalize file structure before decoding"
-    },
     "reconstructed_lines": {
         "reason": "Reconstructed RECONSTRUCTED_LINES broken lines caused by embedded newlines inside quoted fields in structured or tabular content",
         "value": "RECONSTRUCTED_LINES"

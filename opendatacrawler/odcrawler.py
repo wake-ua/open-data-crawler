@@ -7,6 +7,7 @@ from opendatacrawler import utils
 from opendatacrawler.setup_logger import logger
 from opendatacrawler.datosgobescrawler import DatosGobEsCrawler
 from opendatacrawler.ckancrawler import CkanCrawler
+import shutil
 
 class OpenDataCrawler():
     def __init__(self, domain, path=None, data_types=None, sec=None):
@@ -144,14 +145,13 @@ class OpenDataCrawler():
 
                     if not partial and total_bytes == 0:
                         logger("ERROR", f"No data downloaded for resource '{file_name}'", indent=2)
-                        return None
+                        return None, "no_data"
 
                     return path, None
 
             except requests.exceptions.RequestException as e:
                 status_code = getattr(e.response, "status_code", None)
                 tag = None
-
                 if status_code:
                     if status_code == 400:
                         tag = "invalid_request"
@@ -180,15 +180,19 @@ class OpenDataCrawler():
                         except Exception as e:
                             logger("ERROR", f"Error while checking MIME type for: {dataset_path}", e, indent=3)
                             continue
-                        try:  
-                            encoding = raw = raw_flags = None
+                        try:
+                            encoding = temp_path = raw_flags = None
                             if detected_mime.startswith("text/") or detected_mime in {"application/json", "application/xml"}:
                                 if no_data:
                                     encoding = "utf-8"
                                 else:
-                                    encoding, raw, raw_flags, no_data = utils.detect_best_encoding(dataset_path)
+                                    encoding, temp_path, raw_flags, no_data = utils.detect_best_encoding(dataset_path)
+                                        
+                                if encoding:
+                                    resource["encoding"] = encoding
+                                else:
+                                    logger("ERROR", f"No matching encoding found for: {dataset_path}", indent=3)
 
-                                resource["encoding"] = encoding
                         except Exception as e:
                             logger("ERROR", f"Error while detecting encoding for: {dataset_path}", e, indent=3)
                             continue
@@ -199,7 +203,7 @@ class OpenDataCrawler():
                                 "fileInfo": []
                             }
                         
-                        if mismatch or raw or raw_flags or no_data:
+                        if mismatch or temp_path or raw_flags or no_data:
                             if mismatch:
                                 logger("WARNING", f"Detected a media type mismatch for file '{dataset_path}', was declared as '{resource.get('mediaType')}', but detected as '{detected_mime}'")
                                 utils.fix_mime_mismatch(resource, guessed_extension, detected_mime)
@@ -210,10 +214,12 @@ class OpenDataCrawler():
                             if raw_flags:
                                 utils.add_tag_explanations(resource, "binaryFileChanges", raw_flags, raw_flags)
                             
-                            if raw:
-                                with open(dataset_path, "wb") as f:
-                                    f.write(raw)
-                                logger("OK", f"Overwrote cleaned content into '{dataset_path}'")
+                            if temp_path:
+                                try:
+                                    shutil.move(temp_path, dataset_path)
+                                    logger("OK", f"Overwrote cleaned content into '{dataset_path}'", indent=3)
+                                except Exception as e:
+                                    logger("ERROR", f"Failed to move temp file to '{dataset_path}'", e, indent=3)
 
                         if dataset_path.endswith((".csv", ".tsv")) and not no_data:
                             with open(dataset_path, "rb") as f:

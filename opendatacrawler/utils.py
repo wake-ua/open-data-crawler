@@ -5,6 +5,10 @@ import hashlib
 import chardet
 import olefile
 import re
+import tempfile
+import mmap
+import codecs
+import io
 import magic
 from collections import Counter
 from ftfy.badness import is_bad
@@ -46,6 +50,14 @@ def create_folder(path):
     except OSError as e:
         logger("ERROR", f"Failed to create the directory '{path}'", e)
         return False
+
+def delete_tempfiles(file_paths, keep_path=None):
+    for path in file_paths:
+        if path != keep_path and path and os.path.exists(path):
+            try:
+                os.remove(path)
+            except Exception:
+                pass
 
 # ==============================
 # Request functions
@@ -175,18 +187,12 @@ def fix_lines(decoded_text):
     unrecoverable_count = 0
 
     for line in lines:
-        if not is_bad_encoding(line):
-            fixed_lines.append(line)
-            continue
+        fixed_line_text, status = fix_line(line)
+        fixed_lines.append(fixed_line_text)
 
-        for fix_func in [fix_text, lambda x: " ".join(fix_text(w) for w in x.split()), clean_control_chars]:
-            fixed = fix_func(line)
-            if not is_bad_encoding(fixed):
-                fixed_lines.append(fixed)
-                fixed_count += 1
-                break
-        else:
-            fixed_lines.append(line)
+        if status is True:
+            fixed_count += 1
+        elif status is None:
             unrecoverable_count += 1
 
     if fixed_count == 0 and unrecoverable_count == 0:
@@ -199,8 +205,15 @@ def fix_lines(decoded_text):
         return result, "irreversible_data_loss", fixed_count, unrecoverable_count
     return result, "fixed_data", fixed_count, unrecoverable_count
 
-def needs_strip(raw_full):
-    return raw_full != raw_full.strip()
+def fix_line(line):
+    if not is_bad_encoding(line):
+        return line, False
+    
+    for fix_func in [fix_text, lambda x: " ".join(fix_text(w) for w in x.split()), clean_control_chars]:
+        fixed = fix_func(line)
+        if not is_bad_encoding(fixed):
+            return fixed, True
+    return line, None
 
 def reconstruct_lines(text, max_lines=None):
     lines = []
@@ -256,25 +269,16 @@ def detect_bom(raw):
         return "utf-16-be"
     return None
 
-def remove_bom(raw, encoding_bom):
-    if encoding_bom in ["utf-32-le", "utf-32-be"]:
-        return raw[4:]
-    if encoding_bom == "utf-8-sig":
-        return raw[3:]
-    if encoding_bom in ["utf-16-le", "utf-16-be"]:
-        return raw[2:]
-    return raw
-
-def add_bom(raw, encoding_bom):
+def get_bom_bytes(encoding_bom):
     if encoding_bom == "utf-32-le":
-        return b"\xff\xfe\x00\x00" + raw
+        return b"\xff\xfe\x00\x00"
     if encoding_bom == "utf-32-be":
-        return b"\x00\x00\xfe\xff" + raw
+        return b"\x00\x00\xfe\xff"
     if encoding_bom == "utf-16-le":
-        return b"\xff\xfe" + raw
+        return b"\xff\xfe"
     if encoding_bom == "utf-16-be":
-        return b"\xfe\xff" + raw
-    return raw
+        return b"\xfe\xff"
+    return None
 
 def detect_encoding_pattern(raw):
     encoding = chardet.detect(raw)['encoding']
@@ -302,6 +306,70 @@ def safe_decode(raw, encoding):
     except Exception:
         return None
 
+def stream_decode_to_tempfile(raw_mm, encoding, bom_offset=0, bom_bytes=None):
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, mode="wb") as tmpfile:
+            raw_mm.seek(bom_offset)
+            reader = codecs.getreader(encoding)(raw_mm)
+
+            if bom_bytes:
+                tmpfile.write(bom_bytes)
+
+            prev_line = None
+            for line in reader:
+                if prev_line is None:
+                    prev_line = line.lstrip()
+                else:
+                    tmpfile.write(prev_line.encode("utf-8"))
+                    prev_line = line
+
+            if prev_line is not None:
+                tmpfile.write(prev_line.rstrip().encode("utf-8"))
+
+            return tmpfile.name
+    except Exception:
+        return None
+
+def stream_decode_to_tempfile_fixlines(raw_mm, encoding, bom_offset=0, bom_bytes=None):
+    fixed_count = 0
+    unrecoverable_count = 0
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, mode="wb") as tmpfile:
+            raw_mm.seek(bom_offset)
+            reader = codecs.getreader(encoding)(raw_mm)
+
+            if bom_bytes:
+                tmpfile.write(bom_bytes)
+
+            prev_line = None
+            for line in reader:
+                fixed_line, fixed = fix_line(line)
+                if fixed is True:
+                    fixed_count += 1
+                elif fixed is None:
+                    unrecoverable_count += 1
+
+                if prev_line is None:
+                    prev_line = fixed_line.lstrip()
+                else:
+                    tmpfile.write(prev_line.encode("utf-8"))
+                    prev_line = fixed_line
+
+            if prev_line is not None:
+                tmpfile.write(prev_line.rstrip().encode("utf-8"))
+
+            tag = None
+            if unrecoverable_count > 0 and fixed_count > 0:
+                tag = "partial_data_loss"
+            elif unrecoverable_count > 0:
+                tag = "irreversible_data_loss"
+            elif fixed_count > 0:
+                tag = "fixed_data"
+
+            return tmpfile.name, tag, fixed_count, unrecoverable_count
+    except Exception:
+        return None, None, 0, 0
+
 def detect_best_encoding(file_path, encodings=ENCODING_CANDIDATES, num_bytes=64*1024):
     raw_flags = {
         "tags": [],
@@ -310,8 +378,8 @@ def detect_best_encoding(file_path, encodings=ENCODING_CANDIDATES, num_bytes=64*
     }
 
     with open(file_path, "rb") as f:
-        raw_full = f.read()
-    raw_sample = raw_full[:num_bytes]
+        raw_full_mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        raw_sample = raw_full_mm[:num_bytes]
 
     if not raw_sample:
         raw_flags["tags"].append("no_data")
@@ -321,102 +389,90 @@ def detect_best_encoding(file_path, encodings=ENCODING_CANDIDATES, num_bytes=64*
         raw_flags["tags"].append("no_valid_data")
         return None, "", raw_flags, True
 
-    if needs_strip(raw_full):
-        raw_flags["tags"].append("raw_strip")
-
     bom_encoding = detect_bom(raw_sample)
+    bom_bytes = get_bom_bytes(bom_encoding)
+    bom_offset = len(bom_bytes) if bom_bytes else 0
+
+    raw_flags["tags"].append("normalized_utf8")
 
     # 1. Valid BOM decoding
     if bom_encoding:
-        content = safe_decode(raw_sample, bom_encoding)
-        if content and check_encoding_quality(content):
-            full_content = safe_decode(raw_full, bom_encoding)
-            if full_content and full_content.strip():
-                raw_flags["tags"].append("normalized_utf8")
-                return "utf-8", full_content.encode("utf-8").strip(), raw_flags, False
+        sample_content = safe_decode(raw_sample, bom_encoding)
+        if sample_content and check_encoding_quality(sample_content):
+            temp_path = stream_decode_to_tempfile(raw_full_mm, bom_encoding)
+            if temp_path:
+                return "utf-8", temp_path, raw_flags, False
 
         raw_flags["tags"].append("bom_invalid_or_unreliable")
-        raw_sample = remove_bom(raw_sample, bom_encoding)
-        raw_full = remove_bom(raw_full, bom_encoding)
+        raw_sample = raw_sample[bom_offset:]
 
     # 2. Detect UTF-16/32 patterns
     pattern_encoding = detect_encoding_pattern(raw_sample)
     if pattern_encoding:
-        content = safe_decode(add_bom(raw_sample, pattern_encoding), pattern_encoding)
-        if content and check_encoding_quality(content):
-            full_content = safe_decode(add_bom(raw_full, pattern_encoding), pattern_encoding)
-            if full_content and full_content.strip():
-                raw_flags["tags"].append("normalized_utf8")
-                return "utf-8", full_content.encode("utf-8").strip(), raw_flags, False
+        bom_bytes = get_bom_bytes(pattern_encoding)
+        sample_content = safe_decode(bom_bytes + raw_sample, pattern_encoding)
+        if sample_content and check_encoding_quality(sample_content):
+            temp_path = stream_decode_to_tempfile(raw_full_mm, pattern_encoding, bom_offset, bom_bytes)
+            if temp_path:
+                return "utf-8", temp_path, raw_flags, False
 
     # 3. Brute-force encodings
     results = {}
     for encoding in encodings:
-        content = safe_decode(raw_sample, encoding)
-        if content and content.strip():
-            flags = check_encoding_quality(content)
+        sample_content = safe_decode(raw_sample, encoding)
+        if sample_content and sample_content.strip():
+            flags = check_encoding_quality(sample_content)
             if flags:
-                full_content = safe_decode(raw_full, encoding)
-                if full_content and full_content.strip():
-                    results[encoding] = flags
+                temp_path = stream_decode_to_tempfile(raw_full_mm, encoding, bom_offset)
+                if temp_path:
+                    results[encoding] = {"flags": flags, "temp_path": temp_path}
 
     if results:
-        best_encoding = max(results.items(), key=lambda item: sum(item[1].values()))[0]
-        content = safe_decode(raw_full, best_encoding)
-        if content and content.strip():
-            if "raw_strip" in raw_flags["tags"]:
-                return best_encoding, raw_full.strip(), raw_flags, False
-            return best_encoding, None, raw_flags, False
+        _, best_result = max(results.items(), key=lambda item: sum(item[1]["flags"].values()))
+
+        temp_path = best_result["temp_path"]
+        delete_tempfiles([val["temp_path"] for val in results.values()], temp_path)
+
+        return "utf-8", temp_path, raw_flags, False
 
     # 4. Brute-force encodings (+ fix)
     results = {}
     for encoding in encodings:
-        content = safe_decode(raw_sample, encoding)
-        if content and content.strip():
-            fixed_content, _, _, _ = fix_lines(content)
+        sample_content = safe_decode(raw_sample, encoding)
+        if sample_content and sample_content.strip():
+            fixed_content, _, _, _ = fix_lines(sample_content)
             if fixed_content:
                 flags = check_encoding_quality(fixed_content)
                 if flags:
-                    results[encoding] = flags
+                    temp_path, tag, fixed_count, unrecoverable_count = stream_decode_to_tempfile_fixlines(raw_full_mm, encoding, bom_offset)
+                    if temp_path:
+                        results[encoding] = {"flags": flags, "temp_path": temp_path, "tag": tag, "fixed_lines": fixed_count, "unrecoverable_lines": unrecoverable_count}
 
     if results:
-        best_encoding = max(results.items(), key=lambda item: sum(item[1].values()))[0]
-        content = safe_decode(raw_full, best_encoding)
-        if content and content.strip():
-            fixed_content, tag, fixed_lines, unrecoverable_lines = fix_lines(content)
-            if fixed_content:
-                raw_flags["tags"].append(tag)
-                raw_flags["tags"].append("normalized_utf8")
-                raw_flags["fixed_lines"] = fixed_lines
-                raw_flags["unrecoverable_lines"] = unrecoverable_lines
-                return "utf-8", fixed_content.encode("utf-8").strip(), raw_flags, False
+        _, best_result = max(results.items(), key=lambda item: sum(item[1]["flags"].values()))
 
-    # 5. Fallback to BOM encoding if all else failed (+ fix)
-    if bom_encoding:
-        content = safe_decode(raw_full, bom_encoding)
-        if content and content.strip():
-            fixed_content, tag, fixed_lines, unrecoverable_lines = fix_lines(content)
-            if fixed_content:
-                raw_flags["tags"].append(tag)
-                raw_flags["tags"].append("normalized_utf8")
-                raw_flags["fixed_lines"] = fixed_lines
-                raw_flags["unrecoverable_lines"] = unrecoverable_lines
-                return "utf-8", fixed_content.encode("utf-8").strip(), raw_flags, False
+        temp_path = best_result["temp_path"]
+        delete_tempfiles([val["temp_path"] for val in results.values()], temp_path)
 
-    # 6. Last-resort brute-force (+ fix)
+        raw_flags["tags"].append(best_result["tag"])
+        raw_flags["fixed_lines"] = best_result["fixed_lines"]
+        raw_flags["unrecoverable_lines"] = best_result["unrecoverable_lines"]
+
+        return "utf-8", best_result["temp_path"], raw_flags, False
+
+    # 5. Last-resort brute-force (+ fix)
     for encoding in encodings:
-        content = safe_decode(raw_full, encoding)
-        if content and content.strip():
-            fixed_content, tag, fixed_lines, unrecoverable_lines = fix_lines(content)
-            if fixed_content:
-                raw_flags["tags"].append(tag)
-                raw_flags["tags"].append("normalized_utf8")
-                raw_flags["fixed_lines"] = fixed_lines
-                raw_flags["unrecoverable_lines"] = unrecoverable_lines
-                fixed_content = clean_control_chars(fixed_content)
-                return "utf-8", fixed_content.encode("utf-8").strip(), raw_flags, False
+        temp_path, tag, fixed_count, unrecoverable_count = stream_decode_to_tempfile_fixlines(raw_full_mm, encoding, bom_offset)
+        if temp_path:
+            logger("WARNING", f"Last-resort encoding recovery applied in file '{file_path}' using {encoding}")
 
-    return None, None, raw_flags, False
+            raw_flags["tags"].append(tag)
+            raw_flags["fixed_lines"] = fixed_count
+            raw_flags["unrecoverable_lines"] = unrecoverable_count
+
+            return "utf-8", temp_path, raw_flags, False
+
+    return None, None, None, False
 
 # == Delimiter detection functions ==
 
@@ -436,7 +492,7 @@ def count_unquoted_delimiters(line, delim):
         i += 1
     return count
 
-NOT_ALLOWED_DELIMITERS = ['"', "'", "_", "(", ")", "<", ">", "[", "]", "{", "}", "-", ".", "+", "*", "=", "/", "\\", "&"]
+NOT_ALLOWED_DELIMITERS = ['"', "'", "_", "(", ")", "<", ">", "[", "]", "{", "}", "-", ".", "+", "*", "=", "/", "\\", "�"]
 
 def detect_delimiter(text, max_lines=50, min_consistent_lines=5):
     lines = text.splitlines()[:max_lines]
