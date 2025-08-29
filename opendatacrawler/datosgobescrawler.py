@@ -92,22 +92,29 @@ class DatosGobEsCrawler():
             else:
                 logger("INFO", f"Metadata file already exists for package '{metadata_file_name}', loading and updating it if needed.", indent=2)
                 with open(metadata_path, "r", encoding="utf-8") as f:
-                    package = json.load(f)  
+                    package = json.load(f) 
 
             if not package:
                 return
             
-            exist_cat = not categories or (package.get("theme") and any(cat in package["theme"] for cat in categories))
-            logger("...", f"Processing package: '{metadata_file_name}'", indent=2)
-
-            if exist_cat and package.get("resources"):
+            should_process = True
+            if categories:
+                mapped_theme = utils.extract_uris_field(package.get("theme"), utils.DATOSGOBESCRAWLER_THEME_MAP)
+                should_process = mapped_theme and any(cat in mapped_theme for cat in categories)
+            
+            if should_process and package.get("resources"):
+                logger("...", f"Processing package: '{metadata_file_name}'", indent=2)
                 for resource in package["resources"]:
-                    if not resource.get("path"):
+                    if not resource.get("crawlerChangesInfo", {}).get("complete", False):
                         self.process_resource(resource, metadata_file_name, d_types, partial, avoid_data, save_dataset)
 
                 save_metadata(package)
-
-            logger("OK", f"Successfully processed package '{metadata_file_name}'", indent=2)
+                logger("OK", f"Successfully processed package '{metadata_file_name}'", indent=2)
+            else:
+                if not should_process:
+                    logger("ERROR", f"Package '{pkg_id}' does not match specified categories: {', '.join(categories)}", indent=2)
+                elif not package.get("resources"):
+                    logger("ERROR", f"Package '{pkg_id}' has no resources", indent=2)
         except Exception as e:
             logger("ERROR", f"Error processing package '{pkg_id}'", e, indent=2)
 

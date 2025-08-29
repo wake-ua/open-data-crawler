@@ -94,7 +94,7 @@ class CkanCrawler():
 
             if exist_cat and package.get("resources"):
                 for resource in package["resources"]:
-                    if not resource.get("path"):
+                    if not resource.get("crawlerChangesInfo", {}).get("complete", False):
                         self.process_resource(resource, metadata_file_name, d_types, partial, avoid_data, save_dataset)
 
                 save_metadata(package)
