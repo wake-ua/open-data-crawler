@@ -53,6 +53,7 @@
     <li><a href="#contact">Contact</a></li>
   </ol>
 </details>
+
 ---
 
 ## About The Project
@@ -225,7 +226,7 @@ These are used by `utils.extract_mapped_field()` to normalize raw values (e.g. U
 
 In the case of needing a new field map for the field `theme` in the crawler `ExampleCrawler`, where the field contains URIs that should be normalized to an object with a human-readable name and an identifier:
 
-- 1. Create a file named `resources/example_theme_map.json` with the desired content. Example:
+1. Create a file named `resources/example_theme_map.json` with the desired content. Example:
   ```json
   {
     "https://example.org/theme/health-care": {
@@ -234,18 +235,18 @@ In the case of needing a new field map for the field `theme` in the crawler `Exa
     }
   }
   ```
-- 2. Load the map using `load_resource()` in `utils.py`, providing a fallback value for unmapped entries:
+2. Load the map using `load_resource()` in `utils.py`, providing a fallback value for unmapped entries:
   ```python
   EXAMPLECRAWLER_THEME_MAP = load_resource(
       "example_theme_map.json",
       fallback_value={"name": "FALLBACK_VALUE", "identifier": None}
   )
   ```
-- 3. Use `utils.extract_mapped_field()` in your crawler code to normalize a value:
+3. Use `utils.extract_mapped_field()` in your crawler code to normalize a value:
   ```python
   utils.extract_mapped_field("https://example.org/theme/energy-efficiency", EXAMPLECRAWLER_THEME_MAP)
   ```
-- 4. If the input exists in the map, the mapped value will be returned.
+4. If the input exists in the map, the mapped value will be returned.
 
   Otherwise, the fallback logic is applied:
   - For URLs (as in the example below), the last segment is extracted, hyphens are replaced with spaces, and the result is converted to title case (e.g., `"energy-efficiency"` becomes `"Energy Efficiency"`).  
