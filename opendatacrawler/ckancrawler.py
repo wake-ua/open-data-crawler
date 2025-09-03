@@ -115,7 +115,6 @@ class CkanCrawler():
         #    metadata["theme"] = None
 
         metadata["accrualPeriodicity"] = data.get("accrualPeriodicity")
-        print(metadata["accrualPeriodicity"]) if metadata["accrualPeriodicity"] else ""
 
         metadata["modified"] = data.get("metadata_modified", "")
         metadata["issued"] = data.get("metadata_created", "")

@@ -28,7 +28,7 @@ class OpenDataCrawler():
 
         self.user_agent = None
 
-        logger("...", f"Detecting DMS for domain: {self.domain}")
+        logger("...", f"Detecting DMS for domain: {self.domain}", level="print")
         self.detect_dms()
 
     def detect_dms(self):
@@ -56,15 +56,15 @@ class OpenDataCrawler():
 
             try:
                 response, self.user_agent = utils.make_request(full_url, self.user_agent, headers=headers)
-                if response.status_code == 404:
-                    logger("NET", f"Endpoint not found (HTTP 404) at '{full_url}' for DMS '{dms_name}'")
-                    continue
                 if not response:
                     logger("NET", f"No response from endpoint '{full_url}' while checking DMS '{dms_name}'")
                     continue
 
-                response.raise_for_status()
+                if response.status_code != 200:
+                    logger("NET", f"Non-successful response (HTTP {response.status_code}) from '{full_url}' while checking DMS '{dms_name}'")
+                    continue
 
+                response.raise_for_status()
                 if "text/html" not in response.headers.get("Content-Type", ""):
                     self.dms = dms_name
                     logger("OK", f"DMS detected: '{dms_name}'", level="print")
@@ -128,7 +128,8 @@ class OpenDataCrawler():
         else:
             logger("WARNING", f"Reset for domain '{self.domain}' was cancelled by user", level="print")
         
-        log_manager.move_to_domain(self.clean_domain)
+        log_manager.move_to_domain(self.clean_domain, move_file=True)
+        log_manager.clean_unused_logs()
 
     def save_dataset(self, url, file_name, partial=False):
         logger("...", f"Attempting to download resource '{file_name}' from: {url}", indent=2)

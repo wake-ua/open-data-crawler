@@ -7,72 +7,69 @@
 [![MIT License][license-shield]][license-url]
 [![LinkedIn][linkedin-shield]][linkedin-url]
 
+<br/>
 
-<!-- PROJECT LOGO -->
-<br />
 <div align="center">
   <a href="https://github.com/aberenguerpas/opendatacrawler">
-    <img src="images/logo.png" alt="Logo" width="200" height="200">
+    <img src="images/logo.png" alt="OpenDataCrawler Logo" width="200" height="200">
   </a>
 
   <p align="center">
-    A tool to craw data to your projects from open data portals
-    <br />
-    <a href="https://github.com/aberenguerpas/opendatacrawler/issues">Report Bug</a>
+    A flexible tool to crawl and normalize data from open data portals into your projects.
+    <br/>
+    <a href="https://github.com/aberenguerpas/opendatacrawler/issues">Report a Bug</a>
     ·
-    <a href="https://github.com/aberenguerpas/opendatacrawler/issues">Request Feature</a>
+    <a href="https://github.com/aberenguerpas/opendatacrawler/issues">Request a Feature</a>
   </p>
 </div>
 
-
-
-<!-- TABLE OF CONTENTS -->
 <details>
   <summary>Table of Contents</summary>
   <ol>
-    <li>
-      <a href="#about-the-project">About The Project</a>
-    </li>
+    <li><a href="#about-the-project">About the Project</a></li>
     <li>
       <a href="#getting-started">Getting Started</a>
       <ul>
-        <li><a href="#requirements">requirements</a></li>
+        <li><a href="#requirements">Requirements</a></li>
         <li><a href="#installation">Installation</a></li>
       </ul>
     </li>
     <li><a href="#usage">Usage</a></li>
-    <li><a href="#roadmap">Roadmap</a></li>
-    <li><a href="#contributing">Contributing</a></li>
+    <li>
+      <a href="#contributing">Contributing</a>
+      <ul>
+        <li><a href="#how-to-contribute">How to Contribute</a></li>
+        <li><a href="#add-support-for-a-new-portal">Add Support for a New Portal</a></li>
+        <li><a href="#define-new-mapping-files">Define New Mapping Files</a></li>
+      </ul>
+    </li>
     <li><a href="#license">License</a></li>
     <li><a href="#contact">Contact</a></li>
   </ol>
 </details>
 
+---
 
-
-<!-- ABOUT THE PROJECT -->
 ## About The Project
-Open Data Crawler is a tool to extract data from open data portals and statistics portals. The community can contribute adding support to other data portals or adding new features.
+Open Data Crawler is a tool designed to extract datasets, and optionally their metadata, from open data and statistics portals. The community can contribute by adding support for new portals or implementing additional features.
 
-Features:
-* Download datasets from open data portals or statsitics portal
-* Download metadata from resources
-* Filter by data type
-* Filter by topic
+Key Features:
+* Download datasets from open data or statistics portals
+* Retrieve metadata from resources
+* Filter datasets by data type
+* Filter datasets by topic or category
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 
-<!-- GETTING STARTED -->
+---
+
 ## Getting Started
 
-This is an example of how you may give instructions on setting up your project locally.
-To get a local copy up and running follow these simple example steps.
+To set up the project locally, follow these steps:
 
 ### Requirements
-* You need python 3.9>= installed
-
-* Socrata portals requiere an app token to avoid throttling limits, you can obtain an api key [here](https://support.socrata.com/hc/en-us/articles/210138558-Generating-an-App-Token)
-and set on ```config.ini```
+* Python 3.9+ installed  
+* Socrata portals require an App Token to avoid throttling limits. You can obtain an API key [here](https://support.socrata.com/hc/en-us/articles/210138558-Generating-an-App-Token) and set it in `config.ini`
 
 ### Installation
 
@@ -81,106 +78,206 @@ and set on ```config.ini```
   git clone https://github.com/aberenguerpas/opendatacrawler.git
   ```
 
-2. Run from the project root
-   ```sh
-   python install .
-   ```
+2. Install the package from the project root
+  ```sh
+  pip install .
+  ```
+
 <p align="right">(<a href="#top">back to top</a>)</p>
 
+---
 
-<!-- USAGE EXAMPLES -->
 ## Usage
 
-Use this tool is very simple, you only need to specify the data source and the tool automatically detect the portal type and starts to dowload the data.
+Using this tool is very simple: you only need to specify the URL of the data portal, and the tool will automatically detect the portal type and start downloading the data.  
+For a full list of available commands, run:
+```sh
+python opendatacrawler -h
+```
 
 ### Examples
-#### Dowload all data from a portal:
+#### Download all data from a portal:
 ```
 python opendatacrawler -d https://datos.gob.es
 ```
-#### Dowload specific fromat data. For example xls and csv:
+#### Download specific format data (e.g., 'xls' and 'csv'):
 ```
 python opendatacrawler -d https://datos.gob.es -t xls csv
 ```
-#### Dowload specifics categories. For example tourism and transport:
+#### Download specific categories (e.g., 'tourism' and 'transport'):
 ```
 python opendatacrawler -d https://datos.gob.es -c tourism transport
 ```
-#### Help with all posible commands:
-```
-python opendatacrawler -h 
-```
 
-
-_For more examples, please refer to the [Documentation](https://example.com)_
+<!-- _For more examples, see the [Documentation](https://example.com)_ -->
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 
+## Currently Supported Portals and Sites
+- [x] [datos.gob.es](https://datos.gob.es)
+- [x] CKAN
+- [ ] Socrata *
+- [ ] [Eurostat](https://ec.europa.eu/eurostat) *
+- [ ] [World Bank Data Catalog](https://datacatalogapi.worldbank.org/) *
+- [ ] OpenDataSoft *
 
-## Currently supported portals and sites
-- [x] https://datos.gob.es
-- [x] CKAN 
-- [] Socrata
-- [] https://ec.europa.eu/eurostat
-- [] https://datacatalogapi.worldbank.org/
-- [] OpenDataSoft
+\* Works with restrictions or download limitations  
 
-\* Works with restrictions or download limitations
-
-See the [open issues](https://github.com/aberenguerpas/opendatacrawler/issues) for a full list of proposed features (and known issues).
+See the [open issues](https://github.com/aberenguerpas/opendatacrawler/issues) for a full list of proposed features and known issues.
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 
+---
 
-
-<!-- CONTRIBUTING -->
 ## Contributing
 
-Contributions are what make the open source community such an amazing place to learn, inspire, and create. Any contributions you make are **greatly appreciated**.
+Contributions are what make the open source community such an amazing place to learn, share, and build together. Any contribution is **greatly appreciated**.  
 
-If you have a suggestion or add site/portal support that would make this better, please fork the repo and create a pull request. You can also simply open an issue with the tag "enhancement".
-Don't forget to give the project a star! Thanks again!
+If you have a suggestion, improvement, or want to add support for a new site or portal, feel free to fork the repository and open a pull request. You can also open an issue using the `enhancement` label.
 
-1. Fork the Project
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the Branch (`git push origin feature/AmazingFeature`)
+And don't forget to give the project a star! Thanks for your support! 🌟
+
+### How to Contribute
+1. Fork the repository
+2. Create a feature branch 
+  ```sh
+    git checkout -b feature/AmazingFeature
+  ```
+3. Commit your changes
+  ```sh
+    git commit -m 'Add some AmazingFeature'
+  ```
+4. Push to the branch
+  ```sh
+    git push origin feature/AmazingFeature
+  ```
 5. Open a Pull Request
 
-### Add support to other portal
-1. Create a file with the name of the portal + crawler Ex. ```examplecrawler.py``` inside the folder ```opendatacrawler```
-2. Create a class ExampleCrawler who inherits from ```OpenDataCrawlerInterface```
-3. The class must contain at least the functions ```get_package_list()``` and ```get_package()``` Check the descriptions of the functions on the ```opendatacrawlerInterface.py```
-4. You can also use or add some functions to ```utils.py```
-5. Add in the function ```detect_dms()``` on ```odcrawler.py``` a way to detect the site you want to add.
+### Add Support for a New Portal
+1. Create a file named `<PortalName>crawler.py` inside `opendatacrawler/` folder (e.g. `examplecrawler.py`).
+2. Create a class `<PortalName>Crawler` with this constructor:
+   ```python
+   class ExampleCrawler:
+       def __init__(self, domain, data_types, user_agent):
+           self.domain = domain.rstrip("/")
+           self.data_types = data_types
+           self.user_agent = user_agent
+  ```  
+3. Implement the required methods:
+  - **`get_package_list(self)`**`: 
+    Returns the list of dataset or package identifiers from the portal's API. Each identifier represents a dataset entry (i.e., a collection of one or more downloadable resources), which will be fetched individually in the next step.
+
+  - **`parse_resource(self, data, base_name)`**:  
+    Normalizes a single resource object (distribution, file, link...) from the dataset into the project's internal resource schema. 
+    This should always include extracting the `downloadURL`, determining MIME type, and generating a normalized filename using: 
+    ```python
+    utils.```pythongenerate_short_filename(base_name, ext=utils.get_extension_mime(resource["mediaType"]))
+    ```
+    ``.```
+
+  - **`get_package(self, dataset_id, metadata_file_name)`**`:
+    Retrieves and normalizes the full metadata of a package of datasets given its identifier (including its associated resources using `parse_resource()`). To keep consistency across crawlers, it's recommended to structure the resource list as follows:
+    ```python
+    resource_list = []
+    for idx, res in enumerate(resources):
+        resource_list.append(self.parse_resource(res, f"{metadata['fileName']}_{idx}"))
+    metadata["resources"] = resource_list
+    ```
+
+4. Use helper functions (`utils.py`) and built-in logging:
+- **Network calls**: `utils.make_request(url, self.user_agent, headers=...)`  
+  > Note: the function may rotate the `user_agent`. Always capture and reuse the returned value.
+
+- **File helpers**: `utils.generate_short_filename()`, `utils.get_mime_extension()`, `utils.get_extension_mime()`...
+
+- **Field extraction helpers**: `utils.extract_multilang_field()`, `utils.extract_mapped_field()`  
+  > For more advanced usage of `extract_mapped_field()` with fallback logic and JSON mappings, see [Define new mapping files](#define-new-mapping-files).
+
+5. Return metadata using the normalized keys defined by the project, based on the [DCAT standard](https://www.w3.org/TR/vocab-dcat/).
+  Each package of datasets must return a dictionary containing at least:
+  - `identifier`: the package's ID from the portal.
+  - `fileName`: the normalized name for saving the metadata file (provided to `get_package()`).
+  - `resources`: a list of resources, each one generated using `parse_resource()`.
+
+  It is also strongly recommended to include the following for debugging and traceability:
+  - `requestURL`: the exact URL used to fetch the metadata.
+  - `accessURL`: the public-facing URL where a user would normally access the package.
+
+  Each resource in the resources list must contain:
+  - `downloadURL`: the direct link to download the file.
+  - `fileName`: the filename, including its extension, to use when saving the resource locally.
+  - `mediaType`: the MIME type of the resource, which should be used to guess the proper file extension via `utils.get_extension_mime()`.
+
+  > Note: You don't need to include all possible DCAT fields, just the ones available in the portal. However, the structure of the returned metadata must remain consistent.
+
+6. Register portal detection:  
+  Update the function `detect_dms()` in `odcrawler.py` to detect your portal and return the correct crawler instance.
+
+### Define New Mapping Files
+
+You can also contribute to the project by defining your own JSON mapping files inside the `resources/` folder, following the naming pattern `<portal>_<field>_map.json` (lowercase) and then loading these mappings using `load_resource()` from `utils.py`, and assign them to a constant using the format `<PORTALNAME>CRAWLER_<FIELDNAME>_MAP` (uppercase).
+
+These are used by `utils.extract_mapped_field()` to normalize raw values (e.g. URIs) into human-readable text, and to avoid unnecessary requests for known or static entities (such as publishers, themes, spatial areas, etc.).
+
+#### Example of using a mapping file
+
+In the case of needing a new field map for the field `theme` in the crawler `ExampleCrawler`, where the field contains URIs that should be normalized to an object with a human-readable name and an identifier:
+
+- 1. Create a file named `resources/example_theme_map.json` with the desired content. Example:
+  ```json
+  {
+    "https://example.org/theme/health-care": {
+      "name": "Health Care",
+      "identifier": "HC12345"
+    }
+  }
+  ```
+- 2. Load the map using `load_resource()` in `utils.py`, providing a fallback value for unmapped entries:
+  ```python
+  EXAMPLECRAWLER_THEME_MAP = load_resource(
+      "example_theme_map.json",
+      fallback_value={"name": "FALLBACK_VALUE", "identifier": None}
+  )
+  ```
+- 3. Use `utils.extract_mapped_field()` in your crawler code to normalize a value:
+  ```python
+  utils.extract_mapped_field("https://example.org/theme/energy-efficiency", EXAMPLECRAWLER_THEME_MAP)
+  ```
+- 4. If the input exists in the map, the mapped value will be returned.
+
+  Otherwise, the fallback logic is applied:
+  - For URLs (as in the example below), the last segment is extracted, hyphens are replaced with spaces, and the result is converted to title case (e.g., `"energy-efficiency"` becomes `"Energy Efficiency"`).  
+  - For non-URLs, the raw value is used as-is.
+
+  The fallback result is then inserted into the `"FALLBACK_VALUE"` placeholder defined in the fallback template.
+
+  Final result:
+  ```python
+  [{ "name": "Energy Efficiency", "identifier": None }]
+  ```
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 
+---
 
-
-<!-- LICENSE -->
 ## License
 
 Distributed under the MIT License. See `LICENSE` for more information.
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 
-## Colaborators
+---
 
-
-<!-- CONTACT -->
 ## Contact
 
-Paula Margarita García-Tapia Mateo \
+* Paula Margarita García-Tapia Mateo \
 ✉️ paula.garciatapia@ua.es
 
-Alberto Berenguer Pastor \
+*  Alberto Berenguer Pastor \
 ✉️ alberto.berenguer@ua.es
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 
-
-<!-- MARKDOWN LINKS & IMAGES -->
 <!-- https://www.markdownguide.org/basic-syntax/#reference-style-links -->
 [contributors-shield]: https://img.shields.io/github/contributors/aberenguerpas/opendatacrawler?style=for-the-badge
 [contributors-url]: https://github.com/aberenguerpas/opendatacrawler/graphs/contributors

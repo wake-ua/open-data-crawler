@@ -8,7 +8,6 @@ class DatosGobEsCrawler():
     def __init__(self, domain, data_types, user_agent):
         self.domain = domain.rstrip("/")
         self.data_types = data_types
-
         self.user_agent = user_agent
 
     def get_package_list(self):
@@ -71,7 +70,12 @@ class DatosGobEsCrawler():
 
         response.raise_for_status()
 
-        data = response.json()["result"]["items"][0]
+        items = response.json()["result"].get("items", [])
+        if not items:
+            logger("WARNING", f"No data returned for package '{dataset_id}'")
+            return None
+
+        data = items[0]
         metadata = {}
 
         metadata["identifier"] = dataset_id
@@ -107,11 +111,12 @@ class DatosGobEsCrawler():
         metadata["license"] = data.get("license")
         metadata["source"] = self.domain
 
-        temporal = data.get("temporal", {}) or data.get("temporals", {})
-        metadata["temporal"] = {
-            "startDate": temporal.get("startDate") or temporal.get("start_date"),
-            "endDate": temporal.get("endDate") or temporal.get("end_date"),
-        }
+        temporal = data.get("temporal", {})
+        if isinstance(temporal, dict):
+            metadata["temporal"] = {
+                "startDate": temporal.get("startDate") or temporal.get("start_date"),
+                "endDate": temporal.get("endDate") or temporal.get("end_date"),
+            }
 
         metadata["geo"] = utils.extract_mapped_field(data.get("spatial"), utils.DATOSGOBESCRAWLER_SPATIAL_MAP)
 

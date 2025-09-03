@@ -62,6 +62,28 @@ class LogManager:
         if level == "print":
             print(final_message)
 
+    def clean_unused_logs(self, min_lines=2):
+        try:
+            deleted = 0
+            for file in os.listdir(self._log_dir):
+                file_path = os.path.join(self._log_dir, file)
+                if os.path.isfile(file_path) and file.endswith(".log"):
+                    try:
+                        with open(file_path, "r", encoding="utf-8") as f:
+                            lines = [line for line in f if line.strip()]
+
+                        if len(lines) <= min_lines:
+                            os.remove(file_path)
+                            deleted += 1
+                            self.log("OK", f"Deleted orphan/empty log file: {file}")
+                    except Exception as inner_e:
+                        self.log("ERROR", f"Could not read or delete log: {file}", inner_e)
+
+            if deleted:
+                self.log("OK", f"Cleaned {deleted} orphan/empty log file(s)")
+        except Exception as e:
+            self.log("ERROR", "Failed during orphan log cleanup", e)
+
     def move_to_domain(self, domain, move_file=True):
         target_dir = os.path.join(self._log_dir, domain)
         os.makedirs(target_dir, exist_ok=True)
@@ -74,7 +96,6 @@ class LogManager:
         if move_file:
             if os.path.exists(target_path):
                 with open(self._log_file_path, "r", encoding="utf-8") as src, open(target_path, "a", encoding="utf-8") as dst:
-                    self.log(None, "=" * 80)
                     dst.writelines(src.readlines())
                 os.remove(self._log_file_path)
             else:
@@ -90,5 +111,7 @@ class LogManager:
 
         self._logger.addHandler(new_handler)
         self._handler = new_handler
+
+        self.log(None, "=" * 80)
 
 log_manager = LogManager()
