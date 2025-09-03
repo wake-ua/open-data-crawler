@@ -1,0 +1,6 @@
+{
+    "C.A.gva": {"name": "Comunitat Valenciana", "type": "Autonomía"},
+    "Mnpio.Valencia": {"name": "Valencia", "type": "Municipio"},
+    "Prov.Castellón" : {"name": "Castellón", "type": "Provincia"},
+    "Mnpio.Alicante": {"name": "Alicante", "type": "Municipio"}
+}

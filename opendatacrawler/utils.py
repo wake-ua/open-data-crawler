@@ -16,7 +16,8 @@ from ftfy import fix_text
 from w3lib.url import url_query_cleaner
 from url_normalize import url_normalize
 import requests
-from opendatacrawler.setup_logger import logger
+from opendatacrawler.setup_logger import log_manager
+logger = log_manager.log
 
 ENCODING_CANDIDATES = ["utf-8", "iso-8859-1", "windows-1252", "windows-1250", "cp850"]
 
@@ -26,6 +27,7 @@ RAW_SIGNATURES = [
     (b"PK0", "application/zip-empty"),
     (b"<?xml", "text/xml"),
     (b"<!", "text/html"),
+    (b"<!DOCTYPE html>", "text/html"),
     (b"<html", "text/html"),
 ]
 
@@ -60,6 +62,32 @@ def delete_tempfiles(file_paths, keep_path=None):
                 pass
 
 # ==============================
+# Type and structure detection functions
+# ==============================
+
+def is_url(text):
+    return isinstance(text, str) and (text.startswith("http://") or text.startswith("https://"))
+
+def is_json(field):
+    if not isinstance(field, str):
+        return False
+    try:
+        json.loads(field)
+        return True
+    except json.JSONDecodeError:
+        return False
+
+def is_geojson(field):
+    if isinstance(field, dict):
+        return "type" in field and ("coordinates" in field or "features" in field)
+    if isinstance(field, str) and is_json(field):
+        try:
+            return is_geojson(json.loads(field))
+        except Exception:
+            return False
+    return False
+
+# ==============================
 # Request functions
 # ==============================
 
@@ -73,17 +101,13 @@ def make_request(url, current_agent, headers=None, params=None):
         headers["User-Agent"] = user_agent
 
         response = requests.get(url, headers=headers, params=params, verify=False)
-
         if response.status_code == 403:
-            logger("WARNING", f"403 Forbidden with User-Agent: {user_agent}, trying next one")
+            logger("NET", f"Forbidden with User-Agent '{user_agent}' (HTTP 403 - Forbidden), trying next one...")
             continue
 
         return response, user_agent
 
     return None, None
-
-def check_url(url):
-    return url.startswith("http://") or url.startswith("https://")
 
 def clean_url(u):
     u = url_normalize(u)
@@ -561,9 +585,27 @@ def get_extension_mime(mime_type):
         logger("ERROR", f"Failed to get extension for MIME type: '{mime_type}'", e)
         return None
 
+def get_mime_extension(ext):
+    try:
+        ext = ext.lower().lstrip(".")
+        mime = EXTENSION_TYPE_MAP.get(ext)
+        if mime:
+            return mime
+
+        guessed_mime = mimetypes.types_map.get(f".{ext}")
+        if guessed_mime:
+            return guessed_mime
+
+        logger("WARNING", f"No MIME type found for extension: '{ext}'")
+        return None
+
+    except Exception as e:
+        logger("ERROR", f"Failed to get MIME type for extension: '{ext}'", e)
+        return None
+
 def detect_mime_by_signature(raw):
     for sig, mime in RAW_SIGNATURES:
-        if raw.startswith(sig):
+        if raw.strip().startswith(sig):
             return mime
     return None
 
@@ -613,52 +655,72 @@ def check_mimetype_mismatch(file_path, num_bytes=2048):
 
 # == Data extraction functions ==
 
-def extract_multilang_field(data_list, lang_field, value_field):
+def extract_multilang_field(data, lang_field=None, value_field=None):
     result = {}
-    for entry in data_list:
-        lang = (entry.get(lang_field, "unknown") or "").strip().lower()
-        value = (entry.get(value_field) or "").strip()
+    if isinstance(data, list):
+        for entry in data:
+            lang = (entry.get(lang_field, "unknown") or "").strip().lower()
+            value = (entry.get(value_field) or "").strip()
+            if value:
+                result.setdefault(lang, []).append(value)
 
-        if value:
-            result.setdefault(lang, []).append(value)
+    elif isinstance(data, dict):
+        for lang, value in data.items():
+            if isinstance(value, str) and value.strip():
+                result[lang.strip().lower()] = [value.strip()]
 
     for lang in result:
         result[lang] = list(dict.fromkeys(result[lang]))
 
     return result
 
-def extract_uris_field(field_content, mapping):
+def extract_mapped_field(field_content, mapping):
     if not field_content:
         return []
 
-    def fallback(uri):
-        return uri.strip().split("/")[-1].replace("-", " ").title()
+    def fallback_uri(field):
+        return field.strip().split("/")[-1].replace("-", " ").title()
 
-    def apply_fallback_template(template, uri):
+    def apply_fallback_template(template, field):
         if isinstance(template, str):
-            return template.replace("FALLBACK_VALUE", fallback(uri))
+            return template.replace("FALLBACK_VALUE", fallback_uri(field))
         elif isinstance(template, dict):
             return {
-                k: apply_fallback_template(v, uri)
+                k: apply_fallback_template(v, field)
                 for k, v in template.items()
             }
         else:
             return template
 
-    uris = [field_content] if isinstance(field_content, str) else field_content if isinstance(field_content, list) else []
+    fields = [field_content] if isinstance(field_content, str) else field_content if isinstance(field_content, list) else []
 
     fallback_template = mapping.get("MAP_FALLBACK")
     result = []
-    for uri in uris:
-        mapped = mapping.get(uri)
+    for field in fields:
+        mapped = mapping.get(field)
         if mapped:
             result.append(mapped)
-        elif fallback_template:
-            result.append(apply_fallback_template(fallback_template, uri))
+        elif fallback_template and is_url(field):
+            result.append(apply_fallback_template(fallback_template, field))
+        elif is_url(field):
+            result.append(fallback_uri(field))
         else:
-            result.append(fallback(uri))
+            result.append(field)
 
     return result
+
+def extract_first_nonempty_value(field):
+    if isinstance(field, dict):
+        for value in field.values():
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    elif isinstance(field, list):
+        for item in field:
+            if isinstance(item, str) and item.strip():
+                return item.strip()
+    elif isinstance(field, str):
+        return field.strip()
+    return ""
 
 # == crawlerChangesInfo functions ==
 
@@ -704,7 +766,7 @@ def add_tag_explanations(resource, destination, tags, data_source=None):
         tags = tags.get("tags", [])
     elif isinstance(tags, str):
         tags = [tags]
-
+    
     explanations_dict = None
     if destination == "fileInfo":
         explanations_dict = FILE_INFO_EXPLANATIONS
@@ -758,6 +820,7 @@ def load_resource(filename, fallback_value=None):
 
 USER_AGENTS = load_resource("user_agents.json")
 MIME_TYPE_MAP = load_resource("mime_type_map.json")
+EXTENSION_TYPE_MAP ={v: k for k, v in MIME_TYPE_MAP.items()}
 
 RAW_CHANGES_EXPLANATIONS = load_resource("raw_changes_explanations.json")
 FILE_INFO_EXPLANATIONS = load_resource("file_info_explanations.json")
@@ -769,6 +832,10 @@ DATOSGOBESCRAWLER_THEME_MAP = load_resource(
 
 DATOSGOBESCRAWLER_SPATIAL_MAP = load_resource(
     "datosgobes_spatial_map.json",
+    fallback_value={"name": "FALLBACK_VALUE", "type": None}
+)
+CKANCRAWLER_SPATIAL_MAP = load_resource(
+    "ckan_spatial_map.json",
     fallback_value={"name": "FALLBACK_VALUE", "type": None}
 )
 

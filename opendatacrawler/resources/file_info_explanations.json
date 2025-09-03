@@ -10,12 +10,12 @@
         "value": "SKIPPED_ROWS"
     },
     "invalid_request": {
-        "reason": "The server rejected the download request due to a malformed or invalid URL (HTTP 400 Bad Request)"
+        "reason": "The server rejected the download request due to a malformed or invalid URL (HTTP 400 - Bad Request)"
     },
     "forbidden_resource": {
-        "reason": "Access to the resource was denied (HTTP 403 Forbidden)"
+        "reason": "Access to the resource was denied (HTTP 403 - Forbidden)"
     },
     "missing_resource": {
-        "reason": "The resource was not found on the server (HTTP 404 Not Found)"
+        "reason": "The resource was not found on the server (HTTP 404 - Not Found)"
     }
 }

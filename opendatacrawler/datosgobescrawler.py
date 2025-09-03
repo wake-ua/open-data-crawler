@@ -1,11 +1,8 @@
-import os
 import requests
-import re
-import json
 from urllib.parse import urlparse
 from opendatacrawler import utils
-from opendatacrawler.setup_logger import logger
-import threading
+from opendatacrawler.setup_logger import log_manager
+logger = log_manager.log
 
 class DatosGobEsCrawler():
     def __init__(self, domain, data_types, user_agent):
@@ -47,76 +44,6 @@ class DatosGobEsCrawler():
             logger("ERROR", f"Unexpected error parsing response from '{self.domain}'", e)
 
         return ids
-
-    def process_resource(self, resource, metadata_file_name, d_types, partial, avoid_data, save_dataset):
-        resource_file_name = resource.get("fileName")
-        if not resource_file_name:
-            logger("ERROR", f"Missing filename for resource in package '{metadata_file_name}'", indent=4)
-            return
-
-        if avoid_data:
-            logger("WARNING", f"Skipping resource '{resource_file_name}' of package '{metadata_file_name}'", indent=4)
-            return
-
-        download_url = resource.get("downloadURL")
-        media_type = resource.get("mediaType")
-
-        if not download_url or not media_type:
-            logger("ERROR", f"Missing download URL or media type for resource '{resource_file_name}' in package '{metadata_file_name}'", indent=4)
-            return
-
-        ext = resource_file_name.split(".")[-1]
-        if not d_types or ext in d_types:
-            path, tag = save_dataset(download_url, resource_file_name, partial)
-
-            if path:
-                resource["path"] = os.path.relpath(path, start=os.getcwd())
-                logger("OK", f"Resource '{resource_file_name}' from package '{metadata_file_name}' saved", indent=4)
-
-            if tag:
-                resource["crawlerChangesInfo"] = {
-                    "resourceMetadataChanges": [],
-                    "binaryFileChanges": [],
-                    "fileInfo": [],
-                    "complete": True
-                }
-                utils.add_tag_explanations(resource, "fileInfo", tag)
-
-    def process_package(self, pkg_id, categories, d_types, partial, avoid_data, save_dataset, save_metadata, save_path):
-        metadata_file_name = f"meta_{utils.generate_short_filename(f"{self.domain}_{pkg_id}")}.json"
-        try:
-            metadata_path = os.path.join(save_path, metadata_file_name)
-
-            if not os.path.exists(metadata_path):
-                package = self.get_package(pkg_id, metadata_file_name)
-            else:
-                logger("INFO", f"Metadata file already exists for package '{metadata_file_name}', loading and updating it if needed.", indent=2)
-                with open(metadata_path, "r", encoding="utf-8") as f:
-                    package = json.load(f)
-
-            if not package:
-                return
-            
-            should_process = True
-            if categories:
-                mapped_theme = utils.extract_uris_field(package.get("theme"), utils.DATOSGOBESCRAWLER_THEME_MAP)
-                should_process = mapped_theme and any(cat in mapped_theme for cat in categories)
-            
-            if should_process and package.get("resources"):
-                logger("...", f"Processing package: '{metadata_file_name}'", indent=2)
-                for resource in package["resources"]:
-                    if not resource.get("crawlerChangesInfo", {}).get("complete", False):
-                        self.process_resource(resource, metadata_file_name, d_types, partial, avoid_data, save_dataset)
-
-                save_metadata(package)
-                logger("OK", f"Successfully processed package '{metadata_file_name}'", indent=2)
-            else:
-                if not should_process:
-                    logger("ERROR", f"Package '{pkg_id}' does not match specified categories: {', '.join(categories)}", indent=2)
-                elif not package.get("resources"):
-                    logger("ERROR", f"Package '{pkg_id}' has no resources", indent=2)
-        except Exception as e:
-            logger("ERROR", f"Error processing package '{pkg_id}'", e, indent=2)
 
     def parse_resource(self, data, base_name):
         resource = {}
@@ -162,7 +89,7 @@ class DatosGobEsCrawler():
         if not isinstance(distributions, list):
             distributions = [distributions]
 
-        metadata["publisher"] = utils.extract_uris_field(data.get("publisher"), utils.DATOSGOBESCRAWLER_PUBLISHER_MAP)[0]
+        metadata["publisher"] = utils.extract_mapped_field(data.get("publisher"), utils.DATOSGOBESCRAWLER_PUBLISHER_MAP)[0]
 
         download_url = distributions[0].get("accessURL") or distributions[0].get("downloadURL")
         if download_url:
@@ -172,7 +99,7 @@ class DatosGobEsCrawler():
 
         metadata["keyword"] = utils.extract_multilang_field(data.get("keyword", []), "_lang", "_value")
 
-        metadata["theme"] = utils.extract_uris_field(data.get("theme"), utils.DATOSGOBESCRAWLER_THEME_MAP)
+        metadata["theme"] = utils.extract_mapped_field(data.get("theme"), utils.DATOSGOBESCRAWLER_THEME_MAP)
 
         metadata["accrualPeriodicity"] = {k: v for k, v in data.get("accrualPeriodicity", {}).get("value", {}).items() if k != "_about"}
         metadata["modified"] = data.get("modified")
@@ -180,13 +107,13 @@ class DatosGobEsCrawler():
         metadata["license"] = data.get("license")
         metadata["source"] = self.domain
 
-        temporal = data.get("temporal", {})
+        temporal = data.get("temporal", {}) or data.get("temporals", {})
         metadata["temporal"] = {
-            "startDate": temporal.get("startDate"),
-            "endDate": temporal.get("endDate")
+            "startDate": temporal.get("startDate") or temporal.get("start_date"),
+            "endDate": temporal.get("endDate") or temporal.get("end_date"),
         }
 
-        metadata["geo"] = utils.extract_uris_field(data.get("spatial"), utils.DATOSGOBESCRAWLER_SPATIAL_MAP)
+        metadata["geo"] = utils.extract_mapped_field(data.get("spatial"), utils.DATOSGOBESCRAWLER_SPATIAL_MAP)
 
         resource_list = []
         for idx, res in enumerate(distributions):

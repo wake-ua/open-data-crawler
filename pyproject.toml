@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "opendatacrawler"
-version = "0.2.0"
+version = "2.1.0"
 description = "Crawler for open data portals"
 authors = [
   { name="Alberto Berenguer Pastor", email="alberto.berenguer@ua.es" },
   { name="Paula Margarita García-Tapia Mateo", email="paula.garciatapia@ua.es"}
-  ]
+]
 requires-python = ">=3.12"
 dependencies = [
   "requests",

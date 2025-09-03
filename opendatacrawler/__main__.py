@@ -7,8 +7,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COM
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from opendatacrawler import utils
-from opendatacrawler.setup_logger import logger
 from opendatacrawler.odcrawler import OpenDataCrawler
+from opendatacrawler.setup_logger import log_manager
+logger = log_manager.log
 
 def main():
     parser = argparse.ArgumentParser()
@@ -22,16 +23,16 @@ def main():
                         help="Path to save data (Ex. -p /my/example/path/)")
     parser.add_argument("-s", "--max_seconds", type=int, required=False,
                         help="Max seconds to wait for server response during file download (e.g., -s 60)")
-    parser.add_argument("-pd", "--partial_dataset", required=False,
-                        action=argparse.BooleanOptionalAction,
+    parser.add_argument("-pd", "--partial_dataset", required=False, action=argparse.BooleanOptionalAction,
                         help="Save partial dataset (default: not save)")
     parser.add_argument("-id", "--id_dataset", nargs="+", required=False,
                         help="Save the dataset with that id (Ex. -id edu-alu-fpa-2021) (default: all)")
-    parser.add_argument("-nd", "--no_dataset", required=False,
-                        action=argparse.BooleanOptionalAction,
+    parser.add_argument("-nd", "--no_dataset", required=False, action=argparse.BooleanOptionalAction,
                         help="No save the dataset (default: save)")
     parser.add_argument("-mt", "--max_threads", type=int, required=False,
-        help="Maximum number of threads to use (default: based on CPU count, up to 32)")
+                        help="Maximum number of threads to use (default: based on CPU count, up to 32)")
+    parser.add_argument("--reset-domain", required=False, action=argparse.BooleanOptionalAction,
+                        help="Delete all data and logs for the specified domain before crawling")
 
     args = vars(parser.parse_args())
 
@@ -44,20 +45,38 @@ def main():
     id_dataset = args["id_dataset"]
     avoid_data = args["no_dataset"]
     max_threads = args["max_threads"] if args["max_threads"] else min(32, (os.cpu_count() or 1) * 5)
+    reset_domain = args.get("reset_domain")
 
     utils.print_intro()
     crawler = None
     try:
-        if utils.check_url(url):
+        if utils.is_url(url):
             crawler = OpenDataCrawler(url, path=d_path, data_types=d_types, sec=max_sec)
 
             if not crawler.dms:
+                log_manager.move_to_domain("_unknownDomain", move_file=True)
                 sys.exit(1)
 
             logger(None, "=" * 80, level="print")
 
             resume_data, downloaded_before_res, failed_before_res, failed_before_pkgs  = utils.recover_resume(save_path=crawler.save_path, accepted_types=d_types)
-         
+
+            if reset_domain:
+                log_path = os.path.join(os.getcwd(), "logs", utils.clean_url(url))
+                has_logs = os.path.isdir(log_path) and any(f.endswith(".log") for f in os.listdir(log_path))
+
+                if resume_data:
+                    logger("WARNING", f"Are you absolutely sure you want to delete all data ({len(resume_data)} packages and {len(downloaded_before_res)} resources) and logs for domain '{url}' ({crawler.dms})? This action cannot be undone. [Y/N]:", level="print")
+                    reset_domain_input = input().strip().lower() in {"y", "yes"}
+                elif has_logs:
+                    logger("WARNING", f"No resume data found, but there are logs for domain '{url}' ({crawler.dms}). Do you want to delete them? This action cannot be undone. [Y/N]:", level="print")
+                    reset_domain_input = input().strip().lower() in {"y", "yes"}
+                else:
+                    reset_domain_input = True
+
+                crawler.reset_domain(reset_domain_input)
+                logger(None, "=" * 80, level="print")
+
             if resume_data:
                 logger("OK", f"Loaded resume with {len(resume_data)} packages and {len(downloaded_before_res)} downloaded resources", level="print")
                 if failed_before_pkgs:
@@ -77,35 +96,25 @@ def main():
                 logger("...", f"Processing {len(packages_to_process)} packages...", level="print")
 
                 with ThreadPoolExecutor(max_workers=max_threads, thread_name_prefix="t") as executor:
-                    futures = {
-                        executor.submit(
-                            crawler.process_package,
-                            pkg_id,
-                            categories,
-                            d_types,
-                            partial,
-                            avoid_data
-                        ): pkg_id for pkg_id in packages_to_process
-                    }
-
+                    futures = {executor.submit(crawler.process_package, pkg_id, categories, d_types, partial, avoid_data): pkg_id for pkg_id in packages_to_process}
                     try:
                         for future in tqdm(as_completed(futures), total=len(packages), initial=len(packages) - len(packages_to_process), desc="Processing...", colour="green"):
                             future.result()
                     except KeyboardInterrupt:
                         logger("WARNING", "Interrupt received. Waiting for threads to finish gracefully... (this may take a while if many threads are active)", level="print")
                         executor.shutdown(wait=False, cancel_futures=True)
-                        
+
                 logger(None, "=" * 80, level="print")
 
                 resume_data, downloaded_after_res, failed_after_res, _ = utils.recover_resume(save_path=crawler.save_path, accepted_types=d_types)
 
                 logger("OK", f"{len(downloaded_after_res) - len(downloaded_before_res)} new resources downloaded in this run ({max(0, len(failed_after_res) - len(failed_before_res))} new failures, {len(set(failed_before_res) - set(failed_after_res))} recovered from previous failures): {len(downloaded_after_res)} successfully downloaded resources in total across {len(resume_data)} packages ({len(failed_after_res)} failed resources in total)", level="print")
             else:
-                logger("ERROR", "No packages to process or an error occurred.")
+                logger("OK", f"No packages left to process for '{crawler.dms}', everything is up-to-date", level="print")
         else:
-            logger("ERROR", "Incorrect domain form. Must have the form 'https://domain.example' or 'http://domain.example'")
-    except Exception:
-        logger("ERROR", "Unexpected error occurred", f"\n{traceback.format_exc()}")
+            logger("ERROR", "Incorrect domain form. Must have the form 'https://domain.example' or 'http://domain.example'", level="print")
+    except Exception as e:
+        logger("ERROR", "Unexpected error occurred", e)
 
 if __name__ == "__main__":
     main()
