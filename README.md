@@ -23,35 +23,36 @@
   </p>
 </div>
 
-<summary>Table of Contents</summary>
-<ol>
-  <li>
-    <a href="#about-the-project">About the Project</a>
-    <ul>
-      <li><a href="#key-features">Key Features</a></li>
-      <li><a href="#currently-supported-portals-and-sites">Currently Supported Portals and Sites</a></li>
-    </ul>
-  </li>
-  <li>
-    <a href="#getting-started">Getting Started</a>
-    <ul>
-      <li><a href="#requirements">Requirements</a></li>
-      <li><a href="#installation">Installation</a></li>
-    </ul>
-  </li>
-  <li><a href="#usage">Usage</a></li>
-  <li>
-    <a href="#contributing">Contributing</a>
-    <ul>
-      <li><a href="#how-to-contribute">How to Contribute</a></li>
-      <li><a href="#add-support-for-a-new-portal">Add Support for a New Portal</a></li>
-      <li><a href="#define-new-mapping-files">Define New Mapping Files</a></li>
-    </ul>
-  </li>
-  <li><a href="#license">License</a></li>
-  <li><a href="#contact">Contact</a></li>
-</ol>
-
+<details>
+  <summary>Table of Contents</summary>
+  <ol>
+    <li>
+      <a href="#about-the-project">About the Project</a>
+      <ul>
+        <li><a href="#key-features">Key Features</a></li>
+        <li><a href="#currently-supported-portals-and-sites">Currently Supported Portals and Sites</a></li>
+      </ul>
+    </li>
+    <li>
+      <a href="#getting-started">Getting Started</a>
+      <ul>
+        <li><a href="#requirements">Requirements</a></li>
+        <li><a href="#installation">Installation</a></li>
+      </ul>
+    </li>
+    <li><a href="#usage">Usage</a></li>
+    <li>
+      <a href="#contributing">Contributing</a>
+      <ul>
+        <li><a href="#how-to-contribute">How to Contribute</a></li>
+        <li><a href="#add-support-for-a-new-portal">Add Support for a New Portal</a></li>
+        <li><a href="#define-new-mapping-files">Define New Mapping Files</a></li>
+      </ul>
+    </li>
+    <li><a href="#license">License</a></li>
+    <li><a href="#contact">Contact</a></li>
+  </ol>
+</details>
 ---
 
 ## About The Project
@@ -157,26 +158,27 @@ And don't forget to give the project a star! Thanks for your support! 🌟
 ### Add Support for a New Portal
 1. Create a file named `<PortalName>crawler.py` inside `opendatacrawler/` folder (e.g. `examplecrawler.py`).
 2. Create a class `<PortalName>Crawler` with this constructor:
-   ```python
-   class ExampleCrawler:
-       def __init__(self, domain, data_types, user_agent):
-           self.domain = domain.rstrip("/")
-           self.data_types = data_types
-           self.user_agent = user_agent
+  ```python
+  class ExampleCrawler:
+      def __init__(self, domain, data_types, user_agent):
+          self.domain = domain.rstrip("/")
+          self.data_types = data_types
+          self.user_agent = user_agent
   ```
 3. Implement the required methods:
-  - **`get_package_list(self)`**: 
+  - **`get_package_list(self)`**:  
     Returns the list of dataset or package identifiers from the portal's API. Each identifier represents a dataset entry (i.e., a collection of one or more downloadable resources), which will be fetched individually in the next step.
 
   - **`parse_resource(self, data, base_name)`**:  
-    Normalizes a single resource object (distribution, file, link...) from the dataset into the project's internal resource schema. 
-    This should always include extracting the `downloadURL`, determining MIME type, and generating a normalized filename using: 
+    Normalizes a single resource object (distribution, file, link...) from the dataset into the project's internal resource schema.  
+    This should always include extracting the `downloadURL`, determining MIME type, and generating a normalized filename using:  
     ```python
     utils.generate_short_filename(base_name, ext=utils.get_extension_mime(resource["mediaType"]))
     ```
 
-  - **`get_package(self, dataset_id, metadata_file_name)`**:
-    Retrieves and normalizes the full metadata of a package of datasets given its identifier (including its associated resources using `parse_resource()`). To keep consistency across crawlers, it's recommended to structure the resource list as follows:
+  - **`get_package(self, dataset_id, metadata_file_name)`**:  
+    Retrieves and normalizes the full metadata of a package of datasets given its identifier (including its associated resources using `parse_resource()`).  
+    To keep consistency across crawlers, it's recommended to structure the resource list as follows:  
     ```python
     resource_list = []
     for idx, res in enumerate(resources):
