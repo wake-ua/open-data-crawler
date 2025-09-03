@@ -188,13 +188,13 @@ And don't forget to give the project a star! Thanks for your support! 🌟
     ```
 
 4. Use helper functions (`utils.py`) and built-in logging:
-- **Network calls**: `utils.make_request(url, self.user_agent, headers=...)`  
+  - **Network calls**: `utils.make_request(url, self.user_agent, headers=...)`  
   > Note: the function may rotate the `user_agent`. Always capture and reuse the returned value.
 
-- **File helpers**: `utils.generate_short_filename()`, `utils.get_mime_extension()`, `utils.get_extension_mime()`...
+  - **File helpers**: `utils.generate_short_filename()`, `utils.get_mime_extension()`, `utils.get_extension_mime()`...
 
-- **Field extraction helpers**: `utils.extract_multilang_field()`, `utils.extract_mapped_field()`  
-  > For more advanced usage of `extract_mapped_field()` with fallback logic and JSON mappings, see [Define new mapping files](#define-new-mapping-files).
+  - **Field extraction helpers**: `utils.extract_multilang_field()`, `utils.extract_mapped_field()`  
+    > For more advanced usage of `utils.extract_mapped_field()` with fallback logic and JSON mappings, see [Define new mapping files](#define-new-mapping-files).
 
 5. Return metadata using the normalized keys defined by the project, based on the [DCAT standard](https://www.w3.org/TR/vocab-dcat/).
   Each package of datasets must return a dictionary containing at least:
@@ -202,7 +202,7 @@ And don't forget to give the project a star! Thanks for your support! 🌟
   - `fileName`: the normalized name for saving the metadata file (provided to `get_package()`).
   - `resources`: a list of resources, each one generated using `parse_resource()`.
 
-  It is also strongly recommended to include the following for debugging and traceability:
+    It is also strongly recommended to include the following for debugging and traceability:
   - `requestURL`: the exact URL used to fetch the metadata.
   - `accessURL`: the public-facing URL where a user would normally access the package.
 
@@ -249,7 +249,7 @@ In the case of needing a new field map for the field `theme` in the crawler `Exa
 4. If the input exists in the map, the mapped value will be returned.
 
   Otherwise, the fallback logic is applied:
-  - For URLs (as in the example below), the last segment is extracted, hyphens are replaced with spaces, and the result is converted to title case (e.g., `"energy-efficiency"` becomes `"Energy Efficiency"`).  
+  - For URLs (as in the example below), the last segment is extracted, hyphens are replaced with spaces, and the result is converted to title case (e.g., "energy-efficiency" becomes "Energy Efficiency").  
   - For non-URLs, the raw value is used as-is.
 
   The fallback result is then inserted into the `"FALLBACK_VALUE"` placeholder defined in the fallback template.
@@ -273,10 +273,10 @@ Distributed under the MIT License. See `LICENSE` for more information.
 
 ## Contact
 
-* Paula Margarita García-Tapia Mateo \
+- Paula Margarita García-Tapia Mateo \
 ✉️ paula.garciatapia@ua.es
 
-*  Alberto Berenguer Pastor \
+-  Alberto Berenguer Pastor \
 ✉️ alberto.berenguer@ua.es
 
 <p align="right">(<a href="#top">back to top</a>)</p>
