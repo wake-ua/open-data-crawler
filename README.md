@@ -23,41 +23,58 @@
   </p>
 </div>
 
-<details>
-  <summary>Table of Contents</summary>
-  <ol>
-    <li><a href="#about-the-project">About the Project</a></li>
-    <li>
-      <a href="#getting-started">Getting Started</a>
-      <ul>
-        <li><a href="#requirements">Requirements</a></li>
-        <li><a href="#installation">Installation</a></li>
-      </ul>
-    </li>
-    <li><a href="#usage">Usage</a></li>
-    <li>
-      <a href="#contributing">Contributing</a>
-      <ul>
-        <li><a href="#how-to-contribute">How to Contribute</a></li>
-        <li><a href="#add-support-for-a-new-portal">Add Support for a New Portal</a></li>
-        <li><a href="#define-new-mapping-files">Define New Mapping Files</a></li>
-      </ul>
-    </li>
-    <li><a href="#license">License</a></li>
-    <li><a href="#contact">Contact</a></li>
-  </ol>
-</details>
+<summary>Table of Contents</summary>
+<ol>
+  <li>
+    <a href="#about-the-project">About the Project</a>
+    <ul>
+      <li><a href="#key-features">Key Features</a></li>
+      <li><a href="#currently-supported-portals-and-sites">Currently Supported Portals and Sites</a></li>
+    </ul>
+  </li>
+  <li>
+    <a href="#getting-started">Getting Started</a>
+    <ul>
+      <li><a href="#requirements">Requirements</a></li>
+      <li><a href="#installation">Installation</a></li>
+    </ul>
+  </li>
+  <li><a href="#usage">Usage</a></li>
+  <li>
+    <a href="#contributing">Contributing</a>
+    <ul>
+      <li><a href="#how-to-contribute">How to Contribute</a></li>
+      <li><a href="#add-support-for-a-new-portal">Add Support for a New Portal</a></li>
+      <li><a href="#define-new-mapping-files">Define New Mapping Files</a></li>
+    </ul>
+  </li>
+  <li><a href="#license">License</a></li>
+  <li><a href="#contact">Contact</a></li>
+</ol>
 
 ---
 
 ## About The Project
+
 Open Data Crawler is a tool designed to extract datasets, and optionally their metadata, from open data and statistics portals. The community can contribute by adding support for new portals or implementing additional features.
 
-Key Features:
-* Download datasets from open data or statistics portals
-* Retrieve metadata from resources
-* Filter datasets by data type
-* Filter datasets by topic or category
+### Key Features
+- Download datasets from open data or statistics portals
+- Retrieve metadata from resources
+- Filter datasets by data type
+- Filter datasets by topic or category
+
+### Currently Supported Portals and Sites
+- [x] [datos.gob.es](https://datos.gob.es)
+- [x] CKAN
+- [ ] Socrata *
+- [ ] [Eurostat](https://ec.europa.eu/eurostat) *
+- [ ] [World Bank Data Catalog](https://datacatalogapi.worldbank.org/) *
+- [ ] OpenDataSoft *
+
+\* Works with restrictions or download limitations  
+
+See the [open issues](https://github.com/aberenguerpas/opendatacrawler/issues) for a full list of proposed features and known issues.
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 
@@ -113,22 +130,6 @@ python opendatacrawler -d https://datos.gob.es -c tourism transport
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 
-## Currently Supported Portals and Sites
-- [x] [datos.gob.es](https://datos.gob.es)
-- [x] CKAN
-- [ ] Socrata *
-- [ ] [Eurostat](https://ec.europa.eu/eurostat) *
-- [ ] [World Bank Data Catalog](https://datacatalogapi.worldbank.org/) *
-- [ ] OpenDataSoft *
-
-\* Works with restrictions or download limitations  
-
-See the [open issues](https://github.com/aberenguerpas/opendatacrawler/issues) for a full list of proposed features and known issues.
-
-<p align="right">(<a href="#top">back to top</a>)</p>
-
----
-
 ## Contributing
 
 Contributions are what make the open source community such an amazing place to learn, share, and build together. Any contribution is **greatly appreciated**.  
@@ -162,20 +163,19 @@ And don't forget to give the project a star! Thanks for your support! 🌟
            self.domain = domain.rstrip("/")
            self.data_types = data_types
            self.user_agent = user_agent
-  ```  
+  ```
 3. Implement the required methods:
-  - **`get_package_list(self)`**`: 
+  - **`get_package_list(self)`**: 
     Returns the list of dataset or package identifiers from the portal's API. Each identifier represents a dataset entry (i.e., a collection of one or more downloadable resources), which will be fetched individually in the next step.
 
   - **`parse_resource(self, data, base_name)`**:  
     Normalizes a single resource object (distribution, file, link...) from the dataset into the project's internal resource schema. 
     This should always include extracting the `downloadURL`, determining MIME type, and generating a normalized filename using: 
     ```python
-    utils.```pythongenerate_short_filename(base_name, ext=utils.get_extension_mime(resource["mediaType"]))
+    utils.generate_short_filename(base_name, ext=utils.get_extension_mime(resource["mediaType"]))
     ```
-    ``.```
 
-  - **`get_package(self, dataset_id, metadata_file_name)`**`:
+  - **`get_package(self, dataset_id, metadata_file_name)`**:
     Retrieves and normalizes the full metadata of a package of datasets given its identifier (including its associated resources using `parse_resource()`). To keep consistency across crawlers, it's recommended to structure the resource list as follows:
     ```python
     resource_list = []
