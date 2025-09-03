@@ -108,7 +108,8 @@ To set up the project locally, follow these steps:
 
 ## Usage
 
-Using this tool is very simple: you only need to specify the URL of the data portal, and the tool will automatically detect the portal type and start downloading the data.  
+Using this tool is very simple: you only need to specify the URL of the data portal, and the tool will automatically detect the portal type and start downloading the data.
+
 For a full list of available commands, run:
 ```sh
 python opendatacrawler -h
@@ -171,14 +172,16 @@ And don't forget to give the project a star! Thanks for your support! 🌟
     Returns the list of dataset or package identifiers from the portal's API. Each identifier represents a dataset entry (i.e., a collection of one or more downloadable resources), which will be fetched individually in the next step.
 
   - **`parse_resource(self, data, base_name)`**:  
-    Normalizes a single resource object (distribution, file, link...) from the dataset into the project's internal resource schema.  
+    Normalizes a single resource object (distribution, file, link...) from the dataset into the project's internal resource schema.
+
     This should always include extracting the `downloadURL`, determining MIME type, and generating a normalized filename using:  
     ```python
     utils.generate_short_filename(base_name, ext=utils.get_extension_mime(resource["mediaType"]))
     ```
 
   - **`get_package(self, dataset_id, metadata_file_name)`**:  
-    Retrieves and normalizes the full metadata of a package of datasets given its identifier (including its associated resources using `parse_resource()`).  
+    Retrieves and normalizes the full metadata of a package of datasets given its identifier (including its associated resources using `parse_resource()`).
+    
     To keep consistency across crawlers, it's recommended to structure the resource list as follows:  
     ```python
     resource_list = []
@@ -189,7 +192,7 @@ And don't forget to give the project a star! Thanks for your support! 🌟
 
 4. Use helper functions (`utils.py`) and built-in logging:
   - **Network calls**: `utils.make_request(url, self.user_agent, headers=...)`  
-  > Note: the function may rotate the `user_agent`. Always capture and reuse the returned value.
+    > Note: the function may rotate the `user_agent`. Always capture and reuse the returned value.
 
   - **File helpers**: `utils.generate_short_filename()`, `utils.get_mime_extension()`, `utils.get_extension_mime()`...
 
@@ -203,8 +206,8 @@ And don't forget to give the project a star! Thanks for your support! 🌟
   - `resources`: a list of resources, each one generated using `parse_resource()`.
 
     It is also strongly recommended to include the following for debugging and traceability:
-  - `requestURL`: the exact URL used to fetch the metadata.
-  - `accessURL`: the public-facing URL where a user would normally access the package.
+    - `requestURL`: the exact URL used to fetch the metadata.
+    - `accessURL`: the public-facing URL where a user would normally access the package.
 
   Each resource in the resources list must contain:
   - `downloadURL`: the direct link to download the file.
