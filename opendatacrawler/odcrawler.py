@@ -28,7 +28,7 @@ class OpenDataCrawler():
 
         self.user_agent = None
 
-        logger("...", f"Detecting DMS for domain: {self.domain}", level="print")
+        logger("...", f"Detecting DMS for domain '{self.domain}'...", level="print")
         self.detect_dms()
 
     def detect_dms(self):
@@ -52,10 +52,10 @@ class OpenDataCrawler():
 
         for dms_name, endpoint in dms_endpoints.items():
             full_url = base_url + endpoint
-            logger("...", f"Checking DMS: '{dms_name}' at '{full_url}'", level="print")
+            logger("...", f"Checking DMS '{dms_name}' at '{full_url}'...", level="print")
 
             try:
-                response, self.user_agent = utils.make_request(full_url, self.user_agent, headers=headers)
+                response, self.user_agent = utils.make_request(full_url, self.user_agent, headers=headers, max_sec=5)
                 if not response:
                     logger("NET", f"No response from endpoint '{full_url}' while checking DMS '{dms_name}'")
                     continue
@@ -74,8 +74,8 @@ class OpenDataCrawler():
                     break
                 
             except requests.RequestException as e:
-                logger("ERROR", f"Failed to reach '{full_url}'", e)
-                break
+                logger("NET", f"Failed to reach '{full_url}'", e)
+                continue
             
         dms_classes = {
             "CKAN": CkanCrawler,
@@ -125,18 +125,12 @@ class OpenDataCrawler():
                 utils.create_folder(self.save_path)
             except Exception as e:
                 logger("ERROR", f"Failed to delete data/logs for '{self.domain}'", e, level="print")
-        else:
-            logger("WARNING", f"Reset for domain '{self.domain}' was cancelled by user", level="print")
-        
+
         log_manager.move_to_domain(self.clean_domain, move_file=True)
         log_manager.clean_unused_logs()
 
     def save_dataset(self, url, file_name, partial=False):
-        logger("...", f"Attempting to download resource '{file_name}' from: {url}", indent=2)
-
-        if url.lower().endswith("html"):
-            logger("WARNING", f"Resource '{file_name}' skipped (HTML detected): {url}", indent=2)
-            return None, None
+        logger("...", f"Attempting to download resource '{file_name}' from '{url}'...", indent=2)
 
         all_forbidden = True
         for user_agent in utils.get_user_agent_list(self.user_agent):
@@ -206,7 +200,7 @@ class OpenDataCrawler():
                 return
 
             meta_path = os.path.join(self.save_path, file_name)
-            logger("...", f"Saving metadata to: {meta_path}", indent=2)
+            logger("...", f"Saving metadata to '{meta_path}'...", indent=2)
             changes = False
             if "resources" in data and isinstance(data["resources"], list):
                 for resource in data["resources"]:
@@ -248,11 +242,11 @@ class OpenDataCrawler():
                         
                         if mismatch or temp_path or raw_flags or no_data:
                             if mismatch:
-                                logger("WARNING", f"Detected a media type mismatch for file '{dataset_path}', was declared as '{resource.get('mediaType')}', but detected as '{detected_mime}'")
+                                logger("WARNING", f"Detected a media type mismatch for file '{dataset_path}', was declared as '{resource.get('mediaType')}', but detected as '{detected_mime}'", indent=3)
                                 utils.fix_mime_mismatch(resource, guessed_extension, detected_mime)
                                 dataset_path = resource.get("path")
                             if no_data:
-                                logger("WARNING", f"File '{dataset_path}' has no data or no valid content")
+                                logger("WARNING", f"File '{dataset_path}' has no data or no valid content", indent=3)
                                 utils.add_tag_explanations(resource, "fileInfo", "no_data")
                             if raw_flags:
                                 utils.add_tag_explanations(resource, "binaryFileChanges", raw_flags, raw_flags)
@@ -270,43 +264,63 @@ class OpenDataCrawler():
 
                             decoded_content = utils.safe_decode(raw, resource["encoding"])
                             try:
-                                decoded_content, reconstructed_lines = utils.check_unbalanced_quotes(decoded_content)
-                                if reconstructed_lines > 0:
-                                    logger("WARNING", f"File '{dataset_path}' appears to contain broken multiline values, fixing")
-                                    with open(dataset_path, "wb") as f:
-                                        f.write(decoded_content.encode(resource["encoding"]).strip())
-
-                                    utils.add_tag_explanations(resource, "binaryFileChanges", "reconstructed_lines", {"reconstructed_lines": reconstructed_lines})
-                                    logger("OK", f"Fixed broken multiline values in file '{dataset_path}' by reconstructing logical rows")
+                                decoded_content, was_stripped = utils.strip_outer_quotes(decoded_content)
+                                if was_stripped:
+                                    logger("WARNING", f"File '{dataset_path}' appears to have unnecessary outer quotes, attempting removal...", indent=3)
+                                    utils.add_tag_explanations(resource, "binaryFileChanges", "stripped_outer_quotes")
                             except Exception as e:
-                                logger("ERROR", f"Error during reconstruction for file '{dataset_path}'", e, indent=3)
-                                continue
-                        
-                            if decoded_content.count("\n") < 1:
-                                utils.add_tag_explanations(resource, "fileInfo", "one_line")
-                                logger("WARNING", f"File '{dataset_path}' appears to contain only one line, likely not a structured/tabular file")
+                                logger("ERROR", f"Error during outer quote stripping for file '{dataset_path}'", e, indent=3)
                                 continue
                             
                             try:
+                                decoded_content, reconstructed_lines = utils.check_unbalanced_quotes(decoded_content)
+                                if reconstructed_lines > 0:
+                                    logger("WARNING", f"File '{dataset_path}' appears to contain broken multiline values, attempting reconstruction...", indent=3)
+                                    utils.add_tag_explanations(resource, "binaryFileChanges", "reconstructed_lines", {"reconstructed_lines": reconstructed_lines})
+                            except Exception as e:
+                                logger("ERROR", f"Error during line reconstruction for file '{dataset_path}'", e, indent=3)
+                                continue
+
+                            if was_stripped or reconstructed_lines > 0:
+                                with open(dataset_path, "wb") as f:
+                                    f.write(decoded_content.encode(resource["encoding"]).strip())
+
+                                if was_stripped:
+                                    logger("OK", f"Removed unnecessary outer quotes in file '{dataset_path}'", indent=3)
+                                if reconstructed_lines > 0:
+                                    logger("OK", f"Reconstructed {reconstructed_lines} multiline rows in file '{dataset_path}'", indent=3)
+                            
+                            if decoded_content.count("\n") < 1:
+                                utils.add_tag_explanations(resource, "fileInfo", "one_line")
+                                logger("WARNING", f"File '{dataset_path}' appears to contain only one line, likely not a structured/tabular file", indent=3)
+                                continue
+
+                            try:
                                 delimiter, start_row = utils.detect_delimiter(decoded_content)
-                                resource["delimiter"] = delimiter
                             except Exception as e:
                                 logger("ERROR", f"Failed to detect delimiter for file '{dataset_path}'", e, indent=3)
                                 continue
+                                
 
-                            if start_row:
-                                utils.add_tag_explanations(resource, "fileInfo", "skip_rows", {"skipped_rows": start_row})
-                                dialect = Dialect.from_descriptor({"delimiter": delimiter, "comment_rows":[start_row]})
+                            if delimiter:
+                                resource["delimiter"] = delimiter
+                                if start_row:
+                                    utils.add_tag_explanations(resource, "fileInfo", "skip_rows", {"skipped_rows": start_row})
+                                    dialect = Dialect.from_descriptor({"delimiter": delimiter, "comment_rows": [start_row]})
+                                else:
+                                    dialect = Dialect.from_descriptor({"delimiter": delimiter})
+
+                                try:
+                                    resource_metadata = describe(dataset_path, encoding=resource["encoding"], dialect=dialect).to_dict()
+                                    resource["schema"] = resource_metadata.get("schema")
+                                    logger("OK", f"Schema extracted from '{dataset_path}' (encoding: '{resource['encoding']}', delimiter: '{delimiter}', start_row: {start_row})", indent=3)
+                                except Exception as e:
+                                    logger("ERROR", f"Failed to extract schema from file '{dataset_path}'", e, indent=3)
                             else:
-                                dialect = Dialect.from_descriptor({"delimiter": delimiter})
-                            
-                            try:
-                                resource_metadata = describe(dataset_path, encoding=resource["encoding"], dialect=dialect).to_dict()
-                                resource["schema"] = resource_metadata.get("schema")
-                                logger("OK", f"Schema extracted from: {dataset_path} (encoding: {encoding})", indent=3)
-                            except Exception as e:
-                                logger("ERROR", f"Error extracting schema from: {dataset_path}", e, indent=3)
-                            
+                                utils.add_tag_explanations(resource, "fileInfo", "no_delimiter_detected")
+                                logger("WARNING", f"File '{dataset_path}' appears to not contain a delimiter, likely not a structured/tabular file", indent=3)
+                                continue
+
                         if "size" not in resource:
                             resource["size"] = humanize.naturalsize(os.path.getsize(dataset_path))
 
@@ -318,12 +332,25 @@ class OpenDataCrawler():
                         crawler_changes["complete"] = True
                         resource["crawlerChangesInfo"] = crawler_changes
 
+                        logger("OK", f"Resource '{dataset_path}' saved successfully from package '{meta_path}'", indent=3)
+            else:
+                logger("WARNING", f"No distributions found in package metadata '{meta_path}'", indent=2)
+                resource["crawlerChangesInfo"] = {
+                    "no_resources": {
+                        "missing_distributions": {
+                            "reason": "The dataset's package metadata does not contain any listed distributions or downloadable resources"
+                        },
+                        "complete": True
+                    },
+                    "packageCrawled": datetime.now().isoformat()
+                }
+
             if changes or not os.path.exists(meta_path):
                 with open(meta_path, "w", encoding="utf-8") as f:
                     json.dump(data, f, ensure_ascii=False, indent=4)
                 logger("OK", f"Metadata saved successfully to: {meta_path}", indent=2)
             else:
-                logger("...", f"Metadata file '{meta_path}' already exists and is up-to-date", indent=2)
+                logger("WARNING", f"Metadata file '{meta_path}' already exists and is up-to-date", indent=2)
         except Exception as e:
             logger("ERROR", "Failed to save metadata file", e, indent=2)
 
@@ -343,20 +370,20 @@ class OpenDataCrawler():
             if not os.path.exists(metadata_path):
                 package = self.get_package(pkg_id, metadata_file_name)
             else:
-                logger("INFO", f"Metadata file already exists for package '{metadata_path}', loading and updating it if needed.", indent=2)
+                logger("INFO", f"Metadata file already exists for package '{metadata_path}', loading and updating it if needed", indent=2)
                 with open(metadata_path, "r", encoding="utf-8") as f:
                     package = json.load(f)
 
             if not package:
                 return
-            
+
             should_process = True
             if categories:
                 mapped_theme = utils.extract_mapped_field(package.get("theme"), utils.DATOSGOBESCRAWLER_THEME_MAP)
                 should_process = mapped_theme and any(cat in mapped_theme for cat in categories)
             
             if should_process and package.get("resources"):
-                logger("...", f"Processing package: '{metadata_path}'", indent=2)
+                logger("...", f"Processing package: '{metadata_path}'...", indent=2)
                 for resource in package["resources"]:
                     if not resource.get("crawlerChangesInfo", {}).get("complete", False):
                         self.process_resource(resource, metadata_path, d_types, partial, avoid_data)
@@ -378,7 +405,7 @@ class OpenDataCrawler():
             return
 
         if avoid_data:
-            logger("WARNING", f"Skipping resource '{resource_file_name}' of package '{metadata_path}'", indent=4)
+            logger("....", f"Skipping resource '{resource_file_name}' of package '{metadata_path}'...", indent=4)
             return
 
         download_url = resource.get("downloadURL")
@@ -394,7 +421,6 @@ class OpenDataCrawler():
 
             if path:
                 resource["path"] = os.path.relpath(path, start=os.getcwd())
-                logger("OK", f"Resource '{os.path.join(self.save_path, resource_file_name)}' from package '{metadata_path}' saved", indent=4)
 
             if tag:
                 resource["crawlerChangesInfo"] = {

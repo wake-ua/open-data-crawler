@@ -48,7 +48,7 @@ def main():
     max_packages = args.get("max_packages")
     max_threads = args["max_threads"] if args["max_threads"] else min(32, (os.cpu_count() or 1) * 5)
     reset_domain = args.get("reset_domain")
-    
+
     utils.print_intro()
     crawler = None
     try:
@@ -57,7 +57,6 @@ def main():
 
             if not crawler.dms:
                 log_manager.move_to_domain("_unknownDomain", move_file=True)
-                log_manager.clean_unused_logs()
                 sys.exit(1)
 
             logger(None, "=" * 80, level="print")
@@ -77,14 +76,21 @@ def main():
                 else:
                     reset_domain_input = True
 
-                crawler.reset_domain(reset_domain_input)
+                if not reset_domain_input:
+                    logger("WARNING", f"Reset for domain '{crawler.domain}' was cancelled by user", level="print")
+            else:
+                reset_domain_input = False
+        
+            crawler.reset_domain(reset_domain_input)
+
+            if reset_domain_input:
                 resume_data, downloaded_before_res, failed_before_res, failed_before_pkgs  = utils.recover_resume(save_path=crawler.save_path, accepted_types=d_types)
                 logger(None, "=" * 80, level="print")
-
+            
             if resume_data:
                 logger("OK", f"Loaded resume with {len(resume_data)} packages and {len(downloaded_before_res)} downloaded resources", level="print")
                 if failed_before_pkgs:
-                    logger("...", f"Reattempting {len(failed_before_pkgs)} packages with {len(failed_before_res)} failed resources of accepted types ({d_types})", level="print")
+                    logger("...", f"Reattempting {len(failed_before_pkgs)} packages with {len(failed_before_res)} failed resources of accepted types ({d_types})...", level="print")
                 logger(None, "=" * 80, level="print")
 
             logger("...", f"Obtaining packages from '{url}'...", level="print")
@@ -125,6 +131,5 @@ def main():
             logger("ERROR", "Incorrect domain form. Must have the form 'https://domain.example' or 'http://domain.example'", level="print")
     except Exception as e:
         logger("ERROR", "Unexpected error occurred", e)
-
 if __name__ == "__main__":
     main()

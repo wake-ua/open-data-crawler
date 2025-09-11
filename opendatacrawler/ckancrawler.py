@@ -1,8 +1,6 @@
 import requests
-import os
 from urllib.parse import urlparse
 from opendatacrawler import utils
-import traceback
 import json
 from opendatacrawler.setup_logger import log_manager
 logger = log_manager.log

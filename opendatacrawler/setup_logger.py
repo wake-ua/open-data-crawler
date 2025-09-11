@@ -3,6 +3,7 @@ import threading
 import os
 import textwrap
 from datetime import datetime
+import re
 
 SPECIAL_TAGS_ICONS = {
     "OK": "✅",
@@ -29,15 +30,22 @@ class LogManager:
 
         self._handler = logging.FileHandler(self._log_file_path, mode="a", encoding="utf-8")
         self._handler.setFormatter(self._formatter)
-        self._handler.addFilter(self._hide_main_thread_filter())
+        self._handler.addFilter(self._thread_name_filter())
         self._logger.addHandler(self._handler)
 
-    def _hide_main_thread_filter(self):
-        class HideMainThreadFilter(logging.Filter):
+    def _thread_name_filter(self):
+        class ThreadNameFilter(logging.Filter):
             def filter(self, record):
-                record.threadName = "" if record.threadName == "MainThread" else f"[{record.threadName}]"
+                if record.threadName == "MainThread":
+                    record.threadName = ""
+                else:
+                    match = re.search(r"_(\d+)$", record.threadName)
+                    if match:
+                        record.threadName = f"[t_{int(match.group(1)):02d}]"
+                    else:
+                        record.threadName = f"[{record.threadName}]"
                 return True
-        return HideMainThreadFilter()
+        return ThreadNameFilter()
 
     def log(self, tag=None, text="", error=None, indent=None, level="log"):
         icon = SPECIAL_TAGS_ICONS.get(tag.upper() if tag else "  ", "  ")
@@ -107,7 +115,7 @@ class LogManager:
 
         new_handler = logging.FileHandler(target_path, mode="a", encoding="utf-8")
         new_handler.setFormatter(self._formatter)
-        new_handler.addFilter(self._hide_main_thread_filter())
+        new_handler.addFilter(self._thread_name_filter())
 
         self._logger.addHandler(new_handler)
         self._handler = new_handler

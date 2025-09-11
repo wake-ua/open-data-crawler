@@ -3,7 +3,10 @@
         "reason": "The file contains no usable data"
     },
     "one_line": {
-        "reason": "The file contains only one line, which may indicate it lacks structured or tabular content"
+        "reason": "The file contains only one line and may not follow a tabular structure with delimited fields"
+        },
+    "no_delimiter_detected": {
+        "reason": "The file does not appear to contain a valid delimiter and may not follow a tabular structure with delimited fields"
     },
     "skip_rows": {
         "reason": "The file contains SKIPPED_ROWS initial non-data lines that were skipped to reach the tabular content",

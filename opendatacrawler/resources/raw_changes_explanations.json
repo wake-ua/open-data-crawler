@@ -29,5 +29,8 @@
     "reconstructed_lines": {
         "reason": "Reconstructed RECONSTRUCTED_LINES broken lines caused by embedded newlines inside quoted fields in structured or tabular content",
         "value": "RECONSTRUCTED_LINES"
+    },
+    "stripped_outer_quotes": {
+        "reason": "Removed unnecessary outer quotes that wrapped the entire line in every row of the file"
     }
 }

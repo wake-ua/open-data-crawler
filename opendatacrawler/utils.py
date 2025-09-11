@@ -8,8 +8,8 @@ import re
 import tempfile
 import mmap
 import codecs
-import io
 import magic
+import statistics
 from collections import Counter
 from ftfy.badness import is_bad
 from ftfy import fix_text
@@ -20,6 +20,8 @@ from opendatacrawler.setup_logger import log_manager
 logger = log_manager.log
 
 ENCODING_CANDIDATES = ["utf-8", "iso-8859-1", "windows-1252", "windows-1250", "cp850"]
+
+NOT_ALLOWED_DELIMITERS = [":", " ",'"', "'", "_", "(", ")", "<", ">", "[", "]", "{", "}", "-", ".", "+", "*", "=", "/", "\\", "�"]
 
 RAW_SIGNATURES = [
     (b"\x37\x7A\xBC\xAF\x27\x1C", "application/x-7z-compressed"),
@@ -42,7 +44,7 @@ MIME_EXTENSION_EQUIVALENTS = {
 
 def create_folder(path):
     if os.path.exists(path):
-        logger("...", f"The directory '{path}' already exists, skipping creation")
+        logger("...", f"The directory '{path}' already exists, skipping creation...")
         return True
 
     try:
@@ -94,13 +96,13 @@ def is_geojson(field):
 def get_user_agent_list(current_agent):
     return [current_agent] + [ua for ua in USER_AGENTS if ua != current_agent] if current_agent else USER_AGENTS
 
-def make_request(url, current_agent, headers=None, params=None):
+def make_request(url, current_agent, headers=None, params=None, max_sec=None):
     headers = headers.copy() if headers else {}
 
     for user_agent in get_user_agent_list(current_agent):
         headers["User-Agent"] = user_agent
 
-        response = requests.get(url, headers=headers, params=params, verify=False)
+        response = requests.get(url, headers=headers, params=params, verify=False, timeout=max_sec)
         if response.status_code == 403:
             logger("NET", f"Forbidden with User-Agent '{user_agent}' (HTTP 403 - Forbidden), trying next one...")
             continue
@@ -139,7 +141,7 @@ def recover_resume(save_path, accepted_types=None):
                 meta = json.load(f)
 
             identifier = meta.get("identifier")
-          
+
             failed = []
             success = []
             for r in meta.get("resources", []):
@@ -152,7 +154,7 @@ def recover_resume(save_path, accepted_types=None):
                 else:
                     failed.append(file_name)
 
-            if failed:
+            if failed or meta.get("complete") is not True:
                 failed_packages.add(identifier)
 
             total_failed.extend(failed)
@@ -161,7 +163,6 @@ def recover_resume(save_path, accepted_types=None):
                 "failed_resources": failed,
                 "successful_resources": success
             }
-
         except Exception as e:
             logger("ERROR", f"Could not read {meta_path}", e)
 
@@ -232,12 +233,38 @@ def fix_lines(decoded_text):
 def fix_line(line):
     if not is_bad_encoding(line):
         return line, False
-    
+
     for fix_func in [fix_text, lambda x: " ".join(fix_text(w) for w in x.split()), clean_control_chars]:
         fixed = fix_func(line)
         if not is_bad_encoding(fixed):
             return fixed, True
     return line, None
+
+def are_quotes_balanced(line):
+    i = 0
+    in_quotes = False
+    while i < len(line):
+        if line[i] == '"':
+            if i + 1 < len(line) and line[i + 1] == '"':
+                i += 2
+            else:
+                in_quotes = not in_quotes
+                i += 1
+        else:
+            i += 1
+
+    return not in_quotes
+
+def check_unbalanced_quotes(text):
+    if '"' not in text:
+        return text, 0
+
+    for line in text.splitlines():
+        if not are_quotes_balanced(line):
+            lines, reconstructed_lines = reconstruct_lines(text)
+            return "\n".join(lines), reconstructed_lines
+
+    return text, 0
 
 def reconstruct_lines(text, max_lines=None):
     lines = []
@@ -247,19 +274,9 @@ def reconstruct_lines(text, max_lines=None):
     for line in text.splitlines():
         partial_row.append(line)
         joined_lines = "\n".join(partial_row)
-
-        quote_count = 0
-        i = 0
-        while i < len(joined_lines):
-            if joined_lines[i] == '"':
-                if i + 1 < len(joined_lines) and joined_lines[i + 1] == '"':
-                    i += 1
-                else:
-                    quote_count += 1
-            i += 1
-
-        if quote_count % 2 == 0:
-            reconstructed = " ".join(partial_row)
+        
+        if are_quotes_balanced(joined_lines):
+            reconstructed = "".join(partial_row)
             if len(partial_row) > 1:
                 reconstructed_lines += 1
             lines.append(reconstructed)
@@ -268,15 +285,30 @@ def reconstruct_lines(text, max_lines=None):
         if max_lines and len(lines) >= max_lines:
             break
 
+    if partial_row: 
+        lines.append("".join(partial_row))
+
     return lines, reconstructed_lines
 
-def check_unbalanced_quotes(text):
-    for line in text.splitlines():
-        if line.count('"') % 2 != 0:
-            lines, reconstructed_lines = reconstruct_lines(text)
-            return "\n".join(lines), reconstructed_lines
+def strip_outer_quotes(text):
+    lines = text.splitlines()
+    cleaned_lines = []
+    changed = False
 
-    return text, 0
+    for line in lines:
+        original = line.strip()
+
+        start_quotes = len(re.match(r'^"+', original).group(0)) if re.match(r'^"+', original) else 0
+        end_quotes = len(re.search(r'"+$', original).group(0)) if re.search(r'"+$', original) else 0
+
+        if start_quotes >= 2 and end_quotes >= 2:
+            inner = original[start_quotes:-end_quotes]
+            cleaned_lines.append(inner.strip())
+            changed = True
+        else:
+            cleaned_lines.append(original)
+
+    return "\n".join(cleaned_lines), changed
 
 # == Encoding functions ==
 
@@ -501,57 +533,74 @@ def detect_best_encoding(file_path, encodings=ENCODING_CANDIDATES, num_bytes=64*
 # == Delimiter detection functions ==
 
 def count_unquoted_delimiters(line, delim):
+    if not are_quotes_balanced(line):
+        return 0
+
     count = 0
     in_quotes = False
     i = 0
     while i < len(line):
-        char = line[i]
-        if char == '"':
+        if line[i] == '"':
             if i + 1 < len(line) and line[i + 1] == '"':
-                i += 1
+                i += 2
             else:
                 in_quotes = not in_quotes
-        elif char == delim and not in_quotes:
+                i += 1
+        elif line[i] == delim and not in_quotes:
             count += 1
-        i += 1
+            i += 1
+        else:
+            i += 1
     return count
 
-NOT_ALLOWED_DELIMITERS = ['"', "'", "_", "(", ")", "<", ">", "[", "]", "{", "}", "-", ".", "+", "*", "=", "/", "\\", "�"]
-
-def detect_delimiter(text, max_lines=50, min_consistent_lines=5):
+def detect_delimiter(text, max_lines=50, max_cv=0.6):
     lines = text.splitlines()[:max_lines]
     if not lines:
         return None, None
 
-    delimiter_scores = []
+    delimiter_candidates = []
 
     all_chars = set(c for line in lines for c in line if not c.isalnum() and c not in NOT_ALLOWED_DELIMITERS)
     for delim in all_chars:
         counts = [count_unquoted_delimiters(line, delim) for line in lines]
-        nonzero_counts = [c for c in counts if c > 0]
 
+        nonzero_counts = [c for c in counts if c > 0]
         if not nonzero_counts:
             continue
 
-        most_common_val, freq = Counter(nonzero_counts).most_common(1)[0]
-
-        min_required = min(min_consistent_lines, len(lines))
-        if freq < min_required:
-            continue
+        freq_counter = Counter(nonzero_counts)
+        most_common_val, freq = freq_counter.most_common(1)[0]
 
         try:
             first_idx = counts.index(most_common_val)
         except ValueError:
             continue
 
-        score = freq * (most_common_val ** 0.5)
-        delimiter_scores.append((score, delim, first_idx))
+        if len(nonzero_counts) > 1:
+            mean = statistics.mean(nonzero_counts)
+            stdev = statistics.stdev(nonzero_counts)
+            cv = stdev / mean if mean != 0 else float("inf")
+        else:
+            cv = 0
 
-    if not delimiter_scores:
+        if cv > max_cv:
+            continue
+
+        delimiter_candidates.append({
+            "delim": delim,
+            "freq": freq,
+            "cv": cv,
+            "first_idx": first_idx,
+            "most_common_val": most_common_val,
+        })
+
+    if not delimiter_candidates:
         return None, None
 
-    best = max(delimiter_scores, key=lambda x: (x[0], -x[2]))
-    return best[1], best[2]
+    delimiter_candidates.sort(key=lambda x: (-x["freq"], x["cv"], x["first_idx"]))
+    best = delimiter_candidates[0]
+
+    return best["delim"], best["first_idx"]
 
 # == MIME type functions ==
 
@@ -766,7 +815,7 @@ def add_tag_explanations(resource, destination, tags, data_source=None):
         tags = tags.get("tags", [])
     elif isinstance(tags, str):
         tags = [tags]
-    
+
     explanations_dict = None
     if destination == "fileInfo":
         explanations_dict = FILE_INFO_EXPLANATIONS
