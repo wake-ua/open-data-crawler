@@ -65,5 +65,11 @@
         "tag_explanation": {
             "reason": "Removed unnecessary outer quotes that wrapped the entire line in every row of the file"
         }
+    },
+    "stripped_data": {
+        "tag_placeholders": [],
+        "tag_explanation": {
+            "reason": "Removed leading and trailing whitespace characters from the file content"
+        }
     }
 }
