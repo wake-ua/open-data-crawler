@@ -333,7 +333,7 @@ class OpenDataCrawler():
                 with open(meta_path, "w", encoding="utf-8") as f:
                     json.dump(data, f, ensure_ascii=False, indent=4)
 
-                logger("OK", f"Metadata saved successfully to: {meta_path}", indent=2)
+                logger("OK", f"Metadata saved successfully to '{meta_path}'", indent=2)
                 
             else:
                 logger("WARNING", f"Metadata file '{meta_path}' already exists and is up-to-date", indent=2)
@@ -375,12 +375,12 @@ class OpenDataCrawler():
                         package = self.process_resource(resource, package, metadata_path, d_types, partial, avoid_data)
 
                 self.save_metadata(package)
-                logger("OK", f"Successfully processed package '{metadata_path}'", indent=2)
             else:
                 if not should_process:
                     logger("WARNING", f"Package '{pkg_id}' does not match specified categories: {', '.join(categories)}", indent=2)
                 elif not package.get("resources"):
-                    logger("WARNING", f"Package '{pkg_id}' has no resources", indent=2)
+                    logger("WARNING", f"Package '{pkg_id}' ('{metadata_path}') has no resources", indent=2)
+                    self.save_metadata(package)
         except Exception as e:
             logger("ERROR", f"Error processing package '{pkg_id}'", [e, traceback.format_exc()], indent=2)
 

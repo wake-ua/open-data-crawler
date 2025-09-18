@@ -150,12 +150,13 @@ def recover_resume(save_path, accepted_types=None):
             with open(meta_path, "r", encoding="utf-8") as f:
                 meta = json.load(f)
 
+            failed = []
+            success = []
+
             identifier = meta.get("identifier")
             if not is_completed(meta, None):
                 failed_packages.add(identifier)
             else:
-                failed = []
-                success = []
                 for file_name, _ in meta.get("resources", {}).items():
                     if accepted_types and file_name.split(".")[-1].lower() not in accepted_types:
                         continue
@@ -626,30 +627,40 @@ def detect_delimiter(text, max_lines=50, max_cv=0.6):
 
 # == MIME type functions ==
 
+def get_mime_and_ext(pos_mime_value):
+    pos_mime_value = pos_mime_value.strip().lower()
+    if "/" in pos_mime_value:
+        return pos_mime_value, get_extension_mime(pos_mime_value)
+    elif "_" in pos_mime_value:
+        guessed_ext = pos_mime_value.split("_")[-1]
+        return EXT_TO_MIME.get(guessed_ext), guessed_ext
+    else:
+        return EXT_TO_MIME.get(pos_mime_value), pos_mime_value
+
 def get_resource_ext_info(response):
-    if response:
-        content_type = response.headers.get("Content-Type", "")
-        media_type = content_type.split(";")[0].strip().lower() if content_type else None
+    if not response:
+        return None, None
 
-        content_disposition = response.headers.get("Content-Disposition", "")
-        ext = None
-        if "filename=" in content_disposition:
-            filename = content_disposition.split("filename=")[-1].strip().strip('"')
-            if "." in filename:
-                ext = filename.split(".")[-1].lower()
+    content_type = response.headers.get("Content-Type", "")
+    content_disposition = response.headers.get("Content-Disposition", "")
 
-        ext_mime = get_extension_mime(media_type)
-        if ext and ext != ext_mime:
-            ext = ext_mime
+    mime_type = None
+    ext = None
+    if "filename=" in content_disposition:
+        filename = content_disposition.split("filename=")[-1].strip().strip('"')
+        if "." in filename:
+            ext = filename.split(".")[-1].lower()
+            mime_type = EXT_TO_MIME.get(ext)
+            if mime_type:
+                return mime_type, ext
 
+    if content_type:
+        raw_mime = content_type.split(";")[0].split(",")[0].strip().lower()
+        mime_type, ext = get_mime_and_ext(raw_mime)
         if not ext:
-            ext = get_extension_mime(media_type)
-            if not ext:
-                logger("WARNING", f"No file extension found for MIME type: '{media_type}'")
+            logger("WARNING", f"No file extension found for MIME type: '{mime_type}'")
 
-        return media_type, ext
-
-    return None, None
+    return mime_type, ext
 
 def get_ole_extension(path):
     with olefile.OleFileIO(path) as ole:
@@ -672,9 +683,17 @@ def get_extension_mime(mime_type):
 
         if ext:
             return ext
-        
         elif mime_type.endswith("+zip"):
             return "zip"
+        elif "/" in mime_type:
+            suffix = mime_type.split("/", 1)[1]
+            for key in MIME_TYPE_MAP.keys():
+                if key.endswith("/" + suffix):
+                    ext = MIME_TYPE_MAP[key]
+                    if isinstance(ext, dict):
+                        ext = ext.get("extensions", [])[0]
+                    if ext:
+                        return ext
 
         guessed_ext = mimetypes.guess_extension(mime_type.lower())
         if guessed_ext:
@@ -691,50 +710,6 @@ def detect_mime_by_signature(raw):
         if raw.strip().startswith(sig):
             return mime
     return None
-
-def check_mimetype_mismatch(file_path, num_bytes=2048):
-    file_extension = os.path.splitext(file_path)[1].lower().lstrip(".")
-    with open(file_path, "rb") as f:
-        raw_content = f.read(num_bytes)
-
-    detected_mime = detect_mime_by_signature(raw_content)
-    if not detected_mime:
-        detected_mime_magic = magic.from_buffer(raw_content, mime=True)
-        if detected_mime_magic in ["application/octet-stream", "text/html"]:
-            detected_mime = "text/plain"
-        else:
-            detected_mime = detected_mime_magic
-
-    no_data = False
-    if detected_mime == "application/zip-empty":
-        logger("WARNING", f"File '{file_path}' is an empty 'application/zip'")
-        detected_mime = "application/zip"
-        no_data = True
-    elif detected_mime == "application/x-empty":
-        logger("WARNING", f"File '{file_path}' is an empty file")
-        detected_mime = "text/plain"
-        no_data = True
-
-    guessed_extension = None
-    mismatch = False
-    if detected_mime:
-        if detected_mime == "application/x-ole-storage":
-            guessed_extension = get_ole_extension(file_path)
-        else:
-            guessed_extension = get_extension_mime(detected_mime)
-
-        if not guessed_extension:
-            logger("WARNING", f"No extension guessed for MIME '{detected_mime}', defaulting to text/plain")
-            detected_mime = "text/plain"
-            guessed_extension = get_extension_mime(detected_mime)
-
-        allowed_mimes = MIME_EXTENSION_EQUIVALENTS.get(file_extension)
-        if allowed_mimes:
-            mismatch = detected_mime.lower() not in allowed_mimes
-        else:
-            mismatch = guessed_extension != file_extension
-
-    return mismatch, guessed_extension, detected_mime, no_data
 
 # == Data extraction functions ==
 
@@ -805,45 +780,7 @@ def extract_first_nonempty_value(field):
         return field.strip()
     return ""
 
-
 # == crawlerChangesInfo functions ==
-
-def fix_mime_mismatch(resource, guessed_extension, detected_mime):
-    old_filename = resource.get("fileName")
-    old_path = resource.get("path", "")
-    old_mime = resource.get("mediaType")
-
-    new_filename = old_filename.rsplit(".", 1)[0] + "." + guessed_extension
-    new_path = old_path.replace(old_filename, new_filename)
-
-    resource["crawlerChangesInfo"]["resourceMetadataChanges"].append({
-        "reason": "MIME type mismatch",
-        "fields": ["mediaType", "fileName", "path"],
-        "oldValue": {
-            "mediaType": old_mime,
-            "fileName": old_filename,
-            "path": old_path
-        },
-        "newValue": {
-            "mediaType": detected_mime,
-            "fileName": new_filename,
-            "path": new_path
-        }
-    })
-
-    resource["fileName"] = new_filename
-    resource["path"] = new_path
-    resource["mediaType"] = detected_mime
-
-    dataset_dir = os.path.dirname(old_path)
-    old_file_path = os.path.join(dataset_dir, old_filename)
-    new_file_path = os.path.join(dataset_dir, new_filename)
-
-    try:
-        os.rename(old_file_path, new_file_path)
-        logger("OK", f"Successfully renamed file '{old_filename}' to '{new_filename}'")
-    except Exception as e:
-        logger("ERROR", f"Failed to rename file '{old_filename}' to '{new_filename}': {e}")
 
 def init_metadata(resource=False):
     if not resource:
@@ -907,8 +844,20 @@ def load_resource(filename, fallback_value=None):
 
     return data
 
+def build_extension_to_mime_map(mime_map):
+    ext_to_mime = {}
+    for mime, info in mime_map.items():
+        if isinstance(info, dict):
+            exts = info.get("extensions")
+            if exts and len(exts) > 0:
+                first_ext = exts[0].lower()
+                if first_ext not in ext_to_mime:
+                    ext_to_mime[first_ext] = mime
+    return ext_to_mime
+
 USER_AGENTS = load_resource("user_agents.json")
 MIME_TYPE_MAP = load_resource("mime_extensions.json")
+EXT_TO_MIME = build_extension_to_mime_map(MIME_TYPE_MAP)
 
 CRAWLER_CHANGES_INFO = {
     **load_resource("raw_changes_explanations.json"),

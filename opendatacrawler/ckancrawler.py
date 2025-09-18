@@ -46,17 +46,23 @@ class CkanCrawler():
         resource["name"] = resource_meta.get("name")
         resource["description"] = resource_meta.get("description")
 
-        resource["downloadURL"] = resource_meta.get("download_url") or resource_meta.get("url") or resource_meta.get("original_url")
+        resource["downloadURL"] = (resource_meta.get("download_url") or resource_meta.get("url") or resource_meta.get("original_url"))
         if not utils.is_url(resource["downloadURL"]):
-            resource["downloadURL"] = f"https://{resource["downloadURL"]}"
+            resource["downloadURL"] = f"https://{resource['downloadURL']}"
 
         meta_mimetype = resource_meta.get("mimetype") or resource_meta.get("format") or ""
         meta_ext = utils.get_extension_mime(meta_mimetype) if "/" in meta_mimetype else meta_mimetype.lower()
 
+        meta_mimetype_op, meta_ext_op = utils.get_mime_and_ext(meta_mimetype)
+        if meta_mimetype_op and meta_ext_op:
+            meta_mimetype = meta_mimetype_op
+            meta_ext = meta_ext_op
+
         try:
             response, self.user_agent = utils.make_request(resource["downloadURL"], self.user_agent)
             media_type, ext = utils.get_resource_ext_info(response)
-        except Exception as e:
+            media_type, ext = utils.get_mime_and_ext(media_type)
+        except Exception:
             resource["mediaType"] = meta_mimetype
             resource["fileName"] = f"{base_name}.{meta_ext}"
 
@@ -66,8 +72,13 @@ class CkanCrawler():
             if media_type and media_type not in ["application/octet-stream", "text/plain"]:
                 resource["mediaType"] = media_type
             else:
-                resource["mediaType"] = "text/csv" if "csv" in meta_mimetype.lower() else meta_mimetype
-                ext = meta_ext
+                if meta_mimetype:
+                    resource["mediaType"] = meta_mimetype
+                    ext = meta_ext
+                elif media_type:
+                    resource["mediaType"] = media_type
+                else:
+                    resource["mediaType"] = None
 
             logger("WARNING", f"Detected a media type mismatch for file {resource['downloadURL']} '{base_name}', was declared as '{meta_mimetype}' (.{meta_ext}), but detected as '{media_type}' (.{ext})", indent=3)
             resource_crawler_info["fileMetadataChanges"].update(
@@ -77,9 +88,18 @@ class CkanCrawler():
                 })
             )
         else:
-            resource["mediaType"] = media_type
+            if media_type:
+                resource["mediaType"] = media_type
+            else:
+                resource["mediaType"] = meta_mimetype
+                ext = meta_ext
 
         resource["fileName"] = f"{base_name}.{ext}"
+
+        if not resource["mediaType"] or not ext:
+            print("👾💩🐵🐵🐷EEE, NUEVO!!!!!!")
+            print(f"[FINAL] File name: {resource['fileName']} | Media type: {resource['mediaType']}")
+            print("==========================================")
         return resource, resource_crawler_info
 
     def get_package(self, dataset_id, metadata_file_name):

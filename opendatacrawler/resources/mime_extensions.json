@@ -4298,6 +4298,9 @@
     "compressible": false,
     "extensions": ["xls","xlm","xla","xlc","xlt","xlw"]
   },
+  "application/xls": {
+    "extensions": ["xls"]
+  },
   "application/vnd.ms-excel.addin.macroenabled.12": {
     "source": "iana",
     "extensions": ["xlam"]
@@ -9344,5 +9347,16 @@
   },
   "x-shader/x-vertex": {
     "compressible": true
+  },
+  "application/gpkg": {
+    "compressible": false,
+    "extensions": ["gpkg"]
+  },
+  "application/dxf": {
+    "compressible": false,
+    "extensions": ["dxf"]
+  },
+  "application/x-sqlite3": {
+    "extensions": ["sqlite"]
   }
 }
