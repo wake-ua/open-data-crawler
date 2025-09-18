@@ -62,7 +62,7 @@ def main():
             logger(None, "=" * 80, level="print")
 
             resume_data, downloaded_before_res, failed_before_res, failed_before_pkgs  = utils.recover_resume(save_path=crawler.save_path, accepted_types=d_types)
-
+            has_logs = None
             if reset_domain:
                 log_path = os.path.join(os.getcwd(), "logs", utils.clean_url(url))
                 has_logs = os.path.isdir(log_path) and any(f.endswith(".log") for f in os.listdir(log_path))
