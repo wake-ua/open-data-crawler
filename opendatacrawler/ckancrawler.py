@@ -50,12 +50,18 @@ class CkanCrawler():
         if not utils.is_url(resource["downloadURL"]):
             resource["downloadURL"] = f"https://{resource["downloadURL"]}"
 
-        response, self.user_agent = utils.make_request(resource["downloadURL"], self.user_agent)
-        media_type, ext = utils.get_resource_ext_info(response)
-
         meta_mimetype = resource_meta.get("mimetype") or resource_meta.get("format") or ""
         meta_ext = utils.get_extension_mime(meta_mimetype) if "/" in meta_mimetype else meta_mimetype.lower()
-     
+
+        try:
+            response, self.user_agent = utils.make_request(resource["downloadURL"], self.user_agent)
+            media_type, ext = utils.get_resource_ext_info(response)
+        except Exception as e:
+            resource["mediaType"] = meta_mimetype
+            resource["fileName"] = f"{base_name}.{meta_ext}"
+
+            return resource, resource_crawler_info
+
         if meta_ext and ext != meta_ext:
             if media_type and media_type not in ["application/octet-stream", "text/plain"]:
                 resource["mediaType"] = media_type
@@ -74,7 +80,6 @@ class CkanCrawler():
             resource["mediaType"] = media_type
 
         resource["fileName"] = f"{base_name}.{ext}"
-
         return resource, resource_crawler_info
 
     def get_package(self, dataset_id, metadata_file_name):
@@ -92,6 +97,7 @@ class CkanCrawler():
                 return None
 
             response.raise_for_status()
+
         except requests.exceptions.RequestException as e:
                 status_code = getattr(e.response, "status_code", None)
                 tag = None
@@ -106,7 +112,7 @@ class CkanCrawler():
                 return metadata
 
         data = response.json()["result"]
-        
+
         metadata["identifier"] = dataset_id
         metadata["requestURL"] = url
         metadata["accessURL"] = f"{self.domain}/dataset/{data.get("name")}"

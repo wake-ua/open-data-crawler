@@ -176,12 +176,15 @@ class OpenDataCrawler():
                         return None, "no_data"
 
                     return path, None
+            except requests.exceptions.SSLError as e:
+                logger("ERROR", f"SSL error downloading '{file_name}' ({url})", e, indent=3)
+                return None, "ssl_error"
             except requests.exceptions.RequestException as e:
                 status_code = getattr(e.response, "status_code", None)
                 tag = None
                 if status_code:
                     tag = utils.get_https_error_tag(status_code)
-
+                
                 logger("ERROR", f"Error downloading '{file_name}' ({url})", e, indent=2)
                 return None, tag
 
@@ -200,7 +203,6 @@ class OpenDataCrawler():
 
             meta_path = os.path.join(self.save_path, file_name)
             logger("...", f"Saving metadata to '{meta_path}'...", indent=2)
-            changes = False
             if "resources" in data:
                 for dataset_file_name, resource in data["resources"].items():
                     dataset_path = os.path.join(self.save_path, dataset_file_name)
@@ -208,7 +210,6 @@ class OpenDataCrawler():
                         continue
 
                     if not utils.is_completed(data, dataset_file_name):
-                        changes = True
                         mime_type = resource.get("mediaType")
                         try:
                             encoding = temp_path = raw_flags = no_data = None
@@ -304,24 +305,40 @@ class OpenDataCrawler():
                         data["crawlerInfo"]["resourcesInfo"][dataset_file_name]["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
                         logger("OK", f"Resource '{dataset_path}' saved successfully from package '{meta_path}'", indent=3)
             else:
-                changes = True
                 logger("WARNING", f"No distributions found in package metadata '{meta_path}'", indent=2)
                 data["crawlerInfo"]["packageInfo"].update(utils.add_tag_explanations("no_resources"))
+                data["crawlerInfo"]["packageStatus"]["packageCompleted"] = datetime.now().isoformat()
 
-            if changes or not os.path.exists(meta_path):
-                if "crawlerInfo" in data:
-                    data["crawlerInfo"] = data.pop("crawlerInfo")
+            if "crawlerInfo" in data:
+                data["crawlerInfo"] = data.pop("crawlerInfo")
+
+            old_data = None
+            if os.path.exists(meta_path):
+                try:
+                    with open(meta_path, "r", encoding="utf-8") as f:
+                        old_data = json.load(f)
+                except Exception:
+                    old_data = None
+
+            if old_data != data:
+                all_resources_complete = True
+                for _, res_info in data["crawlerInfo"]["resourcesInfo"].items():
+                    if not res_info.get("fileStatus", {}).get("fileCompleted"):
+                        all_resources_complete = False
+                        break
+
+                if all_resources_complete:
+                    data["crawlerInfo"]["packageStatus"]["packageCompleted"] = datetime.now().isoformat()
 
                 with open(meta_path, "w", encoding="utf-8") as f:
                     json.dump(data, f, ensure_ascii=False, indent=4)
 
                 logger("OK", f"Metadata saved successfully to: {meta_path}", indent=2)
-                data["crawlerInfo"]["packageStatus"]["packageCompleted"] = datetime.now().isoformat()
+                
             else:
                 logger("WARNING", f"Metadata file '{meta_path}' already exists and is up-to-date", indent=2)
-        except Exception:
-            print(json.dumps(resource, indent=4, ensure_ascii=False))
-            logger("ERROR", f"Failed to save metadata file '{meta_path}'", f"\n{traceback.format_exc()}", indent=2)
+        except Exception as e:
+            logger("ERROR", f"Failed to save metadata file '{meta_path}'", [e, traceback.format_exc()], indent=2)
 
     def get_package_list(self):
         packages = self.dms_instance.get_package_list()
@@ -365,13 +382,12 @@ class OpenDataCrawler():
                 elif not package.get("resources"):
                     logger("WARNING", f"Package '{pkg_id}' has no resources", indent=2)
         except Exception as e:
-            logger("ERROR", f"Error processing package '{pkg_id}'", e, indent=2)
+            logger("ERROR", f"Error processing package '{pkg_id}'", [e, traceback.format_exc()], indent=2)
 
     def process_resource(self, resource, package, metadata_path, d_types, partial, avoid_data):
         resource_file_name = resource.get("fileName")
         if not resource_file_name:
             logger("ERROR", f"Missing filename for resource in package '{metadata_path}'", indent=4)
-            return package
 
         if avoid_data:
             logger("....", f"Skipping resource '{resource_file_name}' of package '{metadata_path}'...", indent=4)

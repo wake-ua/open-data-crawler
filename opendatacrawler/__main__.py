@@ -126,7 +126,10 @@ def main():
                 resume_data, downloaded_after_res, failed_after_res, _ = utils.recover_resume(save_path=crawler.save_path, accepted_types=d_types)
                 logger("OK", f"{len(downloaded_after_res) - len(downloaded_before_res)} new resources downloaded in this run ({max(0, len(failed_after_res) - len(failed_before_res))} new failures, {len(set(failed_before_res) - set(failed_after_res))} recovered from previous failures): {len(downloaded_after_res)} successfully downloaded resources in total across {len(resume_data)} packages ({len(failed_after_res)} failed resources in total)", level="print")
             else:
-                logger("OK", f"No packages left to process for '{crawler.dms}', everything is up-to-date", level="print")
+                if not id_dataset and not avoid_data and not max_packages and not categories and not d_types:
+                    logger("OK", f"No packages left to process for '{crawler.dms}', everything is up-to-date", level="print")
+                else:
+                    logger("OK", f"No packages left to process for '{crawler.dms}', everything is up-to-date with the configuration provided", level="print")
         else:
             logger("ERROR", "Incorrect domain form. Must have the form 'https://domain.example' or 'http://domain.example'", level="print")
     except Exception as e:

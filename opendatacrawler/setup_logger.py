@@ -47,13 +47,20 @@ class LogManager:
                 return True
         return ThreadNameFilter()
 
-    def log(self, tag=None, text="", error=None, indent=None, level="log"):
+    def log(self, tag=None, text="", error=None, indent=None, level="log", traceback=True):
         icon = SPECIAL_TAGS_ICONS.get(tag.upper() if tag else "  ", "  ")
 
         message = f"[{icon}][{tag.upper()}]" if tag else ""
         final_message = f"{message} {text}".strip()
         if error:
-            final_message += f" : {error}"
+            if isinstance(error, list):
+                if traceback:
+                    final_message += f" : {error[1]}"
+                else:
+                    final_message += f" :\n{error[0]}"
+            else:
+                final_message += f" : {error}"
+
         if indent:
             final_message = textwrap.indent(final_message, "-" * indent)
 

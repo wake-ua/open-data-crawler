@@ -32,6 +32,12 @@
             "reason": "The server rejected the download request due to a malformed or invalid URL (HTTP 400 - Bad Request)"
         }
     },
+    "ssl_error": {
+        "tag_placeholders": [],
+        "tag_explanation": {
+            "reason": "The file could not be downloaded because the secure connection to the server could not be established"
+        }
+    },
     "forbidden_resource": {
         "tag_placeholders": [],
         "tag_explanation": {

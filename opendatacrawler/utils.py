@@ -151,20 +151,19 @@ def recover_resume(save_path, accepted_types=None):
                 meta = json.load(f)
 
             identifier = meta.get("identifier")
-
-            failed = []
-            success = []
-            for file_name, _ in meta.get("resources", {}).items():
-                if accepted_types and file_name.split(".")[-1].lower() not in accepted_types:
-                    continue
-
-                if is_completed(meta, file_name):
-                    success.append(file_name)
-                else:
-                    failed.append(file_name)
-
-            if failed or not is_completed(meta, None):
+            if not is_completed(meta, None):
                 failed_packages.add(identifier)
+            else:
+                failed = []
+                success = []
+                for file_name, _ in meta.get("resources", {}).items():
+                    if accepted_types and file_name.split(".")[-1].lower() not in accepted_types:
+                        continue
+
+                    if is_completed(meta, file_name):
+                        success.append(file_name)
+                    else:
+                        failed.append(file_name)
 
             total_failed.extend(failed)
             total_successful.extend(success)
