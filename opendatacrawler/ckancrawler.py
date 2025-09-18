@@ -96,10 +96,6 @@ class CkanCrawler():
 
         resource["fileName"] = f"{base_name}.{ext}"
 
-        if not resource["mediaType"] or not ext:
-            print("👾💩🐵🐵🐷EEE, NUEVO!!!!!!")
-            print(f"[FINAL] File name: {resource['fileName']} | Media type: {resource['mediaType']}")
-            print("==========================================")
         return resource, resource_crawler_info
 
     def get_package(self, dataset_id, metadata_file_name):

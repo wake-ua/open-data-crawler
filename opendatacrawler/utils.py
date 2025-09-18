@@ -800,8 +800,8 @@ def get_extension_mime(mime_type):
 
         if ext:
             return ext
-        elif mime_type.endswith("+zip"):
-            return "zip"
+        elif "+" in mime_type:
+            return mime_type.split("+")[-1]
         elif "/" in mime_type:
             suffix = mime_type.split("/", 1)[1]
             for key in MIME_TYPE_MAP.keys():

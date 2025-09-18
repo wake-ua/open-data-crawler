@@ -27,7 +27,8 @@
   },
   "application/ace+json": {
     "source": "iana",
-    "compressible": true
+    "compressible": true,
+    "extensions": ["json"]
   },
   "application/ace-groupcomm+cbor": {
     "source": "iana"
@@ -5737,7 +5738,8 @@
     "extensions": ["sfs"]
   },
   "application/vnd.sqlite3": {
-    "source": "iana"
+    "source": "iana",
+    "extensions": ["sqlite"]
   },
   "application/vnd.sss-cod": {
     "source": "iana"
