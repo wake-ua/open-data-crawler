@@ -275,63 +275,132 @@ def are_quotes_balanced(line):
                 i += 1
         else:
             i += 1
-
     return not in_quotes
 
-def check_unbalanced_quotes(text):
-    if '"' not in text:
-        return text, 0
-
-    for line in text.splitlines():
-        if not are_quotes_balanced(line):
-            lines, reconstructed_lines = reconstruct_lines(text)
-            return "\n".join(lines), reconstructed_lines
-
-    return text, 0
-
-def reconstruct_lines(text, max_lines=None):
-    lines = []
-    partial_row = []
+def check_unbalanced_quotes(path, encoding):
+    temp_path = None
     reconstructed_lines = 0
+    try:
+        with open(path, "rb") as f:
+            mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
 
-    for line in text.splitlines():
-        partial_row.append(line)
-        joined_lines = "\n".join(partial_row)
-        
-        if are_quotes_balanced(joined_lines):
-            reconstructed = "".join(partial_row)
-            if len(partial_row) > 1:
-                reconstructed_lines += 1
-            lines.append(reconstructed)
-            partial_row = []
+            with tempfile.NamedTemporaryFile(mode="w", encoding=encoding, delete=False) as temp_out:
+                temp_path = temp_out.name
+                line_bytes = b""
+                partial_row = []
 
-        if max_lines and len(lines) >= max_lines:
-            break
+                for byte in iter(lambda: mm.read(1), b""):
+                    line_bytes += byte
 
-    if partial_row: 
-        lines.append("".join(partial_row))
+                    if byte == b"\n":
+                        line = safe_decode(line_bytes, encoding).strip()
 
-    return lines, reconstructed_lines
+                        partial_row.append(line)
+                        joined_lines = "\n".join(partial_row)
 
-def strip_outer_quotes(text):
-    lines = text.splitlines()
-    cleaned_lines = []
-    changed = False
+                        if are_quotes_balanced(joined_lines):
+                            reconstructed = "".join(partial_row)
+                            if len(partial_row) > 1:
+                                reconstructed_lines += 1
 
-    for line in lines:
-        original = line.strip()
+                            temp_out.write(reconstructed + "\n")
+                            partial_row = []
 
-        start_quotes = len(re.match(r'^"+', original).group(0)) if re.match(r'^"+', original) else 0
-        end_quotes = len(re.search(r'"+$', original).group(0)) if re.search(r'"+$', original) else 0
+                        line_bytes = b""
 
-        if start_quotes >= 2 and end_quotes >= 2:
-            inner = original[start_quotes:-end_quotes]
-            cleaned_lines.append(inner.strip())
-            changed = True
-        else:
-            cleaned_lines.append(original)
+                if partial_row:
+                    temp_out.write("".join(partial_row) + "\n")
 
-    return "\n".join(cleaned_lines), changed
+    except Exception as e:
+        logger("ERROR", f"Error during line reconstruction for file '{path}'", e, indent=3)
+        return None, 0
+
+    return temp_path, reconstructed_lines
+
+def strip_outer_quotes(path, encoding):
+    temp_path = None
+    was_stripped = False
+    try:
+        with open(path, "rb") as f:
+            mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+
+            with tempfile.NamedTemporaryFile(mode="w", encoding=encoding, delete=False) as temp_out:
+                temp_path = temp_out.name
+                line_bytes = b""
+
+                for byte in iter(lambda: mm.read(1), b""):
+                    line_bytes += byte
+
+                    if byte == b"\n":
+                        line = safe_decode(line_bytes, encoding).strip()
+                        original = line
+
+                        start_quotes = len(re.match(r'^"+', original).group(0)) if re.match(r'^"+', original) else 0
+                        end_quotes = len(re.search(r'"+$', original).group(0)) if re.search(r'"+$', original) else 0
+
+                        if start_quotes >= 2 and end_quotes >= 2:
+                            inner = original[start_quotes:-end_quotes]
+                            line = inner.strip()
+                            was_stripped = True
+
+                        temp_out.write(line + "\n")
+                        line_bytes = b""
+
+    except Exception as e:
+        logger("ERROR", f"Error during outer quote stripping for file '{path}'", e, indent=3)
+        return None, False
+
+    return temp_path, was_stripped
+
+def check_single_line(path):
+    try:
+        with open(path, "rb") as f:
+            mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+            newlines = 0
+            for byte in iter(lambda: mm.read(1), b""):
+                if byte == b"\n":
+                    newlines += 1
+                    if newlines > 1:
+                        return False
+            return True
+    except Exception as e:
+        logger("ERROR", f"Error checking if file '{path}' is one-line", e, indent=3)
+        return False
+
+def process_fix_tabular(dataset_path, encoding):
+    tags = []
+    temp_paths = []
+
+    process_fix_path = dataset_path
+    was_modified = False
+
+    temp_path, was_stripped = strip_outer_quotes(process_fix_path, encoding)
+    if temp_path:
+        process_fix_path = temp_path
+        temp_paths.append(temp_path)
+    if was_stripped:
+        was_modified = True
+        logger("WARNING", f"File '{dataset_path}' appears to have unnecessary outer quotes, attempting removal...", indent=3)
+        logger("OK", f"Removed unnecessary outer quotes in file '{dataset_path}'", indent=3)
+        tags.append(("stripped_outer_quotes", {}))
+
+    temp_path, reconstructed_lines = check_unbalanced_quotes(process_fix_path, encoding)
+    if temp_path:
+        process_fix_path = temp_path
+        temp_paths.append(temp_path)
+    if reconstructed_lines > 0:
+        was_modified = True
+        logger("WARNING", f"File '{dataset_path}' appears to contain broken multiline values, attempting reconstruction...", indent=3)
+        logger("OK", f"Reconstructed {reconstructed_lines} multiline rows in file '{dataset_path}'", indent=3)
+        tags.append(("reconstructed_lines", {"<reconstructed_lines>": reconstructed_lines}))
+
+    if check_single_line(process_fix_path):
+        tags.append(("one_line", {}))
+
+    if temp_paths:
+        delete_tempfiles(temp_paths, process_fix_path)
+
+    return process_fix_path if was_modified else None, tags
 
 # == Encoding functions ==
 
@@ -385,11 +454,11 @@ def safe_decode(raw, encoding):
     except Exception:
         return None
 
-def stream_decode_to_tempfile(raw_mm, encoding, bom_offset=0, bom_bytes=None):
+def stream_decode_to_tempfile(mm, encoding, bom_offset=0, bom_bytes=None):
     try:
-        with tempfile.NamedTemporaryFile(delete=False, mode="wb") as tmpfile:
-            raw_mm.seek(bom_offset)
-            reader = codecs.getreader(encoding)(raw_mm)
+        with tempfile.NamedTemporaryFile(mode="wb", delete=False) as tmpfile:
+            mm.seek(bom_offset)
+            reader = codecs.getreader(encoding)(mm)
 
             if bom_bytes:
                 tmpfile.write(bom_bytes)
@@ -409,13 +478,13 @@ def stream_decode_to_tempfile(raw_mm, encoding, bom_offset=0, bom_bytes=None):
     except Exception:
         return None
 
-def stream_decode_to_tempfile_fixlines(raw_mm, encoding, bom_offset=0, bom_bytes=None):
+def stream_decode_to_tempfile_fixlines(mm, encoding, bom_offset=0, bom_bytes=None):
     fixed_count = 0
     unrecoverable_count = 0
     try:
-        with tempfile.NamedTemporaryFile(delete=False, mode="wb") as tmpfile:
-            raw_mm.seek(bom_offset)
-            reader = codecs.getreader(encoding)(raw_mm)
+        with tempfile.NamedTemporaryFile(mode="wb", delete=False) as tmpfile:
+            mm.seek(bom_offset)
+            reader = codecs.getreader(encoding)(mm)
 
             if bom_bytes:
                 tmpfile.write(bom_bytes)
@@ -576,14 +645,40 @@ def count_unquoted_delimiters(line, delim):
             i += 1
     return count
 
-def detect_delimiter(text, max_lines=50, max_cv=0.6):
-    lines = text.splitlines()[:max_lines]
+def detect_delimiter(path, encoding, max_lines=50, max_cv=0.6):
+    lines = []
+    with open(path, "rb") as f:
+        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        line_bytes = b""
+
+        for byte in iter(lambda: mm.read(1), b""):
+            line_bytes += byte
+            if byte == b"\n":
+                try:
+                    line = safe_decode(line_bytes, encoding).strip()
+                    if line:
+                        lines.append(line)
+                except Exception:
+                    pass
+                line_bytes = b""
+
+                if len(lines) >= max_lines:
+                    break
+
+        if line_bytes and len(lines) < max_lines:
+            try:
+                line = safe_decode(line_bytes, encoding).strip()
+                if line:
+                    lines.append(line)
+            except Exception:
+                pass
+
     if not lines:
         return None, None
 
     delimiter_candidates = []
-
     all_chars = set(c for line in lines for c in line if not c.isalnum() and c not in NOT_ALLOWED_DELIMITERS)
+
     for delim in all_chars:
         counts = [count_unquoted_delimiters(line, delim) for line in lines]
 
@@ -700,7 +795,6 @@ def get_extension_mime(mime_type):
             return guessed_ext.lstrip(".")
 
         return None
-
     except Exception as e:
         logger("ERROR", f"Failed to get extension for MIME type: '{mime_type}'", e)
         return None

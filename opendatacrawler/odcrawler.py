@@ -229,7 +229,6 @@ class OpenDataCrawler():
                                 data["crawlerInfo"]["resourcesInfo"][dataset_file_name]["fileInfo"].update(utils.add_tag_explanations("no_data"))
                             if raw_flags:
                                 data["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations(raw_flags, raw_flags))
-
                             if temp_path:
                                 try:
                                     shutil.move(temp_path, dataset_path)
@@ -238,44 +237,19 @@ class OpenDataCrawler():
                                     logger("ERROR", f"Failed to move temp file to '{dataset_path}'", e, indent=3)
 
                         if dataset_path.endswith((".csv", ".tsv")) and not no_data:
-                            with open(dataset_path, "rb") as f:
-                                raw = f.read()  
-                                
-                            decoded_content = utils.safe_decode(raw, resource["encoding"])
-                            try:
-                                decoded_content, was_stripped = utils.strip_outer_quotes(decoded_content)
-                                if was_stripped:
-                                    logger("WARNING", f"File '{dataset_path}' appears to have unnecessary outer quotes, attempting removal...", indent=3)
-                                    data["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations("stripped_outer_quotes"))
-                            except Exception as e:
-                                logger("ERROR", f"Error during outer quote stripping for file '{dataset_path}'", e, indent=3)
-                                continue
+                            temp_path, tag = utils.process_fix_tabular(dataset_path, resource["encoding"])
+
+                            if temp_path:
+                                shutil.move(temp_path, dataset_path)
+                                logger("OK", f"Cleaned and saved fixed tabular file to '{dataset_path}'", indent=3)
+
+                            for tag_key, tag_data in tag:
+                                data["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations(tag_key, tag_data))
+
+                            ######################################
 
                             try:
-                                decoded_content, reconstructed_lines = utils.check_unbalanced_quotes(decoded_content)
-                                if reconstructed_lines > 0:
-                                    logger("WARNING", f"File '{dataset_path}' appears to contain broken multiline values, attempting reconstruction...", indent=3)
-                                    data["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations("reconstructed_lines", {"<reconstructed_lines>": reconstructed_lines}))
-                            except Exception as e:
-                                logger("ERROR", f"Error during line reconstruction for file '{dataset_path}'", e, indent=3)
-                                continue
-
-                            if was_stripped or reconstructed_lines > 0:
-                                with open(dataset_path, "wb") as f:
-                                    f.write(decoded_content.encode(resource["encoding"]).strip())
-
-                                if was_stripped:
-                                    logger("OK", f"Removed unnecessary outer quotes in file '{dataset_path}'", indent=3)
-                                if reconstructed_lines > 0:
-                                    logger("OK", f"Reconstructed {reconstructed_lines} multiline rows in file '{dataset_path}'", indent=3)
-
-                            if decoded_content.count("\n") < 1:
-                                data["crawlerInfo"]["resourcesInfo"][dataset_file_name]["fileInfo"].update(utils.add_tag_explanations("one_line"))
-                                logger("WARNING", f"File '{dataset_path}' appears to contain only one line, likely not a structured/tabular file", indent=3)
-                                continue
-
-                            try:
-                                delimiter, start_row = utils.detect_delimiter(decoded_content)
+                                delimiter, start_row = utils.detect_delimiter(dataset_path, resource["encoding"])
                             except Exception as e:
                                 logger("ERROR", f"Failed to detect delimiter for file '{dataset_path}'", e, indent=3)
                                 continue
