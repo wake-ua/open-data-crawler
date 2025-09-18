@@ -1,24 +1,47 @@
 {
     "no_data": {
-        "reason": "The file contains no usable data"
+        "tag_placeholders": [],
+        "tag_explanation": {
+            "reason": "The file contains no usable data"
+        }
     },
     "one_line": {
-        "reason": "The file contains only one line and may not follow a tabular structure with delimited fields"
-        },
+        "tag_placeholders": [],
+        "tag_explanation": {
+            "reason": "The file contains only one line and may not follow a tabular structure with delimited fields"
+        }
+    },
     "no_delimiter_detected": {
-        "reason": "The file does not appear to contain a valid delimiter and may not follow a tabular structure with delimited fields"
+        "tag_placeholders": [],
+        "tag_explanation": {
+            "reason": "The file does not appear to contain a valid delimiter and may not follow a tabular structure with delimited fields"
+        }
     },
     "skip_rows": {
-        "reason": "The file contains SKIPPED_ROWS initial non-data lines that were skipped to reach the tabular content",
-        "value": "SKIPPED_ROWS"
+        "tag_placeholders": ["<skipped_rows>"],
+        "tag_explanation": {
+            "reason": "The file contains <skipped_rows> initial non-data lines that were skipped to reach the tabular content",
+            "values": {
+                "skipped_rows": "<skipped_rows>"
+            }
+        }
     },
     "invalid_request": {
-        "reason": "The server rejected the download request due to a malformed or invalid URL (HTTP 400 - Bad Request)"
+        "tag_placeholders": [],
+        "tag_explanation": {
+            "reason": "The server rejected the download request due to a malformed or invalid URL (HTTP 400 - Bad Request)"
+        }
     },
     "forbidden_resource": {
-        "reason": "Access to the resource was denied (HTTP 403 - Forbidden)"
+        "tag_placeholders": [],
+        "tag_explanation": {
+            "reason": "Access to the resource was denied (HTTP 403 - Forbidden)"
+        }
     },
     "missing_resource": {
-        "reason": "The resource was not found on the server (HTTP 404 - Not Found)"
+        "tag_placeholders": [],
+        "tag_explanation": {
+            "reason": "The resource was not found on the server (HTTP 404 - Not Found)"
+        }
     }
 }

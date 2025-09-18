@@ -28,5 +28,13 @@
     "application/javascript": "js",
     "application/sparql-results+json": "json",
     "application/geo+pdf": "pdf",
-    "application/xbrl": "xbrl"
+    "application/xbrl": "xbrl",
+    "application/gpkg": "gpkg",
+    "application/dxf": "dxf",
+    "application/vnd.apache.parquet": "parquet",
+    "application/octet-stream": "bin",
+    "binary/octet-stream": "bin",
+    "application/x.csv+zip": "zip",
+    "application/x.geotiff+zip": "zip",
+    "wms_xml": "wms"
 }

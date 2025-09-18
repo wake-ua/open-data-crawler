@@ -10,6 +10,7 @@ import mmap
 import codecs
 import magic
 import statistics
+from datetime import datetime
 from collections import Counter
 from ftfy.badness import is_bad
 from ftfy import fix_text
@@ -98,6 +99,8 @@ def get_user_agent_list(current_agent):
 
 def make_request(url, current_agent, headers=None, params=None, max_sec=None):
     headers = headers.copy() if headers else {}
+    if not is_url(url):
+        url = f"https://{url}"
 
     for user_agent in get_user_agent_list(current_agent):
         headers["User-Agent"] = user_agent
@@ -121,6 +124,13 @@ def clean_url(u):
 
     return u.split("/")[0]
 
+def get_https_error_tag(status_code):
+    if status_code == 400:
+        return "invalid_request"
+    elif status_code == 404:
+        return "missing_resource"
+
+    return None
 # ==============================
 # Resume / recovery functions
 # ==============================
@@ -144,17 +154,16 @@ def recover_resume(save_path, accepted_types=None):
 
             failed = []
             success = []
-            for r in meta.get("resources", []):
-                file_name = r.get("fileName", "")
+            for file_name, _ in meta.get("resources", {}).items():
                 if accepted_types and file_name.split(".")[-1].lower() not in accepted_types:
                     continue
 
-                if r.get("crawlerChangesInfo", {}).get("complete") is True:
+                if is_completed(meta, file_name):
                     success.append(file_name)
                 else:
                     failed.append(file_name)
 
-            if failed or meta.get("complete") is not True:
+            if failed or not is_completed(meta, None):
                 failed_packages.add(identifier)
 
             total_failed.extend(failed)
@@ -167,6 +176,20 @@ def recover_resume(save_path, accepted_types=None):
             logger("ERROR", f"Could not read {meta_path}", e)
 
     return packages_status, total_successful, total_failed, failed_packages
+
+def is_completed(package, file_name):
+    if file_name:
+        try:
+            return package["crawlerInfo"]["resourcesInfo"][file_name]["fileStatus"].get("fileCompleted", False)
+        except Exception as e:
+            logger("WARNING", f"Missing or invalid status for '{file_name}': {e}")
+            return False
+    else:
+        try:
+            return package["crawlerInfo"]["packageStatus"].get("packageCompleted", False)
+        except Exception as e:
+            logger("WARNING", f"Missing or invalid status for '{package.get("fileName")}': {e}")
+            return False
 
 # ==============================
 # Metadata processing functions
@@ -439,11 +462,11 @@ def detect_best_encoding(file_path, encodings=ENCODING_CANDIDATES, num_bytes=64*
 
     if not raw_sample:
         raw_flags["tags"].append("no_data")
-        return None, None, None, True
+        return "utf-8", None, None, True
 
     if not raw_sample.strip():
         raw_flags["tags"].append("no_valid_data")
-        return None, "", raw_flags, True
+        return "utf-8", "", raw_flags, True
 
     bom_encoding = detect_bom(raw_sample)
     bom_bytes = get_bom_bytes(bom_encoding)
@@ -455,7 +478,7 @@ def detect_best_encoding(file_path, encodings=ENCODING_CANDIDATES, num_bytes=64*
     if bom_encoding:
         sample_content = safe_decode(raw_sample, bom_encoding)
         if sample_content and check_encoding_quality(sample_content):
-            temp_path = stream_decode_to_tempfile(raw_full_mm, bom_encoding)
+            temp_path = stream_decode_to_tempfile(raw_full_mm, bom_encoding, bom_offset)
             if temp_path:
                 return "utf-8", temp_path, raw_flags, False
 
@@ -604,6 +627,31 @@ def detect_delimiter(text, max_lines=50, max_cv=0.6):
 
 # == MIME type functions ==
 
+def get_resource_ext_info(response):
+    if response:
+        content_type = response.headers.get("Content-Type", "")
+        media_type = content_type.split(";")[0].strip().lower() if content_type else None
+
+        content_disposition = response.headers.get("Content-Disposition", "")
+        ext = None
+        if "filename=" in content_disposition:
+            filename = content_disposition.split("filename=")[-1].strip().strip('"')
+            if "." in filename:
+                ext = filename.split(".")[-1].lower()
+
+        ext_mime = get_extension_mime(media_type)
+        if ext and ext != ext_mime:
+            ext = ext_mime
+
+        if not ext:
+            ext = get_extension_mime(media_type)
+            if not ext:
+                logger("WARNING", f"No file extension found for MIME type: '{media_type}'")
+
+        return media_type, ext
+
+    return None, None
+
 def get_ole_extension(path):
     with olefile.OleFileIO(path) as ole:
         streams = {s[0] for s in ole.listdir()}
@@ -620,36 +668,23 @@ def get_ole_extension(path):
 def get_extension_mime(mime_type):
     try:
         ext = MIME_TYPE_MAP.get(mime_type.lower())
+        if isinstance(ext, dict):
+            ext = ext.get("extensions", [])[0]
+
         if ext:
             return ext
+        
+        elif mime_type.endswith("+zip"):
+            return "zip"
 
         guessed_ext = mimetypes.guess_extension(mime_type.lower())
         if guessed_ext:
             return guessed_ext.lstrip(".")
 
-        logger("WARNING", f"No file extension found for MIME type: '{mime_type}'")
         return None
 
     except Exception as e:
         logger("ERROR", f"Failed to get extension for MIME type: '{mime_type}'", e)
-        return None
-
-def get_mime_extension(ext):
-    try:
-        ext = ext.lower().lstrip(".")
-        mime = EXTENSION_TYPE_MAP.get(ext)
-        if mime:
-            return mime
-
-        guessed_mime = mimetypes.types_map.get(f".{ext}")
-        if guessed_mime:
-            return guessed_mime
-
-        logger("WARNING", f"No MIME type found for extension: '{ext}'")
-        return None
-
-    except Exception as e:
-        logger("ERROR", f"Failed to get MIME type for extension: '{ext}'", e)
         return None
 
 def detect_mime_by_signature(raw):
@@ -771,6 +806,7 @@ def extract_first_nonempty_value(field):
         return field.strip()
     return ""
 
+
 # == crawlerChangesInfo functions ==
 
 def fix_mime_mismatch(resource, guessed_extension, detected_mime):
@@ -810,45 +846,50 @@ def fix_mime_mismatch(resource, guessed_extension, detected_mime):
     except Exception as e:
         logger("ERROR", f"Failed to rename file '{old_filename}' to '{new_filename}': {e}")
 
-def add_tag_explanations(resource, destination, tags, data_source=None):
+def init_metadata(resource=False):
+    if not resource:
+        return {
+            "crawlerInfo": {
+                "packageInfo" : {},
+                "packageStatus" : {
+                    "packageCrawled": datetime.now().isoformat()
+                },
+                "resourcesInfo": {}
+            }
+        }
+    else:
+        return {
+            "fileMetadataChanges": {},
+            "binaryFileChanges": {},
+            "fileInfo": {},
+            "fileStatus": {
+                "fileCrawled": datetime.now().isoformat()
+            }
+        }
+
+def add_tag_explanations(tags, data_source=None):
     if isinstance(tags, dict):
         tags = tags.get("tags", [])
     elif isinstance(tags, str):
         tags = [tags]
 
-    explanations_dict = None
-    if destination == "fileInfo":
-        explanations_dict = FILE_INFO_EXPLANATIONS
-    elif destination == "binaryFileChanges":
-        explanations_dict = RAW_CHANGES_EXPLANATIONS
-
-    explanations = []
+    explanations = {}
     for tag in tags:
-        spec = explanations_dict.get(tag)
-        if not spec:
-            explanations.append({tag: {"reason": "(no explanation available)"}})
+        tag_content = CRAWLER_CHANGES_INFO.get(tag)
+        if not tag_content:
+            explanations[tag] = {"reason": "(no explanation available)"}
             continue
 
-        reason = spec["reason"]
-        entry = {tag: {"reason": reason}}
+        tag_explanation = json.dumps(tag_content.get("tag_explanation", {}))
+        tag_placeholders = tag_content.get("tag_placeholders", [])
+        for tag_placeholder in tag_placeholders:
+            tag_explanation = tag_explanation.replace(
+                tag_placeholder, str(data_source.get(tag_placeholder, f"<{tag_placeholder}>"))
+            )
 
-        if "value" in spec:
-            placeholder = spec["value"]
-            key = placeholder.strip("<>").lower()
-            val = data_source.get(key, 0) if isinstance(data_source, dict) else 0
-            entry[tag]["reason"] = reason.replace(placeholder, str(val))
-            entry[tag]["value"] = val
+        explanations[tag] = json.loads(tag_explanation)
 
-        elif "values" in spec:
-            entry[tag]["values"] = {}
-            for k, placeholder in spec["values"].items():
-                val = data_source.get(k, 0) if isinstance(data_source, dict) else 0
-                entry[tag]["reason"] = entry[tag]["reason"].replace(placeholder, str(val))
-                entry[tag]["values"][k] = val
-
-        explanations.append(entry)
-
-    resource["crawlerChangesInfo"][destination].extend(explanations)
+    return explanations
 
 # ==============================
 # Resource loading functions
@@ -868,11 +909,13 @@ def load_resource(filename, fallback_value=None):
     return data
 
 USER_AGENTS = load_resource("user_agents.json")
-MIME_TYPE_MAP = load_resource("mime_type_map.json")
-EXTENSION_TYPE_MAP ={v: k for k, v in MIME_TYPE_MAP.items()}
+MIME_TYPE_MAP = load_resource("mime_extensions.json")
 
-RAW_CHANGES_EXPLANATIONS = load_resource("raw_changes_explanations.json")
-FILE_INFO_EXPLANATIONS = load_resource("file_info_explanations.json")
+CRAWLER_CHANGES_INFO = {
+    **load_resource("raw_changes_explanations.json"),
+    **load_resource("file_info_explanations.json"),
+    **load_resource("metadata_changes_explanations.json")
+}
 
 DATOSGOBESCRAWLER_THEME_MAP = load_resource(
     "datosgobes_theme_map.json",

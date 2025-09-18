@@ -1,0 +1,24 @@
+{
+    "mimetype_mismatch": {
+        "tag_placeholders": ["<mediaType_old>", "<fileName_old>", "<mediaType_new>", "<fileName_new>"],
+        "tag_explanation": {
+            "reason": "MIME type mismatch: declared as '<mediaType_old>', but actually detected as '<mediaType_new>'.",
+            "values": {
+                "oldValue": {
+                    "mediaType": "<mediaType_old>",
+                    "fileName": "<fileName_old>"
+                },
+                "newValue": {
+                    "mediaType": "<mediaType_new>",
+                    "fileName": "<fileName_new>"
+                }
+            }
+        }
+    },
+    "missing_distributions": {
+        "tag_placeholders": [],
+        "tag_explanation": {
+            "reason": "The package original metadata does not contain any listed distributions or downloadable resources"
+        }
+    }
+}

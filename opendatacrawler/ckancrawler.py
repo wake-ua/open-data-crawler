@@ -2,6 +2,7 @@ import requests
 from urllib.parse import urlparse
 from opendatacrawler import utils
 import json
+from datetime import datetime
 from opendatacrawler.setup_logger import log_manager
 logger = log_manager.log
 
@@ -19,13 +20,13 @@ class CkanCrawler():
             "Accept": "application/json",
             "Connection": "keep-alive"
         }
-        
+
         try:
             response, self.user_agent = utils.make_request(url, self.user_agent, headers=headers)
             if not response:
                 logger("ERROR", f"Error fetching package list from '{self.domain}': no working User-Agent found")
                 return ids
-            
+
             response.raise_for_status()
             ids = response.json().get("result", [])
 
@@ -38,23 +39,43 @@ class CkanCrawler():
 
         return ids
 
-    def parse_resource(self, data, base_name):
+    def parse_resource(self, resource_meta, base_name):
         resource = {}
+        resource_crawler_info = utils.init_metadata(resource=True)
 
-        resource["name"] = data.get("name", {})
-        resource["description"] = data.get("description", {})
+        resource["name"] = resource_meta.get("name")
+        resource["description"] = resource_meta.get("description")
 
-        resource["downloadURL"] = data.get("url") or data.get("original_url")
+        resource["downloadURL"] = resource_meta.get("download_url") or resource_meta.get("url") or resource_meta.get("original_url")
+        if not utils.is_url(resource["downloadURL"]):
+            resource["downloadURL"] = f"https://{resource["downloadURL"]}"
 
-        mimetype = data.get("mimetype") or data.get("format")
-        if "/" in mimetype:
-            resource["mediaType"] = mimetype
+        response, self.user_agent = utils.make_request(resource["downloadURL"], self.user_agent)
+        media_type, ext = utils.get_resource_ext_info(response)
+
+        meta_mimetype = resource_meta.get("mimetype") or resource_meta.get("format") or ""
+        meta_ext = utils.get_extension_mime(meta_mimetype) if "/" in meta_mimetype else meta_mimetype.lower()
+     
+        if meta_ext and ext != meta_ext:
+            if media_type and media_type not in ["application/octet-stream", "text/plain"]:
+                resource["mediaType"] = media_type
+            else:
+                resource["mediaType"] = "text/csv" if "csv" in meta_mimetype.lower() else meta_mimetype
+                ext = meta_ext
+
+            logger("WARNING", f"Detected a media type mismatch for file {resource['downloadURL']} '{base_name}', was declared as '{meta_mimetype}' (.{meta_ext}), but detected as '{media_type}' (.{ext})", indent=3)
+            resource_crawler_info["fileMetadataChanges"].update(
+                utils.add_tag_explanations("mimetype_mismatch", {
+                    "<mediaType_old>": meta_mimetype, "<fileName_old>": f"{base_name}.{meta_ext}",
+                    "<mediaType_new>": media_type, "<fileName_new>": f"{base_name}.{ext}"
+                })
+            )
         else:
-            resource["mediaType"] = utils.get_mime_extension(mimetype)
+            resource["mediaType"] = media_type
 
-        resource["fileName"] = utils.generate_short_filename(base_name, ext=utils.get_extension_mime(resource["mediaType"]))
+        resource["fileName"] = f"{base_name}.{ext}"
 
-        return resource
+        return resource, resource_crawler_info
 
     def get_package(self, dataset_id, metadata_file_name):
         url = f"{self.domain}/api/3/action/package_show?id={dataset_id}"
@@ -63,16 +84,29 @@ class CkanCrawler():
             "Connection": "keep-alive"
         }
 
-        response, self.user_agent = utils.make_request(url, self.user_agent, headers=headers)
-        if not response:
-            logger("ERROR", f"No working User-Agent for URL '{url}'")
-            return None
+        metadata = utils.init_metadata()
+        try:
+            response, self.user_agent = utils.make_request(url, self.user_agent, headers=headers)
+            if not response:
+                logger("ERROR", f"No working User-Agent for URL '{url}'")
+                return None
 
-        response.raise_for_status()
+            response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+                status_code = getattr(e.response, "status_code", None)
+                tag = None
+                if status_code:
+                    tag = utils.get_https_error_tag(status_code)
+
+                logger("ERROR", f"Error downloading '{metadata_file_name}' ({url})", e, indent=2)
+                if tag:
+                    metadata["crawlerInfo"]["packageInfo"].update(utils.add_tag_explanations(tag))
+                    metadata["crawlerInfo"]["packageStatus"]["packageCompleted"] = datetime.now().isoformat()
+
+                return metadata
 
         data = response.json()["result"]
-        metadata = {}
-
+        
         metadata["identifier"] = dataset_id
         metadata["requestURL"] = url
         metadata["accessURL"] = f"{self.domain}/dataset/{data.get("name")}"
@@ -94,23 +128,16 @@ class CkanCrawler():
             "title": utils.extract_first_nonempty_value(publisher.get("title", "")),
         }
 
-        download_url = distributions[0].get("url") or distributions[0].get("original_url")
-        if download_url:
-            metadata["publisher"]["homepage"] = f"https://{urlparse(download_url).netloc}"
+        if distributions:
+            download_url = distributions[0].get("url") or distributions[0].get("original_url")
+            if download_url:
+                metadata["publisher"]["homepage"] = f"https://{urlparse(download_url).netloc}"
 
         metadata["language"] = data.get("language", [])
 
         metadata["keyword"] = data.get("keywords", {}) or data.get("original_tags", []) or data.get("tags", [])
 
-        # no es tags solo, va cambindo, ojo https://ckan.opendata.swiss/api/3/action/package_show?id=todesfalle-nach-monat-stadtquartier-geschlecht-altersgruppe-und-herkunft-seit-1998
-
         #theme = data.get("theme")
-        #if isinstance(theme, list):
-        #    metadata["theme"] = [t.split("/")[-1] for t in theme]
-        #elif isinstance(theme, str):
-        #    metadata["theme"] = theme.split("/")[-1]
-        #else:
-        #    metadata["theme"] = None
 
         metadata["accrualPeriodicity"] = data.get("accrualPeriodicity")
 
@@ -123,10 +150,11 @@ class CkanCrawler():
         metadata["source"] = self.domain
 
         temporal = data.get("temporal", {}) or data.get("temporals", {})
-        metadata["temporal"] = {
-            "startDate": temporal.get("startDate") or temporal.get("start_date"),
-            "endDate": temporal.get("endDate") or temporal.get("end_date"),
-        }
+        if isinstance(temporal, dict):
+            metadata["temporal"] = {
+                "startDate": temporal.get("startDate") or temporal.get("start_date"),
+                "endDate": temporal.get("endDate") or temporal.get("end_date"),
+            }
 
         location = data.get("location", "")
         spatial = data.get("spatial", "")
@@ -139,10 +167,11 @@ class CkanCrawler():
             if geo:
                 metadata["geo"] = geo
 
-        resource_list = []
-        for idx, res in enumerate(distributions):
-            resource_list.append(self.parse_resource(res, f"{metadata["fileName"]}_{idx}"))
+        metadata["resources"] = {}
+        for idx, resource in enumerate(distributions):
+            resource_meta, resource_crawler_info = self.parse_resource(resource, utils.generate_short_filename(f"{metadata['fileName']}_{idx}"))
 
-        metadata["resources"] = resource_list
+            metadata["resources"][resource_meta["fileName"]] = resource_meta
+            metadata["crawlerInfo"]["resourcesInfo"][resource_meta["fileName"]] = resource_crawler_info
 
         return metadata

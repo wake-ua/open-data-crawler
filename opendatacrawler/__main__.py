@@ -80,13 +80,13 @@ def main():
                     logger("WARNING", f"Reset for domain '{crawler.domain}' was cancelled by user", level="print")
             else:
                 reset_domain_input = False
-        
-            crawler.reset_domain(reset_domain_input)
+
+            crawler.reset_domain(reset_domain_input, resume_data, has_logs)
 
             if reset_domain_input:
                 resume_data, downloaded_before_res, failed_before_res, failed_before_pkgs  = utils.recover_resume(save_path=crawler.save_path, accepted_types=d_types)
                 logger(None, "=" * 80, level="print")
-            
+
             if resume_data:
                 logger("OK", f"Loaded resume with {len(resume_data)} packages and {len(downloaded_before_res)} downloaded resources", level="print")
                 if failed_before_pkgs:
@@ -109,7 +109,7 @@ def main():
             else:
                 tqdm_total = len(packages)
                 tqdm_initial = len(packages) - len(packages_to_process)
-            
+
             if packages_to_process:
                 logger("...", f"Processing {len(packages_to_process)} packages...", level="print")
 

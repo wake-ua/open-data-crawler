@@ -1,36 +1,69 @@
 {
     "bom_invalid_or_unreliable": {
-        "reason": "Removed an invalid or misleading Byte Order Mark (BOM) from the file to ensure correct decoding"
+        "tag_placeholders": [],
+        "tag_explanation": {
+            "reason": "Removed an invalid or misleading Byte Order Mark (BOM) from the file to ensure correct decoding"
+        }
     },
     "normalized_utf8": {
-        "reason": "Re-encoded the content as UTF-8 to normalize character encoding"
+        "tag_placeholders": [],
+        "tag_explanation": {
+            "reason": "Re-encoded the content as UTF-8 to normalize character encoding"
+        }
     },
     "fixed_data": {
-        "reason": "Corrected unreadable or misencoded characters in FIXED_LINES lines without data loss",
-        "value": "FIXED_LINES"
+        "tag_placeholders": ["<fixed_lines>"],
+        "tag_explanation": {
+            "reason": "Corrected unreadable or misencoded characters in <fixed_lines> lines without data loss",
+            "values": {
+                "fixed_lines" : "<fixed_lines>"
+            }
+        }
     },
     "partial_data_loss": {
-        "reason": "Corrected unreadable or misencoded characters in FIXED_LINES lines, but UNRECOVERABLE_LINES lines could not be fully recovered and remain partially corrupted",
-        "values": {
-            "fixed_lines": "FIXED_LINES",
-            "unrecoverable_lines": "UNRECOVERABLE_LINES"
+        "tag_placeholders": ["<fixed_lines>", "<unrecoverable_lines>"],
+        "tag_explanation": {
+            "reason": "Corrected unreadable or misencoded characters in <fixed_lines> lines, but <unrecoverable_lines> lines could not be fully recovered and remain partially corrupted",
+            "values": {
+                "fixed_lines": "<fixed_lines>",
+                "unrecoverable_lines": "<unrecoverable_lines>"
+            }
         }
     },
     "irreversible_data_loss": {
-        "reason": "Detected unreadable or misencoded characters in UNRECOVERABLE_LINES lines that could not be reliably recovered",
-        "value": "UNRECOVERABLE_LINES"
+        "tag_placeholders": ["<unrecoverable_lines>"],
+        "tag_explanation": {
+            "reason": "Detected unreadable or misencoded characters in <unrecoverable_lines> lines that could not be reliably recovered",
+            "values": {
+                "unrecoverable_lines": "<unrecoverable_lines>"
+            }
+        }
     },
     "no_valid_data": {
-        "reason": "Removed empty or unusable content from the file, leaving no valid data"
+        "tag_placeholders": [],
+        "tag_explanation": {
+            "reason": "Removed empty or unusable content from the file, leaving no valid data"
+        }
     },
     "bom_added_to_match_encoding": {
-        "reason": "Added a Byte Order Mark (BOM) to the file to match the detected encoding and ensure correct decoding"
+        "tag_placeholders": [],
+        "tag_explanation": {
+            "reason": "Added a Byte Order Mark (BOM) to the file to match the detected encoding and ensure correct decoding"
+        }
     },
     "reconstructed_lines": {
-        "reason": "Reconstructed RECONSTRUCTED_LINES broken lines caused by embedded newlines inside quoted fields in structured or tabular content",
-        "value": "RECONSTRUCTED_LINES"
+        "tag_placeholders": ["<reconstructed_lines>"],
+        "tag_explanation": {
+            "reason": "Reconstructed <reconstructed_lines> broken lines caused by embedded newlines inside quoted fields in structured or tabular content",
+            "values": {
+                "reconstructed_lines": "<reconstructed_lines>"
+            }
+        }
     },
     "stripped_outer_quotes": {
-        "reason": "Removed unnecessary outer quotes that wrapped the entire line in every row of the file"
+        "tag_placeholders": [],
+        "tag_explanation": {
+            "reason": "Removed unnecessary outer quotes that wrapped the entire line in every row of the file"
+        }
     }
 }

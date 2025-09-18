@@ -1,5 +1,6 @@
 import requests
 from urllib.parse import urlparse
+from datetime import datetime
 from opendatacrawler import utils
 from opendatacrawler.setup_logger import log_manager
 logger = log_manager.log
@@ -31,7 +32,6 @@ class DatosGobEsCrawler():
                 return ids
 
             response.raise_for_status()
-
             for result in response.json().get("results", {}).get("bindings", []):
                 ids.append(result.get("dataset", {}).get("value").split("/")[-1])
 
@@ -44,17 +44,40 @@ class DatosGobEsCrawler():
 
         return ids
 
-    def parse_resource(self, data, base_name):
+    def parse_resource(self, resource_meta, base_name):
         resource = {}
+        resource_crawler_info = utils.init_metadata(resource=True)
 
-        resource["name"] = utils.extract_multilang_field(data.get("title", []), "_lang", "_value")
+        resource["name"] = utils.extract_multilang_field(resource_meta.get("title", []), "_lang", "_value")
 
-        resource["downloadURL"] = data.get("accessURL") or data.get("downloadURL")
+        resource["downloadURL"] = resource_meta.get("accessURL") or resource_meta.get("downloadURL")
+        if not utils.is_url(resource["downloadURL"]):
+            resource["downloadURL"] = f"https://{resource["downloadURL"]}"
 
-        resource["mediaType"] = data.get("format", {}).get("value")
-        resource["fileName"] = utils.generate_short_filename(base_name, ext=utils.get_extension_mime(resource["mediaType"]))
+        response, self.user_agent = utils.make_request(resource["downloadURL"], self.user_agent)
+        media_type, ext = utils.get_resource_ext_info(response)
 
-        return resource
+        meta_mimetype = resource_meta.get("format", {}).get("value")
+        meta_ext = utils.get_extension_mime(meta_mimetype)
+
+        if media_type:
+            resource["mediaType"] = media_type
+            if media_type not in ["application/octet-stream", "text/plain"]:
+                if meta_ext and ext != meta_ext:
+                    logger("WARNING", f"Detected a media type mismatch for file {resource['downloadURL']} '{base_name}', was declared as '{meta_mimetype}' (.{meta_ext}), but detected as '{media_type}' (.{ext})", indent=3)
+                    resource_crawler_info["fileMetadataChanges"].update(
+                        utils.add_tag_explanations("mimetype_mismatch", {
+                            "<mediaType_old>": meta_mimetype, "<fileName_old>": f"{base_name}.{meta_ext}",
+                            "<mediaType_new>": media_type, "<fileName_new>": f"{base_name}.{ext}"
+                        })
+                    )
+        else:
+            resource["mediaType"] = meta_mimetype
+            ext = meta_ext
+
+        resource["fileName"] = f"{base_name}.{ext}"
+
+        return resource, resource_crawler_info
 
     def get_package(self, dataset_id, metadata_file_name):
         url = f"https://datos.gob.es/apidata/catalog/dataset/{dataset_id}"
@@ -63,12 +86,26 @@ class DatosGobEsCrawler():
             "Connection": "keep-alive"
         }
 
-        response, self.user_agent = utils.make_request(url, self.user_agent, headers=headers)
-        if not response:
-            logger("ERROR", f"No working User-Agent for URL '{url}'")
-            return None
+        metadata = utils.init_metadata()
+        try:
+            response, self.user_agent = utils.make_request(url, self.user_agent, headers=headers)
+            if not response:
+                logger("ERROR", f"No working User-Agent for URL '{url}'")
+                return None
 
-        response.raise_for_status()
+            response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+                status_code = getattr(e.response, "status_code", None)
+                tag = None
+                if status_code:
+                    tag = utils.get_https_error_tag(status_code)
+
+                logger("ERROR", f"Error downloading '{metadata_file_name}' ({url})", e, indent=2)
+                if tag:
+                    metadata["crawlerInfo"]["packageInfo"].update(utils.add_tag_explanations(tag))
+                    metadata["crawlerInfo"]["packageStatus"]["packageCompleted"] = datetime.now().isoformat()
+
+                return metadata
 
         items = response.json()["result"].get("items", [])
         if not items:
@@ -76,7 +113,6 @@ class DatosGobEsCrawler():
             return None
 
         data = items[0]
-        metadata = {}
 
         metadata["identifier"] = dataset_id
         metadata["accessURL"] = f"https://datos.gob.es/es/catalogo/{dataset_id}"
@@ -112,6 +148,10 @@ class DatosGobEsCrawler():
         metadata["source"] = self.domain
 
         temporal = data.get("temporal", {})
+        metadata["temporal"] = temporal
+        if temporal:
+            print(temporal)
+
         if isinstance(temporal, dict):
             metadata["temporal"] = {
                 "startDate": temporal.get("startDate") or temporal.get("start_date"),
@@ -120,10 +160,11 @@ class DatosGobEsCrawler():
 
         metadata["geo"] = utils.extract_mapped_field(data.get("spatial"), utils.DATOSGOBESCRAWLER_SPATIAL_MAP)
 
-        resource_list = []
-        for idx, res in enumerate(distributions):
-            resource_list.append(self.parse_resource(res, f"{metadata["fileName"]}_{idx}"))
+        metadata["resources"] = {}
+        for idx, resource in enumerate(distributions):
+            resource_meta, resource_crawler_info = self.parse_resource(resource, utils.generate_short_filename(f"{metadata['fileName']}_{idx}"))
 
-        metadata["resources"] = resource_list
+            metadata["resources"][resource_meta["fileName"]] = resource_meta
+            metadata["crawlerInfo"]["resourcesInfo"][resource_meta["fileName"]] = resource_crawler_info
 
         return metadata
