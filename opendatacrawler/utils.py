@@ -5,10 +5,10 @@ import hashlib
 import chardet
 import olefile
 import re
+import gc
 import tempfile
 import mmap
 import codecs
-import magic
 import statistics
 from datetime import datetime
 from collections import Counter
@@ -403,7 +403,7 @@ def process_fix_tabular(dataset_path, encoding):
         logger("OK", f"Reconstructed {reconstructed_lines} multiline rows in file '{dataset_path}'", indent=3)
         tags.append(("reconstructed_lines", {"<reconstructed_lines>": reconstructed_lines}))
     gc.collect()
-    
+
     if check_single_line(process_fix_path, encoding):
         tags.append(("one_line", {}))
 
