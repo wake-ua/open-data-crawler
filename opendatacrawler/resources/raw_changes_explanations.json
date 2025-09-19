@@ -39,12 +39,6 @@
             }
         }
     },
-    "no_valid_data": {
-        "tag_placeholders": [],
-        "tag_explanation": {
-            "reason": "Removed empty or unusable content from the file, leaving no valid data"
-        }
-    },
     "bom_added_to_match_encoding": {
         "tag_placeholders": [],
         "tag_explanation": {

@@ -2,6 +2,7 @@ import argparse
 from tqdm import tqdm
 import os
 import sys
+import gc
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -118,6 +119,7 @@ def main():
                     try:
                         for future in tqdm(as_completed(futures), total=tqdm_total, initial=tqdm_initial, desc="Processing...", colour="green"):
                             future.result()
+                            gc.collect()
                     except KeyboardInterrupt:
                         logger("WARNING", "Interrupt received. Waiting for threads to finish gracefully... (this may take a while if many threads are active)", level="print")
                         executor.shutdown(wait=False, cancel_futures=True)

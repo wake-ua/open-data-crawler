@@ -49,5 +49,11 @@
         "tag_explanation": {
             "reason": "The resource was not found on the server (HTTP 404 - Not Found)"
         }
+    },
+    "method_not_allowed": {
+        "tag_placeholders": [],
+        "tag_explanation": {
+            "reason": "The server rejected the download request because the HTTP method used is not allowed for this resource (HTTP 405 - Method Not Allowed)"
+        }
     }
 }

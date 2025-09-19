@@ -3,6 +3,7 @@ import os
 import shutil
 import requests
 import humanize
+import gc
 from datetime import datetime
 import traceback
 from frictionless import describe, Dialect
@@ -213,7 +214,6 @@ class OpenDataCrawler():
                         mime_type = resource.get("mediaType")
                         try:
                             encoding = temp_path = raw_flags = None
-                            no_data = False
                             if utils.MIME_TYPE_MAP.get(mime_type, {}).get("compressible", False):
                                 temp_path, tag = utils.check_file_empty_or_strip(dataset_path)
                                 if temp_path:
@@ -221,11 +221,11 @@ class OpenDataCrawler():
                                     logger("OK", f"File '{dataset_path}' content stripped and overwritten", indent=3)
                                     data["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations("stripped_data"))
                                 if tag:
-                                    no_data = True
                                     logger("WARNING", f"File '{dataset_path}' has no data or no valid content", indent=3)
                                     data["crawlerInfo"]["resourcesInfo"][dataset_file_name]["fileInfo"].update(utils.add_tag_explanations(tag))
                                 else:
                                     encoding, temp_path, raw_flags = utils.detect_best_encoding(dataset_path)
+                                    gc.collect()
                                     if encoding:
                                         resource["encoding"] = encoding
                                     else:
@@ -245,9 +245,10 @@ class OpenDataCrawler():
                                 except Exception as e:
                                     logger("ERROR", f"Failed to move temp file to '{dataset_path}'", e, indent=3)
 
-                        if not no_data:
+                        if os.path.getsize(dataset_path) > 0:
                             if dataset_path.endswith((".csv", ".tsv")):
                                 temp_path, tag = utils.process_fix_tabular(dataset_path, resource["encoding"])
+                                gc.collect()
 
                                 if temp_path:
                                     shutil.move(temp_path, dataset_path)
@@ -362,6 +363,7 @@ class OpenDataCrawler():
                 elif not package.get("resources"):
                     logger("WARNING", f"Package '{pkg_id}' ('{metadata_path}') has no resources", indent=2)
                     self.save_metadata(package)
+            
         except Exception as e:
             logger("ERROR", f"Error processing package '{pkg_id}'", [e, traceback.format_exc()], indent=2)
 
