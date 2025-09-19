@@ -283,42 +283,29 @@ def are_quotes_balanced(line):
     return not in_quotes
 
 def check_unbalanced_quotes(path, encoding):
-    temp_path = None
     reconstructed_lines = 0
-
     try:
-        with open(path, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
-            with tempfile.NamedTemporaryFile(mode="w", encoding=encoding, delete=False) as temp_out:
-                temp_path = temp_out.name
-                line_bytes = b""
-                partial_row = []
+        with open(path, "r", encoding=encoding) as f, tempfile.NamedTemporaryFile(mode="w", encoding=encoding, delete=False) as temp_out:
+            partial_row = []
 
-                for byte in iter(lambda: mm.read(1), b""):
-                    line_bytes += byte
+            for line in f:
+                line = line.strip()
+                partial_row.append(line)
+                joined = "\n".join(partial_row)
 
-                    if byte == b"\n":
-                        line = safe_decode(line_bytes, encoding).strip()
+                if are_quotes_balanced(joined):
+                    reconstructed = "".join(partial_row)
+                    if len(partial_row) > 1:
+                        reconstructed_lines += 1
+                    temp_out.write(reconstructed + "\n")
+                    partial_row = []
 
-                        partial_row.append(line)
-                        joined_lines = "\n".join(partial_row)
+            if partial_row:
+                temp_out.write("".join(partial_row) + "\n")
 
-                        if are_quotes_balanced(joined_lines):
-                            reconstructed = "".join(partial_row)
-                            if len(partial_row) > 1:
-                                reconstructed_lines += 1
-
-                            temp_out.write(reconstructed + "\n")
-                            partial_row = []
-
-                        line_bytes = b""
-
-                if partial_row:
-                    temp_out.write("".join(partial_row) + "\n")
-
-        return temp_path, reconstructed_lines
-
+            return temp_out.name, reconstructed_lines
     except Exception as e:
-        logger("ERROR", f"Error during line reconstruction for file '{path}'", e, indent=3)
+        logger("ERROR", f"Error reconstructing quotes in file '{path}'", e, indent=3)
         return None, 0
 
 def check_file_empty_or_strip(path, whitespace=b" \t\r\n"):
@@ -352,47 +339,37 @@ def check_file_empty_or_strip(path, whitespace=b" \t\r\n"):
         return None, None
 
 def strip_outer_quotes(path, encoding):
-    temp_path = None
     was_stripped = False
-
     try:
-        with open(path, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
-            with tempfile.NamedTemporaryFile(mode="w", encoding=encoding, delete=False) as temp_out:
-                temp_path = temp_out.name
-                line_bytes = b""
+        with open(path, "r", encoding=encoding) as f, tempfile.NamedTemporaryFile(mode="w", encoding=encoding, delete=False) as temp_out:
+            for line in f:
+                original = line.strip()
 
-                for byte in iter(lambda: mm.read(1), b""):
-                    line_bytes += byte
+                start_quotes = len(re.match(r'^"+', original).group(0)) if re.match(r'^"+', original) else 0
+                end_quotes = len(re.search(r'"+$', original).group(0)) if re.search(r'"+$', original) else 0
 
-                    if byte == b"\n":
-                        line = safe_decode(line_bytes, encoding).strip()
-                        original = line
+                if start_quotes >= 2 and end_quotes >= 2:
+                    inner = original[start_quotes:-end_quotes]
+                    line = inner.strip()
+                    was_stripped = True
+                else:
+                    line = original
 
-                        start_quotes = len(re.match(r'^"+', original).group(0)) if re.match(r'^"+', original) else 0
-                        end_quotes = len(re.search(r'"+$', original).group(0)) if re.search(r'"+$', original) else 0
+                temp_out.write(line + "\n")
 
-                        if start_quotes >= 2 and end_quotes >= 2:
-                            inner = original[start_quotes:-end_quotes]
-                            line = inner.strip()
-                            was_stripped = True
-
-                        temp_out.write(line + "\n")
-                        line_bytes = b""
-
-            return temp_path, was_stripped
+            return temp_out.name, was_stripped
     except Exception as e:
         logger("ERROR", f"Error during outer quote stripping for file '{path}'", e, indent=3)
         return None, False
 
-def check_single_line(path):
+def check_single_line(path, encoding):
     try:
-        with open(path, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
-            newlines = 0
-            for byte in iter(lambda: mm.read(1), b""):
-                if byte == b"\n":
-                    newlines += 1
-                    if newlines > 1:
-                        return False
+        with open(path, "r", encoding=encoding) as f:
+            line_count = 0
+            for _ in f:
+                line_count += 1
+                if line_count > 1:
+                    return False
             return True
     except Exception as e:
         logger("ERROR", f"Error checking if file '{path}' is one-line", e, indent=3)
@@ -414,6 +391,7 @@ def process_fix_tabular(dataset_path, encoding):
         logger("WARNING", f"File '{dataset_path}' appears to have unnecessary outer quotes, attempting removal...", indent=3)
         logger("OK", f"Removed unnecessary outer quotes in file '{dataset_path}'", indent=3)
         tags.append(("stripped_outer_quotes", {}))
+    gc.collect()
 
     temp_path, reconstructed_lines = check_unbalanced_quotes(process_fix_path, encoding)
     if temp_path:
@@ -424,8 +402,9 @@ def process_fix_tabular(dataset_path, encoding):
         logger("WARNING", f"File '{dataset_path}' appears to contain broken multiline values, attempting reconstruction...", indent=3)
         logger("OK", f"Reconstructed {reconstructed_lines} multiline rows in file '{dataset_path}'", indent=3)
         tags.append(("reconstructed_lines", {"<reconstructed_lines>": reconstructed_lines}))
-
-    if check_single_line(process_fix_path):
+    gc.collect()
+    
+    if check_single_line(process_fix_path, encoding):
         tags.append(("one_line", {}))
 
     if temp_paths:
