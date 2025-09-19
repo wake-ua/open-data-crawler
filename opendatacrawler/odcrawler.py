@@ -355,15 +355,18 @@ class OpenDataCrawler():
                 for file_name, resource in package["resources"].items():
                     if not utils.is_completed(package, file_name):
                         package = self.process_resource(resource, package, metadata_path, d_types, partial, avoid_data)
-
+                        gc.collect()
                 self.save_metadata(package)
+                del package
+                gc.collect()
             else:
                 if not should_process:
                     logger("WARNING", f"Package '{pkg_id}' does not match specified categories: {', '.join(categories)}", indent=2)
                 elif not package.get("resources"):
                     logger("WARNING", f"Package '{pkg_id}' ('{metadata_path}') has no resources", indent=2)
                     self.save_metadata(package)
-            
+                    del package
+                    gc.collect()
         except Exception as e:
             logger("ERROR", f"Error processing package '{pkg_id}'", [e, traceback.format_exc()], indent=2)
 

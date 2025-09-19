@@ -286,149 +286,117 @@ def check_unbalanced_quotes(path, encoding):
     temp_path = None
     reconstructed_lines = 0
 
-    f = mm = None
     try:
-        f = open(path, "rb")
-        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-        with tempfile.NamedTemporaryFile(mode="w", encoding=encoding, delete=False) as temp_out:
-            temp_path = temp_out.name
-            line_bytes = b""
-            partial_row = []
+        with open(path, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+            with tempfile.NamedTemporaryFile(mode="w", encoding=encoding, delete=False) as temp_out:
+                temp_path = temp_out.name
+                line_bytes = b""
+                partial_row = []
 
-            for byte in iter(lambda: mm.read(1), b""):
-                line_bytes += byte
+                for byte in iter(lambda: mm.read(1), b""):
+                    line_bytes += byte
 
-                if byte == b"\n":
-                    line = safe_decode(line_bytes, encoding).strip()
+                    if byte == b"\n":
+                        line = safe_decode(line_bytes, encoding).strip()
 
-                    partial_row.append(line)
-                    joined_lines = "\n".join(partial_row)
+                        partial_row.append(line)
+                        joined_lines = "\n".join(partial_row)
 
-                    if are_quotes_balanced(joined_lines):
-                        reconstructed = "".join(partial_row)
-                        if len(partial_row) > 1:
-                            reconstructed_lines += 1
+                        if are_quotes_balanced(joined_lines):
+                            reconstructed = "".join(partial_row)
+                            if len(partial_row) > 1:
+                                reconstructed_lines += 1
 
-                        temp_out.write(reconstructed + "\n")
-                        partial_row = []
+                            temp_out.write(reconstructed + "\n")
+                            partial_row = []
 
-                    line_bytes = b""
+                        line_bytes = b""
 
-            if partial_row:
-                temp_out.write("".join(partial_row) + "\n")
+                if partial_row:
+                    temp_out.write("".join(partial_row) + "\n")
 
         return temp_path, reconstructed_lines
 
     except Exception as e:
         logger("ERROR", f"Error during line reconstruction for file '{path}'", e, indent=3)
         return None, 0
-    finally:
-        if mm:
-            mm.close()
-        if f:
-            f.close()
-
 
 def check_file_empty_or_strip(path, whitespace=b" \t\r\n"):
-    f = mm = None
     try:
-        f = open(path, "rb")
-        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        with open(path, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+            size = mm.size()
+            if size == 0:
+                return None, "no_data"
 
-        size = mm.size()
-        if size == 0:
-            return None, "no_data"
+            start = 0
+            while start < size and mm[start:start+1] in whitespace:
+                start += 1
 
-        start = 0
-        while start < size and mm[start:start+1] in whitespace:
-            start += 1
+            end = size - 1
+            while end >= 0 and mm[end:end+1] in whitespace:
+                end -= 1
 
-        end = size - 1
-        while end >= 0 and mm[end:end+1] in whitespace:
-            end -= 1
+            if start > end:
+                with tempfile.NamedTemporaryFile(mode="wb", delete=False) as temp_out:
+                    return temp_out.name, "no_data"
 
-        if start > end:
+            if start == 0 and end == size - 1:
+                return None, None
+
+            cleaned_content = mm[start:end+1]
             with tempfile.NamedTemporaryFile(mode="wb", delete=False) as temp_out:
-                return temp_out.name, "no_data"
-
-        if start == 0 and end == size - 1:
-            return None, None
-
-        cleaned_content = mm[start:end+1]
-        with tempfile.NamedTemporaryFile(mode="wb", delete=False) as temp_out:
-            temp_out.write(cleaned_content)
-            return temp_out.name, None
-
+                temp_out.write(cleaned_content)
+                return temp_out.name, None
     except Exception as e:
         logger("ERROR", f"Error stripping whitespace from file '{path}'", e, indent=3)
         return None, None
-    finally:
-        if mm:
-            mm.close()
-        if f:
-            f.close()
 
 def strip_outer_quotes(path, encoding):
     temp_path = None
     was_stripped = False
 
-    f = mm = None
     try:
-        f = open(path, "rb")
-        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-        with tempfile.NamedTemporaryFile(mode="w", encoding=encoding, delete=False) as temp_out:
-            temp_path = temp_out.name
-            line_bytes = b""
+        with open(path, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+            with tempfile.NamedTemporaryFile(mode="w", encoding=encoding, delete=False) as temp_out:
+                temp_path = temp_out.name
+                line_bytes = b""
 
-            for byte in iter(lambda: mm.read(1), b""):
-                line_bytes += byte
+                for byte in iter(lambda: mm.read(1), b""):
+                    line_bytes += byte
 
-                if byte == b"\n":
-                    line = safe_decode(line_bytes, encoding).strip()
-                    original = line
+                    if byte == b"\n":
+                        line = safe_decode(line_bytes, encoding).strip()
+                        original = line
 
-                    start_quotes = len(re.match(r'^"+', original).group(0)) if re.match(r'^"+', original) else 0
-                    end_quotes = len(re.search(r'"+$', original).group(0)) if re.search(r'"+$', original) else 0
+                        start_quotes = len(re.match(r'^"+', original).group(0)) if re.match(r'^"+', original) else 0
+                        end_quotes = len(re.search(r'"+$', original).group(0)) if re.search(r'"+$', original) else 0
 
-                    if start_quotes >= 2 and end_quotes >= 2:
-                        inner = original[start_quotes:-end_quotes]
-                        line = inner.strip()
-                        was_stripped = True
+                        if start_quotes >= 2 and end_quotes >= 2:
+                            inner = original[start_quotes:-end_quotes]
+                            line = inner.strip()
+                            was_stripped = True
 
-                    temp_out.write(line + "\n")
-                    line_bytes = b""
+                        temp_out.write(line + "\n")
+                        line_bytes = b""
 
-        return temp_path, was_stripped
-
+            return temp_path, was_stripped
     except Exception as e:
         logger("ERROR", f"Error during outer quote stripping for file '{path}'", e, indent=3)
         return None, False
-    finally:
-        if mm:
-            mm.close()
-        if f:
-            f.close()
 
 def check_single_line(path):
-    f = mm = None
     try:
-        f = open(path, "rb")
-        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-        newlines = 0
-        for byte in iter(lambda: mm.read(1), b""):
-            if byte == b"\n":
-                newlines += 1
-                if newlines > 1:
-                    return False
-        return True
+        with open(path, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+            newlines = 0
+            for byte in iter(lambda: mm.read(1), b""):
+                if byte == b"\n":
+                    newlines += 1
+                    if newlines > 1:
+                        return False
+            return True
     except Exception as e:
         logger("ERROR", f"Error checking if file '{path}' is one-line", e, indent=3)
         return False
-    finally:
-        if mm:
-            mm.close()
-        if f:
-            f.close()
 
 def process_fix_tabular(dataset_path, encoding):
     tags = []
@@ -517,183 +485,167 @@ def safe_decode(raw, encoding):
     except Exception:
         return None
 
-def stream_decode_to_tempfile(mm, encoding, bom_offset=0, bom_bytes=None):
+def stream_decode_to_tempfile(path, encoding, bom_offset=0, bom_bytes=None):
     try:
-        with tempfile.NamedTemporaryFile(mode="wb", delete=False) as tmpfile:
-            mm.seek(bom_offset)
-            reader = codecs.getreader(encoding)(mm)
+        with open(path, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+            with tempfile.NamedTemporaryFile(mode="wb", delete=False) as tmpfile:
+                mm.seek(bom_offset)
+                reader = codecs.getreader(encoding)(mm)
 
-            if bom_bytes:
-                tmpfile.write(bom_bytes)
+                if bom_bytes:
+                    tmpfile.write(bom_bytes)
 
-            prev_line = None
-            for line in reader:
-                if prev_line is None:
-                    prev_line = line.lstrip()
-                else:
-                    tmpfile.write(prev_line.encode("utf-8"))
-                    prev_line = line
+                prev_line = None
+                for line in reader:
+                    if prev_line is None:
+                        prev_line = line.lstrip()
+                    else:
+                        tmpfile.write(prev_line.encode("utf-8"))
+                        prev_line = line
 
-            if prev_line is not None:
-                tmpfile.write(prev_line.rstrip().encode("utf-8"))
+                if prev_line is not None:
+                    tmpfile.write(prev_line.rstrip().encode("utf-8"))
 
-            return tmpfile.name
+                return tmpfile.name
     except UnicodeDecodeError:
         return None
 
-def stream_decode_to_tempfile_fixlines(mm, encoding, bom_offset=0, bom_bytes=None):
-    fixed_count = 0
-    unrecoverable_count = 0
-
+def stream_decode_to_tempfile_fixlines(path, encoding, bom_offset=0, bom_bytes=None):
     try:
-        with tempfile.NamedTemporaryFile(mode="wb", delete=False) as tmpfile:
-            mm.seek(bom_offset)
-            reader = codecs.getreader(encoding)(mm)
+        fixed_count = 0
+        unrecoverable_count = 0
+        with open(path, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+            with tempfile.NamedTemporaryFile(mode="wb", delete=False) as tmpfile:
+                mm.seek(bom_offset)
+                reader = codecs.getreader(encoding)(mm)
 
-            if bom_bytes:
-                tmpfile.write(bom_bytes)
+                if bom_bytes:
+                    tmpfile.write(bom_bytes)
 
-            prev_line = None
-            for line in reader:
-                fixed_line, fixed = fix_line(line)
-                if fixed is True:
-                    fixed_count += 1
-                elif fixed is None:
-                    unrecoverable_count += 1
+                prev_line = None
+                for line in reader:
+                    fixed_line, fixed = fix_line(line)
+                    if fixed is True:
+                        fixed_count += 1
+                    elif fixed is None:
+                        unrecoverable_count += 1
 
-                if prev_line is None:
-                    prev_line = fixed_line.lstrip()
-                else:
-                    tmpfile.write(prev_line.encode("utf-8"))
-                    prev_line = fixed_line
+                    if prev_line is None:
+                        prev_line = fixed_line.lstrip()
+                    else:
+                        tmpfile.write(prev_line.encode("utf-8"))
+                        prev_line = fixed_line
 
-            if prev_line is not None:
-                tmpfile.write(prev_line.rstrip().encode("utf-8"))
+                if prev_line is not None:
+                    tmpfile.write(prev_line.rstrip().encode("utf-8"))
 
-            tag = None
-            if unrecoverable_count > 0 and fixed_count > 0:
-                tag = "partial_data_loss"
-            elif unrecoverable_count > 0:
-                tag = "irreversible_data_loss"
-            elif fixed_count > 0:
-                tag = "fixed_data"
+                tag = None
+                if unrecoverable_count > 0 and fixed_count > 0:
+                    tag = "partial_data_loss"
+                elif unrecoverable_count > 0:
+                    tag = "irreversible_data_loss"
+                elif fixed_count > 0:
+                    tag = "fixed_data"
 
-            return tmpfile.name, tag, fixed_count, unrecoverable_count
+                return tmpfile.name, tag, fixed_count, unrecoverable_count
     except UnicodeDecodeError:
         return None, None, 0, 0
 
-def detect_best_encoding(file_path, encodings=ENCODING_CANDIDATES, num_bytes=64*1024):
+def detect_best_encoding(path, encodings=ENCODING_CANDIDATES, num_bytes=64*1024):
     raw_flags = {
         "tags": [],
         "fixed_lines": 0,
         "unrecoverable_lines": 0
     }
 
-    f = mm = None
-    try:
-        f = open(file_path, "rb")
-        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+    with open(path, "rb") as f:
+        raw_sample = f.read(num_bytes)
 
-        raw_sample = mm[:num_bytes]
+    if not raw_sample:
+        return "utf-8", None, None
 
-        if not raw_sample:
-            return "utf-8", None, None
+    bom_encoding = detect_bom(raw_sample)
+    bom_bytes = get_bom_bytes(bom_encoding)
+    bom_offset = len(bom_bytes) if bom_bytes else 0
 
-        bom_encoding = detect_bom(raw_sample)
-        bom_bytes = get_bom_bytes(bom_encoding)
-        bom_offset = len(bom_bytes) if bom_bytes else 0
+    raw_flags["tags"].append("normalized_utf8")
 
-        raw_flags["tags"].append("normalized_utf8")
-
-        # 1. Valid BOM decoding
-        if bom_encoding:
-            sample_content = safe_decode(raw_sample, bom_encoding)
-            if sample_content:
-                flags = check_encoding_quality(sample_content) or {}
-                temp_path = stream_decode_to_tempfile(mm, bom_encoding, bom_offset)
-                if temp_path:
-                    return "utf-8", temp_path, raw_flags
-
-            raw_flags["tags"].append("bom_invalid_or_unreliable")
-            raw_sample = raw_sample[bom_offset:]
-
-        # 2. Detect UTF-16/32 patterns
-        pattern_encoding = detect_encoding_pattern(raw_sample)
-        if pattern_encoding:
-            bom_bytes = get_bom_bytes(pattern_encoding)
-            sample_content = safe_decode(bom_bytes + raw_sample, pattern_encoding)
-            if sample_content:
-                flags = check_encoding_quality(sample_content) or {}
-                temp_path = stream_decode_to_tempfile(mm, pattern_encoding, bom_offset, bom_bytes)
-                if temp_path:
-                    return "utf-8", temp_path, raw_flags
-
-        # 3. Brute-force encodings
-        results = {}
-        for encoding in encodings:
-            sample_content = safe_decode(raw_sample, encoding)
-            if sample_content and sample_content.strip():
-                flags = check_encoding_quality(sample_content) or {}
-                temp_path = stream_decode_to_tempfile(mm, encoding, bom_offset)
-                if temp_path:
-                    results[encoding] = {"flags": flags, "temp_path": temp_path}
-
-        if results:
-            _, best_result = max(results.items(), key=lambda item: sum(item[1]["flags"].values()))
-
-            temp_path = best_result["temp_path"]
-            delete_tempfiles([val["temp_path"] for val in results.values()], temp_path)
-
-            return "utf-8", temp_path, raw_flags
-
-        # 4. Brute-force encodings (+ fix)
-        results = {}
-        for encoding in encodings:
-            sample_content = safe_decode(raw_sample, encoding)
-            if sample_content and sample_content.strip():
-                fixed_content, _, _, _ = fix_lines(sample_content)
-                if fixed_content:
-                    flags = check_encoding_quality(fixed_content) or {}
-                    temp_path, tag, fixed_count, unrecoverable_count = stream_decode_to_tempfile_fixlines(mm, encoding, bom_offset)
-                    if temp_path:
-                        results[encoding] = {"flags": flags, "temp_path": temp_path, "tag": tag, "fixed_lines": fixed_count, "unrecoverable_lines": unrecoverable_count}
-
-        if results:
-            _, best_result = max(results.items(), key=lambda item: sum(item[1]["flags"].values()))
-
-            temp_path = best_result["temp_path"]
-            delete_tempfiles([val["temp_path"] for val in results.values()], temp_path)
-
-            raw_flags["tags"].append(best_result["tag"])
-            raw_flags["fixed_lines"] = best_result["fixed_lines"]
-            raw_flags["unrecoverable_lines"] = best_result["unrecoverable_lines"]
-            return "utf-8", best_result["temp_path"], raw_flags
-
-        # 5. Last-resort brute-force (+ fix)
-        for encoding in encodings:
-            temp_path, tag, fixed_count, unrecoverable_count = stream_decode_to_tempfile_fixlines(mm, encoding, bom_offset)
+    # 1. Valid BOM decoding
+    if bom_encoding:
+        sample_content = safe_decode(raw_sample, bom_encoding)
+        if sample_content:
+            flags = check_encoding_quality(sample_content) or {}
+            temp_path = stream_decode_to_tempfile(path, bom_encoding, bom_offset)
             if temp_path:
-                logger("WARNING", f"Last-resort encoding recovery applied in file '{file_path}' using {encoding}")
-
-                raw_flags["tags"].append(tag)
-                raw_flags["fixed_lines"] = fixed_count
-                raw_flags["unrecoverable_lines"] = unrecoverable_count
                 return "utf-8", temp_path, raw_flags
 
-        # 6. Fallback
-        for encoding in encodings:
-            sample_content = safe_decode(raw_sample, encoding)
-            if sample_content and sample_content.strip():
-                temp_path = stream_decode_to_tempfile(mm, encoding, bom_offset)
-                if temp_path:
-                    return "utf-8", temp_path, raw_flags
+        raw_flags["tags"].append("bom_invalid_or_unreliable")
+        raw_sample = raw_sample[bom_offset:]
 
-        return None, None, None
-    finally:
-        if mm:
-            mm.close()
-        if f:
-            f.close()
+    # 2. Detect UTF-16/32 patterns
+    pattern_encoding = detect_encoding_pattern(raw_sample)
+    if pattern_encoding:
+        bom_bytes = get_bom_bytes(pattern_encoding)
+        sample_content = safe_decode(bom_bytes + raw_sample, pattern_encoding)
+        if sample_content:
+            flags = check_encoding_quality(sample_content) or {}
+            temp_path = stream_decode_to_tempfile(path, pattern_encoding, bom_offset, bom_bytes)
+            if temp_path:
+                return "utf-8", temp_path, raw_flags
+
+    # 3. Brute-force encodings
+    results = {}
+    for encoding in encodings:
+        sample_content = safe_decode(raw_sample, encoding)
+        if sample_content and sample_content.strip():
+            flags = check_encoding_quality(sample_content) or {}
+            temp_path = stream_decode_to_tempfile(path, encoding, bom_offset)
+            if temp_path:
+                results[encoding] = {"flags": flags, "temp_path": temp_path}
+
+    if results:
+        _, best_result = max(results.items(), key=lambda item: sum(item[1]["flags"].values()))
+
+        temp_path = best_result["temp_path"]
+        delete_tempfiles([val["temp_path"] for val in results.values()], temp_path)
+
+        return "utf-8", temp_path, raw_flags
+
+    # 4. Brute-force encodings (+ fix)
+    results = {}
+    for encoding in encodings:
+        sample_content = safe_decode(raw_sample, encoding)
+        if sample_content and sample_content.strip():
+            fixed_content, _, _, _ = fix_lines(sample_content)
+            if fixed_content:
+                flags = check_encoding_quality(fixed_content) or {}
+                temp_path, tag, fixed_count, unrecoverable_count = stream_decode_to_tempfile_fixlines(path, encoding, bom_offset)
+                if temp_path:
+                    results[encoding] = {"flags": flags, "temp_path": temp_path, "tag": tag, "fixed_lines": fixed_count, "unrecoverable_lines": unrecoverable_count}
+
+    if results:
+        _, best_result = max(results.items(), key=lambda item: sum(item[1]["flags"].values()))
+
+        temp_path = best_result["temp_path"]
+        delete_tempfiles([val["temp_path"] for val in results.values()], temp_path)
+
+        raw_flags["tags"].append(best_result["tag"])
+        raw_flags["fixed_lines"] = best_result["fixed_lines"]
+        raw_flags["unrecoverable_lines"] = best_result["unrecoverable_lines"]
+        return "utf-8", best_result["temp_path"], raw_flags
+
+    # 5. Last-resort brute-force (+ fix)
+    for encoding in encodings:
+        temp_path, tag, fixed_count, unrecoverable_count = stream_decode_to_tempfile_fixlines(path, encoding, bom_offset)
+        if temp_path:
+            logger("WARNING", f"Last-resort encoding recovery applied in file '{path}' using {encoding}")
+
+            raw_flags["tags"].append(tag)
+            raw_flags["fixed_lines"] = fixed_count
+            raw_flags["unrecoverable_lines"] = unrecoverable_count
+            return "utf-8", temp_path, raw_flags
+
+    return None, None, None
 
 # == Delimiter detection functions ==
 
@@ -721,11 +673,7 @@ def count_unquoted_delimiters(line, delim):
 def detect_delimiter(path, encoding, max_lines=50, max_cv=0.6):
     lines = []
 
-    f = mm = None
-    try:
-        f = open(path, "rb")
-        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-
+    with open(path, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
         line_bytes = b""
 
         for byte in iter(lambda: mm.read(1), b""):
@@ -745,55 +693,49 @@ def detect_delimiter(path, encoding, max_lines=50, max_cv=0.6):
             if line:
                 lines.append(line)
 
-        if not lines:
-            return None, None
+    if not lines:
+        return None, None
 
-        delimiter_candidates = []
-        all_chars = set(c for line in lines for c in line if not c.isalnum() and c not in NOT_ALLOWED_DELIMITERS)
+    delimiter_candidates = []
+    all_chars = set(c for line in lines for c in line if not c.isalnum() and c not in NOT_ALLOWED_DELIMITERS)
 
-        for delim in all_chars:
-            counts = [count_unquoted_delimiters(line, delim) for line in lines]
+    for delim in all_chars:
+        counts = [count_unquoted_delimiters(line, delim) for line in lines]
 
-            nonzero_counts = [c for c in counts if c > 0]
-            if not nonzero_counts:
-                continue
+        nonzero_counts = [c for c in counts if c > 0]
+        if not nonzero_counts:
+            continue
 
-            freq_counter = Counter(nonzero_counts)
-            most_common_val, freq = freq_counter.most_common(1)[0]
+        freq_counter = Counter(nonzero_counts)
+        most_common_val, freq = freq_counter.most_common(1)[0]
 
-            first_idx = counts.index(most_common_val)
+        first_idx = counts.index(most_common_val)
 
-            if len(nonzero_counts) > 1:
-                mean = statistics.mean(nonzero_counts)
-                stdev = statistics.stdev(nonzero_counts)
-                cv = stdev / mean if mean != 0 else float("inf")
-            else:
-                cv = 0
+        if len(nonzero_counts) > 1:
+            mean = statistics.mean(nonzero_counts)
+            stdev = statistics.stdev(nonzero_counts)
+            cv = stdev / mean if mean != 0 else float("inf")
+        else:
+            cv = 0
 
-            if cv > max_cv:
-                continue
+        if cv > max_cv:
+            continue
 
-            delimiter_candidates.append({
-                "delim": delim,
-                "freq": freq,
-                "cv": cv,
-                "first_idx": first_idx,
-                "most_common_val": most_common_val,
-            })
+        delimiter_candidates.append({
+            "delim": delim,
+            "freq": freq,
+            "cv": cv,
+            "first_idx": first_idx,
+            "most_common_val": most_common_val,
+        })
 
-        if not delimiter_candidates:
-            return None, None
+    if not delimiter_candidates:
+        return None, None
 
-        delimiter_candidates.sort(key=lambda x: (-x["freq"], x["cv"], x["first_idx"]))
-        best = delimiter_candidates[0]
+    delimiter_candidates.sort(key=lambda x: (-x["freq"], x["cv"], x["first_idx"]))
+    best = delimiter_candidates[0]
 
-        return best["delim"], best["first_idx"]
-
-    finally:
-        if mm:
-            mm.close()
-        if f:
-            f.close()
+    return best["delim"], best["first_idx"]
 
 # == MIME type functions ==
 
