@@ -55,5 +55,15 @@
         "tag_explanation": {
             "reason": "The server rejected the download request because the HTTP method used is not allowed for this resource (HTTP 405 - Method Not Allowed)"
         }
+    },
+    "resource_temporarily_unavailable": {
+        "tag_placeholders": ["<downloadURL>", "<metaMediaType>"],
+        "tag_explanation": {
+            "reason": "The resource could not be accessed due to a temporary issue with the server or the domain (e.g. DNS resolution failure, timeout, or connection error) and might be available in future attempts",
+            "values": {
+                "downloadURL": "<downloadURL>",
+                "metaMediaType": "<metaMediaType>"
+            }
+        }
     }
 }

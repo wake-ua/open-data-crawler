@@ -11,7 +11,13 @@ SPECIAL_TAGS_ICONS = {
     "ERROR": "❌",
     "NET": "🌐",
     "...": "🔎",
-    "MNKY": "🐒"
+    "INFO": "ℹ️",
+    "WORK": "🧩",
+    "SKIP": "⏭️",
+    "SAVE": "💾",
+    "FIX": "🛠️",
+    "DEL": "🗑️",
+    "MNKY": "🐒",
 }
 
 class LogManager:
@@ -67,9 +73,9 @@ class LogManager:
         with self._log_lock:
             if tag == "ERROR":
                 self._logger.error(final_message)
-            elif tag == "WARNING":
+            elif tag in {"WARNING", "SKIP"}:
                 self._logger.warning(final_message)
-            elif tag == "OK":
+            elif tag in {"OK", "SAVE", "FIX", "DEL"}:
                 self._logger.info(final_message)
             else:
                 self._logger.debug(final_message)

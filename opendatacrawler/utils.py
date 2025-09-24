@@ -5,6 +5,7 @@ import hashlib
 import chardet
 import olefile
 import re
+import configparser
 import gc
 import tempfile
 import mmap
@@ -34,10 +35,7 @@ RAW_SIGNATURES = [
     (b"<html", "text/html"),
 ]
 
-MIME_EXTENSION_EQUIVALENTS = {
-    "csv": {"text/csv", "text/plain", "text/tsv"},
-    "tsv": {"text/csv", "text/plain", "text/tsv"},
-}
+GENERIC_MIME_TYPES = {"application/octet-stream", "text/plain", "application/force-download"}
 
 # ==============================
 # Filesystem functions
@@ -101,7 +99,7 @@ def is_geojson(field):
 def get_user_agent_list(current_agent):
     return [current_agent] + [ua for ua in USER_AGENTS if ua != current_agent] if current_agent else USER_AGENTS
 
-def make_request(url, current_agent, headers=None, params=None, max_sec=None):
+def make_request(url, current_agent, headers=None, params=None, max_sec=None, return_tag=False):
     headers = headers.copy() if headers else {}
     if not is_url(url):
         url = f"https://{url}"
@@ -113,6 +111,9 @@ def make_request(url, current_agent, headers=None, params=None, max_sec=None):
         if response.status_code == 403:
             logger("NET", f"Forbidden with User-Agent '{user_agent}' (HTTP 403 - Forbidden), trying next one...")
             continue
+
+        if return_tag:
+            
 
         return response, user_agent
 
@@ -185,15 +186,22 @@ def recover_resume(save_path, accepted_types=None):
 def is_completed(package, file_name):
     if file_name:
         try:
-            return package["crawlerInfo"]["resourcesInfo"][file_name]["fileStatus"].get("fileCompleted", False)
+            info = package["crawlerInfo"]["resourcesInfo"][file_name]
+            file_status = info.get("fileStatus", {})
+            file_info = info.get("fileInfo", {})
+
+            if "resource_temporarily_unavailable" in file_info:
+                return True
+
+            return bool(file_status.get("fileCompleted", False))
         except Exception as e:
             logger("WARNING", f"Missing or invalid status for '{file_name}': {e}")
             return False
     else:
         try:
-            return package["crawlerInfo"]["packageStatus"].get("packageCompleted", False)
+            return bool(package["crawlerInfo"]["packageStatus"].get("packageCompleted", False))
         except Exception as e:
-            logger("WARNING", f"Missing or invalid status for '{package.get("fileName")}': {e}")
+            logger("WARNING", f"Missing or invalid status for '{package.get('fileName')}': {e}")
             return False
 
 # ==============================
@@ -248,14 +256,22 @@ def fix_lines(decoded_text):
         elif status is None:
             unrecoverable_count += 1
 
+        del fixed_line_text, status, line
+
     if fixed_count == 0 and unrecoverable_count == 0:
+        del lines, fixed_lines
+        gc.collect()
         return None, None, 0, 0
 
     result = "\n".join(fixed_lines)
+    del lines, fixed_lines
+    gc.collect()
+
     if unrecoverable_count > 0 and fixed_count > 0:
         return result, "partial_data_loss", fixed_count, unrecoverable_count
     if unrecoverable_count > 0:
         return result, "irreversible_data_loss", fixed_count, unrecoverable_count
+
     return result, "fixed_data", fixed_count, unrecoverable_count
 
 def fix_line(line):
@@ -266,6 +282,8 @@ def fix_line(line):
         fixed = fix_func(line)
         if not is_bad_encoding(fixed):
             return fixed, True
+    del fixed
+    gc.collect()
     return line, None
 
 def are_quotes_balanced(line):
@@ -389,7 +407,7 @@ def process_fix_tabular(dataset_path, encoding):
     if was_stripped:
         was_modified = True
         logger("WARNING", f"File '{dataset_path}' appears to have unnecessary outer quotes, attempting removal...", indent=3)
-        logger("OK", f"Removed unnecessary outer quotes in file '{dataset_path}'", indent=3)
+        logger("FIX", f"Removed unnecessary outer quotes in file '{dataset_path}'", indent=3)
         tags.append(("stripped_outer_quotes", {}))
     gc.collect()
 
@@ -400,7 +418,7 @@ def process_fix_tabular(dataset_path, encoding):
     if reconstructed_lines > 0:
         was_modified = True
         logger("WARNING", f"File '{dataset_path}' appears to contain broken multiline values, attempting reconstruction...", indent=3)
-        logger("OK", f"Reconstructed {reconstructed_lines} multiline rows in file '{dataset_path}'", indent=3)
+        logger("FIX", f"Reconstructed {reconstructed_lines} multiline rows in file '{dataset_path}'", indent=3)
         tags.append(("reconstructed_lines", {"<reconstructed_lines>": reconstructed_lines}))
     gc.collect()
 
@@ -410,6 +428,8 @@ def process_fix_tabular(dataset_path, encoding):
     if temp_paths:
         delete_tempfiles(temp_paths, process_fix_path)
 
+    del temp_path, temp_paths
+    gc.collect()
     return process_fix_path if was_modified else None, tags
 
 # == Encoding functions ==
@@ -556,6 +576,8 @@ def detect_best_encoding(path, encodings=ENCODING_CANDIDATES, num_bytes=64*1024)
             flags = check_encoding_quality(sample_content) or {}
             temp_path = stream_decode_to_tempfile(path, bom_encoding, bom_offset)
             if temp_path:
+                del sample_content, flags
+                gc.collect()
                 return "utf-8", temp_path, raw_flags
 
         raw_flags["tags"].append("bom_invalid_or_unreliable")
@@ -570,6 +592,8 @@ def detect_best_encoding(path, encodings=ENCODING_CANDIDATES, num_bytes=64*1024)
             flags = check_encoding_quality(sample_content) or {}
             temp_path = stream_decode_to_tempfile(path, pattern_encoding, bom_offset, bom_bytes)
             if temp_path:
+                del sample_content, flags
+                gc.collect()
                 return "utf-8", temp_path, raw_flags
 
     # 3. Brute-force encodings
@@ -587,7 +611,8 @@ def detect_best_encoding(path, encodings=ENCODING_CANDIDATES, num_bytes=64*1024)
 
         temp_path = best_result["temp_path"]
         delete_tempfiles([val["temp_path"] for val in results.values()], temp_path)
-
+        del sample_content, results, best_result, flags
+        gc.collect()
         return "utf-8", temp_path, raw_flags
 
     # 4. Brute-force encodings (+ fix)
@@ -611,7 +636,9 @@ def detect_best_encoding(path, encodings=ENCODING_CANDIDATES, num_bytes=64*1024)
         raw_flags["tags"].append(best_result["tag"])
         raw_flags["fixed_lines"] = best_result["fixed_lines"]
         raw_flags["unrecoverable_lines"] = best_result["unrecoverable_lines"]
-        return "utf-8", best_result["temp_path"], raw_flags
+        del sample_content, results, best_result, flags
+        gc.collect()
+        return "utf-8", temp_path, raw_flags
 
     # 5. Last-resort brute-force (+ fix)
     for encoding in encodings:
@@ -622,8 +649,12 @@ def detect_best_encoding(path, encodings=ENCODING_CANDIDATES, num_bytes=64*1024)
             raw_flags["tags"].append(tag)
             raw_flags["fixed_lines"] = fixed_count
             raw_flags["unrecoverable_lines"] = unrecoverable_count
+            del sample_content, results, best_result, flags
+            gc.collect()
             return "utf-8", temp_path, raw_flags
-
+        
+    del sample_content, temp_path, results, best_result, flags
+    gc.collect()
     return None, None, None
 
 # == Delimiter detection functions ==
@@ -718,6 +749,52 @@ def detect_delimiter(path, encoding, max_lines=50, max_cv=0.6):
 
 # == MIME type functions ==
 
+def resolve_mediatype_conflict(meta_mimetype_og, response, base_name):
+    meta_mimetype, _ = get_mime_and_ext(meta_mimetype_og)
+    if meta_mimetype == "application/force-download":
+        print(response.json())
+        print(response.headers)
+    detected_mime, detected_ext = get_resource_ext_info(response)
+    meta_ext = get_extension_mime(meta_mimetype) if meta_mimetype else None
+    if detected_mime == "application/force-download":
+        print(response.json())
+        print(response.headers)
+    tag_val = final_ext = final_mime = None
+    if detected_mime and detected_mime not in GENERIC_MIME_TYPES:
+        if meta_ext and detected_ext and meta_ext != detected_ext:
+            tag_val = {
+                "<mediaType_old>": meta_mimetype, "<fileName_old>": f"{base_name}.{meta_ext}",
+                "<mediaType_new>": detected_mime, "<fileName_new>": f"{base_name}.{detected_ext}"
+            }
+        final_mime = detected_mime
+        final_ext = detected_ext
+    else:
+        if meta_mimetype:
+            final_mime = meta_mimetype
+            final_ext = meta_ext
+        else:
+            if detected_mime == "application/force-download":
+                final_mime = "text/plain"
+                final_ext = "txt"
+            else:
+                final_mime = detected_mime
+                final_ext = detected_ext
+
+    final_file_name = f"{base_name}.{final_ext}" if final_ext else None
+
+    if not final_file_name or not final_mime:
+        print(response.json())
+        print(response.headers)
+        print("meta_mimetype_og", meta_mimetype_og)
+        print("detected_mime", detected_mime)
+        print("detected_ext", detected_ext)
+        print("meta_mimetype", meta_mimetype)
+        print("meta_ext", meta_ext)
+        print("----")
+
+    return final_mime, final_file_name, tag_val
+
+
 def get_mime_and_ext(pos_mime_value):
     pos_mime_value = pos_mime_value.strip().lower()
     if "/" in pos_mime_value:
@@ -738,7 +815,7 @@ def get_resource_ext_info(response):
     mime_type = None
     ext = None
     if "filename=" in content_disposition:
-        filename = content_disposition.split("filename=")[-1].strip().strip('"')
+        filename = content_disposition.split("filename=")[-1].strip('";').strip()
         if "." in filename:
             ext = filename.split(".")[-1].lower()
             mime_type = EXT_TO_MIME.get(ext)
@@ -746,7 +823,7 @@ def get_resource_ext_info(response):
                 return mime_type, ext
 
     if content_type:
-        raw_mime = content_type.split(";")[0].split(",")[0].strip().lower()
+        raw_mime = content_type.split(";")[0].split(",")[0].strip('";').strip().lower()
         mime_type, ext = get_mime_and_ext(raw_mime)
         if not ext:
             logger("WARNING", f"No file extension found for MIME type: '{mime_type}'")
@@ -921,18 +998,29 @@ def add_tag_explanations(tags, data_source=None):
 # Resource loading functions
 # ==============================
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 def print_intro():
-    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "resources", "intro.txt"), "r", encoding="utf-8") as f:
+    with open(os.path.join(BASE_DIR, "resources", "intro.txt"), "r", encoding="utf-8") as f:
         print(f.read())
 
 def load_resource(filename, fallback_value=None):
-    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "resources", filename), "r", encoding="utf-8") as f:
+    with open(os.path.join(BASE_DIR, "resources", filename), "r", encoding="utf-8") as f:
         data = json.load(f)
 
     if fallback_value:
         data["MAP_FALLBACK"] = fallback_value
 
     return data
+
+def load_tokens():
+    config = configparser.ConfigParser()
+    config.read(os.path.join(BASE_DIR, "config.ini"))
+
+    return {
+        section.lower(): config.get(section, "token", fallback=None) or None
+        for section in config.sections()
+    }
 
 def build_extension_to_mime_map(mime_map):
     ext_to_mime = {}
@@ -944,6 +1032,8 @@ def build_extension_to_mime_map(mime_map):
                 if first_ext not in ext_to_mime:
                     ext_to_mime[first_ext] = mime
     return ext_to_mime
+
+AUTH_TOKENS = load_tokens()
 
 USER_AGENTS = load_resource("user_agents.json")
 MIME_TYPE_MAP = load_resource("mime_extensions.json")

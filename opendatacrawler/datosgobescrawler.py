@@ -44,7 +44,7 @@ class DatosGobEsCrawler():
 
         return ids
 
-    def parse_resource(self, resource_meta, base_name):
+    def parse_resource(self, resource_meta, base_name, reparse=None):
         resource = {}
         resource_crawler_info = utils.init_metadata(resource=True)
 
@@ -52,30 +52,17 @@ class DatosGobEsCrawler():
 
         resource["downloadURL"] = resource_meta.get("accessURL") or resource_meta.get("downloadURL")
         if not utils.is_url(resource["downloadURL"]):
-            resource["downloadURL"] = f"https://{resource["downloadURL"]}"
+            resource["downloadURL"] = f"https://{resource['downloadURL']}"
 
+        meta_media_type = resource_meta.get("format", {}).get("value")
         response, self.user_agent = utils.make_request(resource["downloadURL"], self.user_agent)
-        media_type, ext = utils.get_resource_ext_info(response)
+        media_type, file_name, tag_val = utils.resolve_mediatype_conflict(meta_media_type, response, base_name)
 
-        meta_mimetype = resource_meta.get("format", {}).get("value")
-        meta_ext = utils.get_extension_mime(meta_mimetype)
-
-        if media_type:
-            resource["mediaType"] = media_type
-            if media_type not in ["application/octet-stream", "text/plain"]:
-                if meta_ext and ext != meta_ext:
-                    logger("WARNING", f"Detected a media type mismatch for file {resource['downloadURL']} '{base_name}', was declared as '{meta_mimetype}' (.{meta_ext}), but detected as '{media_type}' (.{ext})", indent=3)
-                    resource_crawler_info["fileMetadataChanges"].update(
-                        utils.add_tag_explanations("mimetype_mismatch", {
-                            "<mediaType_old>": meta_mimetype, "<fileName_old>": f"{base_name}.{meta_ext}",
-                            "<mediaType_new>": media_type, "<fileName_new>": f"{base_name}.{ext}"
-                        })
-                    )
-        else:
-            resource["mediaType"] = meta_mimetype
-            ext = meta_ext
-
-        resource["fileName"] = f"{base_name}.{ext}"
+        resource["mediaType"] = media_type
+        resource["fileName"] = file_name
+        if tag_val:
+            logger("WARNING", f"Detected a media type mismatch for file {resource['downloadURL']} '{base_name}'", indent=3)
+            resource_crawler_info["fileMetadataChanges"].update(utils.add_tag_explanations("mimetype_mismatch", tag_val))
 
         return resource, resource_crawler_info
 

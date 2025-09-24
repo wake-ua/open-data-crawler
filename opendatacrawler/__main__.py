@@ -115,15 +115,16 @@ def main():
                 logger("...", f"Processing {len(packages_to_process)} packages...", level="print")
 
                 with ThreadPoolExecutor(max_workers=max_threads, thread_name_prefix="t") as executor:
-                    futures = {executor.submit(crawler.process_package, pkg_id, categories, d_types, partial, avoid_data): pkg_id for pkg_id in packages_to_process}
-                    try:
-                        for future in tqdm(as_completed(futures), total=tqdm_total, initial=tqdm_initial, desc="Processing...", colour="green"):
+                    futures = (executor.submit(crawler.process_package, pkg_id, categories, d_types, partial, avoid_data) for pkg_id in packages_to_process)
+                    for future in tqdm(as_completed(futures), total=tqdm_total, initial=tqdm_initial, desc="Processing...", colour="green"):
+                        try:
                             future.result()
+                        except KeyboardInterrupt:
+                            logger("WARNING", "Interrupt received. Waiting for threads to finish gracefully... (this may take a while if many threads are active)", level="print")
+                            executor.shutdown(wait=False, cancel_futures=True)
+                        finally:
+                            del future
                             gc.collect()
-                    except KeyboardInterrupt:
-                        logger("WARNING", "Interrupt received. Waiting for threads to finish gracefully... (this may take a while if many threads are active)", level="print")
-                        executor.shutdown(wait=False, cancel_futures=True)
-
                 logger(None, "=" * 80, level="print")
                 resume_data, downloaded_after_res, failed_after_res, _ = utils.recover_resume(save_path=crawler.save_path, accepted_types=d_types)
                 logger("OK", f"{len(downloaded_after_res) - len(downloaded_before_res)} new resources downloaded in this run ({max(0, len(failed_after_res) - len(failed_before_res))} new failures, {len(set(failed_before_res) - set(failed_after_res))} recovered from previous failures): {len(downloaded_after_res)} successfully downloaded resources in total across {len(resume_data)} packages ({len(failed_after_res)} failed resources in total)", level="print")
