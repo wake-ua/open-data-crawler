@@ -61,9 +61,9 @@ class LogManager:
         if error:
             if isinstance(error, list):
                 if traceback:
-                    final_message += f" : {error[1]}"
+                    final_message += f" :\n{error[1]}"
                 else:
-                    final_message += f" :\n{error[0]}"
+                    final_message += f" : {error[0]}"
             else:
                 final_message += f" : {error}"
 

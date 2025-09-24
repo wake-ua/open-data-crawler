@@ -120,6 +120,11 @@ def make_request(url, current_agent, headers=None, params=None, max_sec=None, re
                 except requests.exceptions.SSLError as e:
                     return None, user_agent, "ssl_error", e
                 except requests.exceptions.RequestException as e:
+                    if "Name or service not known" in str(e):
+                        return None, user_agent, "unresolvable_domain", e
+                    elif "Read timed out" in str(e):
+                        return None, user_agent, "resource_temporarily_unavailable", e
+
                     status_code = getattr(e.response, "status_code", None)
                     tag = get_https_error_tag(status_code) if status_code else "resource_temporarily_unavailable"
                     return None, user_agent, tag, e
@@ -131,6 +136,8 @@ def make_request(url, current_agent, headers=None, params=None, max_sec=None, re
         except requests.exceptions.RequestException as e:
             if "Name or service not known" in str(e):
                 return None, user_agent, "unresolvable_domain", e
+            elif "Read timed out" in str(e):
+                return None, user_agent, "resource_temporarily_unavailable", e
 
             return (None, None, "resource_temporarily_unavailable", e) if return_tag else (None, None)
 
@@ -344,7 +351,7 @@ def check_unbalanced_quotes(path, encoding):
 
             return temp_out.name, reconstructed_lines
     except Exception as e:
-        logger("ERROR", f"Error reconstructing quotes in file '{path}'", e, indent=3)
+        logger("ERROR", f"Error reconstructing quotes in file '{path}'", e, indent=4)
         return None, 0
 
 def check_file_empty_or_strip(path, whitespace=b" \t\r\n"):
@@ -374,7 +381,7 @@ def check_file_empty_or_strip(path, whitespace=b" \t\r\n"):
                 temp_out.write(cleaned_content)
                 return temp_out.name, None
     except Exception as e:
-        logger("ERROR", f"Error stripping whitespace from file '{path}'", e, indent=3)
+        logger("ERROR", f"Error stripping whitespace from file '{path}'", e, indent=4)
         return None, None
 
 def strip_outer_quotes(path, encoding):
@@ -398,7 +405,7 @@ def strip_outer_quotes(path, encoding):
 
             return temp_out.name, was_stripped
     except Exception as e:
-        logger("ERROR", f"Error during outer quote stripping for file '{path}'", e, indent=3)
+        logger("ERROR", f"Error during outer quote stripping for file '{path}'", e, indent=4)
         return None, False
 
 def check_single_line(path, encoding):
@@ -411,7 +418,7 @@ def check_single_line(path, encoding):
                     return False
             return True
     except Exception as e:
-        logger("ERROR", f"Error checking if file '{path}' is one-line", e, indent=3)
+        logger("ERROR", f"Error checking if file '{path}' is one-line", e, indent=4)
         return False
 
 def process_fix_tabular(dataset_path, encoding):
@@ -427,8 +434,8 @@ def process_fix_tabular(dataset_path, encoding):
         temp_paths.append(temp_path)
     if was_stripped:
         was_modified = True
-        logger("WARNING", f"File '{dataset_path}' appears to have unnecessary outer quotes, attempting removal...", indent=3)
-        logger("FIX", f"Removed unnecessary outer quotes in file '{dataset_path}'", indent=3)
+        logger("WARNING", f"File '{dataset_path}' appears to have unnecessary outer quotes, attempting removal...", indent=4)
+        logger("FIX", f"Removed unnecessary outer quotes in file '{dataset_path}'", indent=4)
         tags.append(("stripped_outer_quotes", {}))
     gc.collect()
 
@@ -438,8 +445,8 @@ def process_fix_tabular(dataset_path, encoding):
         temp_paths.append(temp_path)
     if reconstructed_lines > 0:
         was_modified = True
-        logger("WARNING", f"File '{dataset_path}' appears to contain broken multiline values, attempting reconstruction...", indent=3)
-        logger("FIX", f"Reconstructed {reconstructed_lines} multiline rows in file '{dataset_path}'", indent=3)
+        logger("WARNING", f"File '{dataset_path}' appears to contain broken multiline values, attempting reconstruction...", indent=4)
+        logger("FIX", f"Reconstructed {reconstructed_lines} multiline rows in file '{dataset_path}'", indent=4)
         tags.append(("reconstructed_lines", {"<reconstructed_lines>": reconstructed_lines}))
     gc.collect()
 
@@ -772,14 +779,9 @@ def detect_delimiter(path, encoding, max_lines=50, max_cv=0.6):
 
 def resolve_mediatype_conflict(meta_mimetype_og, response, base_name):
     meta_mimetype, _ = get_mime_and_ext(meta_mimetype_og)
-    if meta_mimetype == "application/force-download":
-        print(response.json())
-        print(response.headers)
     detected_mime, detected_ext = get_resource_ext_info(response)
     meta_ext = get_extension_mime(meta_mimetype) if meta_mimetype else None
-    if detected_mime == "application/force-download":
-        print(response.json())
-        print(response.headers)
+
     tag_val = final_ext = final_mime = None
     if detected_mime and detected_mime not in GENERIC_MIME_TYPES:
         if meta_ext and detected_ext and meta_ext != detected_ext:
@@ -802,16 +804,6 @@ def resolve_mediatype_conflict(meta_mimetype_og, response, base_name):
                 final_ext = detected_ext
 
     final_file_name = f"{base_name}.{final_ext}" if final_ext else None
-
-    if not final_file_name or not final_mime:
-        print(response.json())
-        print(response.headers)
-        print("meta_mimetype_og", meta_mimetype_og)
-        print("detected_mime", detected_mime)
-        print("detected_ext", detected_ext)
-        print("meta_mimetype", meta_mimetype)
-        print("meta_ext", meta_ext)
-        print("----")
 
     return final_mime, final_file_name, tag_val
 

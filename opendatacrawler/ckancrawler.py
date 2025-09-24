@@ -61,16 +61,16 @@ class CkanCrawler():
         response, self.user_agent, error_tag, e = utils.make_request(resource["downloadURL"], self.user_agent, return_tag=True)
         if error_tag:
             if error_tag == "ssl_error":
-                logger("ERROR", f"SSL error downloading '{base_name}' ({resource["downloadURL"]})", e, indent=3)
+                logger("WARNING", f"SSL error downloading '{base_name}' ({resource['downloadURL']})", e, indent=3)
                 resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag))
                 resource_crawler_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
+            elif error_tag == "resource_temporarily_unavailable":
+                logger("WARNING", f"Temporarily unavailable resource '{base_name}' ({resource['downloadURL']})", e, indent=2)
+                resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag, {"<metaMediaType>": meta_media_type}))
             else:
-                logger("ERROR", f"Error downloading '{base_name}' ({resource["downloadURL"]})", e, indent=2)
-                if error_tag == "resource_temporarily_unavailable":
-                    resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag, {"<metaMediaType>": meta_media_type}))
-                else:
-                    resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag))
-                    resource_crawler_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
+                logger("WARNING", f"Non-recoverable download error for '{base_name}' ({resource['downloadURL']})", e, indent=2)
+                resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag))
+                resource_crawler_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
 
             return resource, resource_crawler_info
 

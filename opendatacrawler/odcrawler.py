@@ -27,12 +27,16 @@ class OpenDataCrawler():
         self.clean_domain = utils.clean_url(self.domain)
         self.save_path = os.path.join(base_path, self.clean_domain)
 
-        self.data_types = [x.lower() for x in data_types] if data_types else None
+        self.data_types = data_types
 
         self.user_agent = None
 
         logger("...", f"Detecting DMS for domain '{self.domain}'...", level="print")
         self.detect_dms()
+
+    # ==============================
+    # DMS detection and setup functions
+    # ==============================
 
     def detect_dms(self):
         dms_endpoints = {
@@ -109,6 +113,10 @@ class OpenDataCrawler():
         else:
             logger("ERROR", f"No accessible or supported DMS detected at '{self.domain}'", level="print")
 
+    # ==============================
+    # Cleanup and reset functions
+    # ==============================
+
     def reset_domain(self, reset_domain, has_data, has_logs):
         if reset_domain and (has_data or has_logs):
             try:
@@ -132,6 +140,10 @@ class OpenDataCrawler():
 
         log_manager.move_to_domain(self.clean_domain, move_file=True)
         log_manager.clean_unused_logs()
+
+    # ==============================
+    # Dataset download and processing functions
+    # ==============================
 
     def save_dataset(self, url, file_name, partial=False):
         logger("...", f"Attempting to download resource '{file_name}' from '{url}'...", indent=2)
@@ -205,99 +217,6 @@ class OpenDataCrawler():
 
             meta_path = os.path.join(self.save_path, file_name)
             logger("SAVE", f"Saving metadata to '{meta_path}'...", indent=2)
-            if "resources" in package:
-                for dataset_file_name, resource in package["resources"].items():
-                    dataset_path = os.path.join(self.save_path, dataset_file_name)
-                    if not os.path.exists(dataset_path):
-                        continue
-
-                    if not utils.is_completed(package, dataset_file_name):
-                        mime_type = resource.get("mediaType")
-                        try:
-                            encoding = temp_path = raw_flags = None
-                            if utils.MIME_TYPE_MAP.get(mime_type, {}).get("compressible", False):
-                                temp_path, tag = utils.check_file_empty_or_strip(dataset_path)
-                                if temp_path:
-                                    shutil.move(temp_path, dataset_path)
-                                  
-                                    logger("FIX", f"File '{dataset_path}' content stripped and overwritten", indent=3)
-                                    package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations("stripped_data"))
-                                if tag:
-                                    logger("WARNING", f"File '{dataset_path}' has no data or no valid content", indent=3)
-                                    package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["fileInfo"].update(utils.add_tag_explanations(tag))
-                                else:
-                                    encoding, temp_path, raw_flags = utils.detect_best_encoding(dataset_path)
-
-                                    if encoding:
-                                        resource["encoding"] = encoding
-                                    else:
-                                        logger("ERROR", f"No matching encoding found for: {dataset_path}", indent=3)
-
-                                    if temp_path:
-                                        try:
-                                            shutil.move(temp_path, dataset_path)
-                                            logger("OK", f"Overwrote cleaned content into '{dataset_path}'", indent=3)
-                                        except Exception as e:
-                                            logger("ERROR", f"Failed to move temp file to '{dataset_path}'", e, indent=3)
-                                    elif raw_flags:
-                                        package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations(raw_flags, raw_flags))
-                                        
-                            del encoding, mime_type, temp_path, raw_flags
-                            gc.collect()
-                        except Exception:
-                            logger("ERROR", f"Error while detecting encoding for: {dataset_path}", f"\n{traceback.format_exc()}", indent=3)
-                            continue
-
-                        if os.path.getsize(dataset_path) > 0:
-                            if dataset_path.endswith((".csv", ".tsv")):
-                                temp_path, tag = utils.process_fix_tabular(dataset_path, resource["encoding"])
-
-                                if temp_path:
-                                    shutil.move(temp_path, dataset_path)
-                                    logger("FIX", f"Cleaned and saved fixed tabular file to '{dataset_path}'", indent=3)
-
-                                for tag_key, tag_data in tag:
-                                    package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations(tag_key, tag_data))
-
-                                try:
-                                    delimiter, start_row = utils.detect_delimiter(dataset_path, resource["encoding"])
-                                except Exception as e:
-                                    logger("ERROR", f"Failed to detect delimiter for file '{dataset_path}'", e, indent=3)
-                                    continue
-
-                                if delimiter:
-                                    resource["delimiter"] = delimiter
-                                    if start_row:
-                                        package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["fileInfo"].update(utils.add_tag_explanations("skip_rows", {"<skipped_rows>": start_row}))
-                                        dialect = Dialect.from_descriptor({"delimiter": delimiter, "comment_rows": [start_row]})
-                                    else:
-                                        dialect = Dialect.from_descriptor({"delimiter": delimiter})
-
-                                    try:
-                                        resource_metadata = describe(dataset_path, encoding=resource["encoding"], dialect=dialect).to_dict()
-                                        resource["schema"] = resource_metadata.get("schema")
-                                        logger("OK", f"Schema extracted from '{dataset_path}' (encoding: '{resource['encoding']}', delimiter: '{delimiter}', start_row: {start_row})", indent=3)
-                                    except Exception as e:
-                                        logger("ERROR", f"Failed to extract schema from file '{dataset_path}'", e, indent=3)
-                                
-                                    del delimiter, start_row, resource_metadata, dialect
-                                    gc.collect()
-                                else:
-                                    package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["fileInfo"].update(utils.add_tag_explanations("no_delimiter_detected"))
-                                    logger("WARNING", f"File '{dataset_path}' appears to not contain a delimiter, likely not a structured/tabular file", indent=3)
-                                    continue
-
-                        resource["size"] = humanize.naturalsize(os.path.getsize(dataset_path))
-
-                        package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
-                        logger("OK", f"Resource '{dataset_path}' saved successfully from package '{meta_path}'", indent=3)
-                        
-                        del dataset_file_name, resource, dataset_path
-                        gc.collect()
-            else:
-                logger("WARNING", f"No distributions found in package metadata '{meta_path}'", indent=2)
-                package["crawlerInfo"]["packageInfo"].update(utils.add_tag_explanations("no_resources"))
-                package["crawlerInfo"]["packageStatus"]["packageCompleted"] = datetime.now().isoformat()
 
             if "crawlerInfo" in package:
                 package["crawlerInfo"] = package.pop("crawlerInfo")
@@ -364,7 +283,9 @@ class OpenDataCrawler():
                 if not should_process:
                     logger("WARNING", f"Package '{pkg_id}' does not match specified categories: {', '.join(categories)}", indent=2)
                 elif not package.get("resources"):
-                    logger("WARNING", f"Package '{pkg_id}' ('{metadata_path}') has no resources", indent=2)
+                    logger("WARNING", f"No distributions found in package metadata '{pkg_id}' ('{metadata_path}')", indent=2)
+                    package["crawlerInfo"]["packageInfo"].update(utils.add_tag_explanations("no_resources"))
+                    package["crawlerInfo"]["packageStatus"]["packageCompleted"] = datetime.now().isoformat()
                     self.save_metadata(package)
 
             del package, metadata_path
@@ -400,22 +321,26 @@ class OpenDataCrawler():
                     package["resources"][new_file_name] = new_resource
                     package["crawlerInfo"]["resourcesInfo"][new_file_name] = new_info
 
+                    del new_resource, new_info, new_file_name
+                del old_file_name, resource_meta, info, tag_info, tag_values
+                gc.collect()
+
         return package
 
     def process_resource(self, resource, package, metadata_path, d_types, partial, avoid_data):
         resource_file_name = resource.get("fileName")
         if avoid_data:
-            logger("SKIP", f"Skipping resource '{resource_file_name}' of package '{metadata_path}'...", indent=4)
+            logger("SKIP", f"Skipping resource '{resource_file_name}' of package '{metadata_path}'...", indent=3)
             return package
 
         download_url = resource.get("downloadURL")
         if not download_url:
-            logger("ERROR", f"Missing download URL for resource '{resource_file_name}' in package '{metadata_path}'", indent=4)
+            logger("ERROR", f"Missing download URL for resource '{resource_file_name}' in package '{metadata_path}'", indent=3)
             return package
 
         media_type = resource.get("mediaType")
         if not media_type:
-            logger("WARNING", f"Missing media type for resource '{resource_file_name}' in package '{metadata_path}'...", indent=4)
+            logger("WARNING", f"Missing media type for resource '{resource_file_name}' in package '{metadata_path}'...", indent=3)
             return package
 
         ext = resource_file_name.split(".")[-1].lower() if "." in resource_file_name else None
@@ -428,6 +353,10 @@ class OpenDataCrawler():
                     package["crawlerInfo"]["resourcesInfo"][resource_file_name]["fileStatus"]["fileDownloaded"] = datetime.now().isoformat()
                     logger("SAVE", f"Resource '{resource_file_name}' from package '{metadata_path}' downloaded successfully", indent=3)
 
+                    process_success = self.process_dataset_file(package, resource_file_name, path, resource)
+                    if process_success:
+                        logger("OK", f"Resource '{path}' saved successfully processed from package '{metadata_path}'", indent=3)
+
                 if tag:
                     package["crawlerInfo"]["resourcesInfo"][resource_file_name]["fileInfo"].update(utils.add_tag_explanations(tag))
                     package["crawlerInfo"]["resourcesInfo"][resource_file_name]["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
@@ -435,6 +364,105 @@ class OpenDataCrawler():
             del resource_file_name, download_url, media_type, ext, path, tag
             gc.collect()
         return package
+
+    def process_dataset_file(self, package, dataset_file_name, dataset_path, resource):
+        if not os.path.exists(dataset_path):
+            logger("ERROR", f"Dataset file '{dataset_path}' does not exist", indent=4)
+            return False
+
+        try:
+            if utils.MIME_TYPE_MAP.get(resource.get("mediaType"), {}).get("compressible", False):
+                temp_path, tag = utils.check_file_empty_or_strip(dataset_path)
+
+                if temp_path:
+                    shutil.move(temp_path, dataset_path)
+                    logger("FIX", f"File '{dataset_path}' content stripped and overwritten", indent=4)
+                    package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations("stripped_data"))
+
+                if tag:
+                    logger("WARNING", f"File '{dataset_path}' has no data or no valid content", indent=4)
+                    package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["fileInfo"].update(utils.add_tag_explanations(tag))
+                    return False
+            
+                del temp_path, tag
+                gc.collect()
+        except Exception as e:
+            logger("ERROR", f"File '{dataset_path}'", [e, traceback.format_exc()], indent=4)
+            return False
+
+        try:
+            encoding, temp_path, raw_flags = utils.detect_best_encoding(dataset_path)
+            if encoding:
+                resource["encoding"] = encoding
+            else:
+                logger("ERROR", f"No matching encoding found for: {dataset_path}", indent=4)
+
+            if temp_path:
+                shutil.move(temp_path, dataset_path)
+                logger("FIX", f"Overwrote cleaned content into '{dataset_path}'", indent=4)
+
+            if raw_flags:
+                package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations(raw_flags, raw_flags))
+
+            del encoding, temp_path, raw_flags
+            gc.collect()
+        except Exception as e:
+            logger("ERROR", f"Error while detecting encoding for: {dataset_path}", [e, traceback.format_exc()], indent=4)
+            return False
+        
+        if os.path.getsize(dataset_path) > 0 and dataset_path.endswith((".csv", ".tsv")):
+            try:
+                temp_path, tag = utils.process_fix_tabular(dataset_path, resource["encoding"])
+
+                if temp_path:
+                    shutil.move(temp_path, dataset_path)
+                    logger("FIX", f"Cleaned and saved fixed tabular file to '{dataset_path}'", indent=4)
+
+                if tag:
+                    for tag_key, tag_data in tag:
+                        package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations(tag_key, tag_data))
+                
+                del temp_path, tag
+                gc.collect()
+            except Exception as e:
+                logger("ERROR", f"Failed to clean tabular file '{dataset_path}'", [e, traceback.format_exc()], indent=4)
+                return False
+
+        try:
+            delimiter, start_row = utils.detect_delimiter(dataset_path, resource["encoding"])
+            if delimiter:
+                resource["delimiter"] = delimiter
+
+                if start_row:
+                    package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["fileInfo"].update(utils.add_tag_explanations("skip_rows", {"<skipped_rows>": start_row}))
+                    dialect = Dialect.from_descriptor({"delimiter": delimiter, "comment_rows": [start_row]})
+                else:
+                    dialect = Dialect.from_descriptor({"delimiter": delimiter})
+
+                try:
+                    resource_metadata = describe(dataset_path, encoding=resource["encoding"], dialect=dialect).to_dict()
+                    resource["schema"] = resource_metadata.get("schema")
+                    logger("OK", f"Schema extracted from '{dataset_path}' (encoding: '{resource['encoding']}', delimiter: '{delimiter}', start_row: {start_row})", indent=4)
+                except Exception as e:
+                    logger("ERROR", f"Failed to extract schema from file '{dataset_path}'", [e, traceback.format_exc()], indent=4)
+                    return False
+
+                del delimiter, start_row, resource_metadata, dialect
+                gc.collect()
+            else:
+                package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["fileInfo"].update(utils.add_tag_explanations("no_delimiter_detected"))
+                logger("WARNING", f"File '{dataset_path}' appears to not contain a delimiter, likely not a structured/tabular file", indent=4)
+                return False
+        except Exception as e:
+            logger("ERROR", f"Failed to detect delimiter for file '{dataset_path}'", [e, traceback.format_exc()], indent=4)
+            return False
+
+        resource["size"] = humanize.naturalsize(os.path.getsize(dataset_path))
+        package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
+
+        del dataset_file_name, dataset_path, resource
+        gc.collect()
+        return True
 
     def get_package_list(self):
         packages = self.dms_instance.get_package_list()
