@@ -101,23 +101,40 @@ def get_user_agent_list(current_agent):
 
 def make_request(url, current_agent, headers=None, params=None, max_sec=None, return_tag=False):
     headers = headers.copy() if headers else {}
+
     if not is_url(url):
         url = f"https://{url}"
 
     for user_agent in get_user_agent_list(current_agent):
         headers["User-Agent"] = user_agent
+        try:
+            response = requests.get(url, headers=headers, params=params, verify=False, timeout=max_sec)
 
-        response = requests.get(url, headers=headers, params=params, verify=False, timeout=max_sec)
-        if response.status_code == 403:
-            logger("NET", f"Forbidden with User-Agent '{user_agent}' (HTTP 403 - Forbidden), trying next one...")
-            continue
+            if response.status_code == 403:
+                logger("NET", f"Forbidden with User-Agent '{user_agent}' (HTTP 403 - Forbidden), trying next one...")
+                continue
 
-        if return_tag:
-            
+            if return_tag:
+                try:
+                    response.raise_for_status()
+                except requests.exceptions.SSLError as e:
+                    return None, user_agent, "ssl_error", e
+                except requests.exceptions.RequestException as e:
+                    status_code = getattr(e.response, "status_code", None)
+                    tag = get_https_error_tag(status_code) if status_code else "resource_temporarily_unavailable"
+                    return None, user_agent, tag, e
 
-        return response, user_agent
+                return response, user_agent, None, None
 
-    return None, None
+            return response, user_agent
+
+        except requests.exceptions.RequestException as e:
+            if "Name or service not known" in str(e):
+                return None, user_agent, "unresolvable_domain", e
+
+            return (None, None, "resource_temporarily_unavailable", e) if return_tag else (None, None)
+
+    return (None, None, "resource_temporarily_unavailable", None) if return_tag else (None, None)
 
 def clean_url(u):
     u = url_normalize(u)
@@ -137,6 +154,7 @@ def get_https_error_tag(status_code):
     elif status_code == 405:
         return "method_not_allowed"
     return None
+
 # ==============================
 # Resume / recovery functions
 # ==============================
@@ -161,7 +179,8 @@ def recover_resume(save_path, accepted_types=None):
             failed = []
             success = []
             for file_name, _ in meta.get("resources", {}).items():
-                if accepted_types and file_name.split(".")[-1].lower() not in accepted_types:
+                ext = file_name.split(".")[-1].lower() if "." in file_name else None
+                if accepted_types and (ext not in accepted_types and ext):
                     continue
 
                 if is_completed(meta, file_name):
@@ -183,17 +202,19 @@ def recover_resume(save_path, accepted_types=None):
 
     return packages_status, total_successful, total_failed, failed_packages
 
-def is_completed(package, file_name):
+def is_completed(package, file_name, complete=True, unavailable=False):
     if file_name:
         try:
-            info = package["crawlerInfo"]["resourcesInfo"][file_name]
+            info = package["crawlerInfo"]["resourcesInfo"].get(file_name, {})
             file_status = info.get("fileStatus", {})
             file_info = info.get("fileInfo", {})
 
-            if "resource_temporarily_unavailable" in file_info:
+            if complete and file_status.get("fileCompleted"):
+                return True
+            if unavailable and "resource_temporarily_unavailable" in file_info:
                 return True
 
-            return bool(file_status.get("fileCompleted", False))
+            return False
         except Exception as e:
             logger("WARNING", f"Missing or invalid status for '{file_name}': {e}")
             return False

@@ -44,7 +44,6 @@ class CkanCrawler():
 
         if reparse_data:
             resource = resource_meta
-            resource["downloadURL"] = reparse_data.get("downloadURL")
             meta_media_type = reparse_data.get("metaMediaType")
         else:
             resource = {}
@@ -59,37 +58,29 @@ class CkanCrawler():
 
             meta_media_type = resource_meta.get("mimetype") or resource_meta.get("format") or ""
 
-        try:
-            response, self.user_agent = utils.make_request(resource["downloadURL"], self.user_agent)
-            response.raise_for_status()
-
-            media_type, file_name, tag_val = utils.resolve_mediatype_conflict(meta_media_type, response, base_name)
-
-            resource["mediaType"] = media_type
-            resource["fileName"] = file_name
-
-            if tag_val:
-                logger("WARNING", f"Detected a media type mismatch for file {resource['downloadURL']} '{base_name}'", indent=3)
-                resource_crawler_info["fileMetadataChanges"].update(utils.add_tag_explanations("mimetype_mismatch", tag_val))
-
-        except requests.exceptions.SSLError as e:
-            logger("ERROR", f"SSL error downloading '{base_name}' ({resource["downloadURL"]})", e, indent=3)
-            resource_crawler_info["fileInfo"].update(utils.add_tag_explanations("ssl_error"))
-            resource_crawler_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
-        
-        except requests.exceptions.RequestException as e:
-            status_code = getattr(e.response, "status_code", None)
-            tag_data = {"<downloadURL>": resource["downloadURL"], "<metaMediaType>": meta_media_type}
-            if status_code:
-                tag = utils.get_https_error_tag(status_code)
-                if tag:
-                    resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(tag))
-                    resource_crawler_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
-                else:
-                    resource_crawler_info["fileInfo"].update(utils.add_tag_explanations("resource_temporarily_unavailable", tag_data))
+        response, self.user_agent, error_tag, e = utils.make_request(resource["downloadURL"], self.user_agent, return_tag=True)
+        if error_tag:
+            if error_tag == "ssl_error":
+                logger("ERROR", f"SSL error downloading '{base_name}' ({resource["downloadURL"]})", e, indent=3)
+                resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag))
+                resource_crawler_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
             else:
-                resource_crawler_info["fileInfo"].update(utils.add_tag_explanations("resource_temporarily_unavailable", tag_data))
-            logger("ERROR", f"Error downloading '{base_name}' ({resource["downloadURL"]})", e, indent=2)
+                logger("ERROR", f"Error downloading '{base_name}' ({resource["downloadURL"]})", e, indent=2)
+                if error_tag == "resource_temporarily_unavailable":
+                    resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag, {"<metaMediaType>": meta_media_type}))
+                else:
+                    resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag))
+                    resource_crawler_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
+
+            return resource, resource_crawler_info
+
+        media_type, file_name, tag_val = utils.resolve_mediatype_conflict(meta_media_type, response, base_name)
+        resource["mediaType"] = media_type
+        resource["fileName"] = file_name
+
+        if tag_val:
+            logger("WARNING", f"Detected a media type mismatch for file {resource['downloadURL']} '{base_name}'", indent=3)
+            resource_crawler_info["fileMetadataChanges"].update(utils.add_tag_explanations("mimetype_mismatch", tag_val))
 
         return resource, resource_crawler_info
 
@@ -101,26 +92,18 @@ class CkanCrawler():
         }
 
         metadata = utils.init_metadata()
-        try:
-            response, self.user_agent = utils.make_request(url, self.user_agent, headers=headers)
-            if not response:
-                logger("ERROR", f"No working User-Agent for URL '{url}'")
-                return None
+        response, self.user_agent, error_tag, e = utils.make_request(url, self.user_agent, headers=headers, return_tag=True)
+        if error_tag:
+            logger("ERROR", f"Error downloading '{metadata_file_name}' ({url})", e, indent=2)
+            if error_tag:
+                metadata["crawlerInfo"]["packageInfo"].update(utils.add_tag_explanations(error_tag))
+                metadata["crawlerInfo"]["packageStatus"]["packageCompleted"] = datetime.now().isoformat()
 
-            response.raise_for_status()
+            return metadata
 
-        except requests.exceptions.RequestException as e:
-                status_code = getattr(e.response, "status_code", None)
-                tag = None
-                if status_code:
-                    tag = utils.get_https_error_tag(status_code)
-
-                logger("ERROR", f"Error downloading '{metadata_file_name}' ({url})", e, indent=2)
-                if tag:
-                    metadata["crawlerInfo"]["packageInfo"].update(utils.add_tag_explanations(tag))
-                    metadata["crawlerInfo"]["packageStatus"]["packageCompleted"] = datetime.now().isoformat()
-
-                return metadata
+        if not response:
+            logger("ERROR", f"No working User-Agent for URL '{url}'")
+            return None
 
         data = response.json()["result"]
 
@@ -152,9 +135,30 @@ class CkanCrawler():
 
         metadata["language"] = data.get("language", [])
 
-        metadata["keyword"] = data.get("keywords", {}) or data.get("original_tags", []) or data.get("tags", [])
+        metadata["keyword"] = data.get("keywords", [])
+        if not metadata["keyword"]:
+            keywords = data.get("original_tags") or data.get("tags") or []
+            if isinstance(keywords, list):
+                for keyword in keywords:
+                    if isinstance(keyword, dict):
+                        state = keyword.get("state")
+                        if not state or state == "active":
+                            display_name = keyword.get("display_name") or keyword.get("name")
+                            if display_name:
+                                metadata["keyword"].append(display_name)
+                    else:
+                        metadata["keyword"].append(keyword)
 
-        #theme = data.get("theme")
+        metadata["theme"] = []
+        themes = data.get("theme") or data.get("groups")
+        if isinstance(themes, list):
+            for theme in themes:
+                if isinstance(theme, dict):
+                    display_name = theme.get("display_name") or theme.get("title")
+                    if display_name:
+                            metadata["theme"].append(display_name)
+                else:
+                    metadata["theme"].append(theme)
 
         metadata["accrualPeriodicity"] = data.get("accrualPeriodicity")
 
@@ -166,12 +170,16 @@ class CkanCrawler():
 
         metadata["source"] = self.domain
 
-        temporal = data.get("temporal", {}) or data.get("temporals", {})
-        if isinstance(temporal, dict):
-            metadata["temporal"] = {
-                "startDate": temporal.get("startDate") or temporal.get("start_date"),
-                "endDate": temporal.get("endDate") or temporal.get("end_date"),
-            }
+        temporals = data.get("temporal", {}) or data.get("temporals", {})
+        if not isinstance(temporals, list):
+            temporals = [temporals]
+        
+        for temporal in temporals:
+            if isinstance(temporal, dict):
+                metadata["temporal"] = {
+                    "startDate": temporal.get("startDate") or temporal.get("start_date"),
+                    "endDate": temporal.get("endDate") or temporal.get("end_date"),
+                }
 
         location = data.get("location", "")
         spatial = data.get("spatial", "")

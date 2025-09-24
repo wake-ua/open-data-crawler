@@ -331,7 +331,7 @@ class OpenDataCrawler():
             gc.collect()
         except Exception as e:
             logger("ERROR", f"Failed to save metadata file '{meta_path}'", [e, traceback.format_exc()], indent=2)
-    
+
     def process_package(self, pkg_id, categories, d_types, partial, avoid_data):
         metadata_file_name = f"meta_{utils.generate_short_filename(f'{self.domain}_{pkg_id}')}.json"
         try:
@@ -357,7 +357,7 @@ class OpenDataCrawler():
             if should_process and package.get("resources"):
                 logger("WORK", f"Processing package: '{metadata_path}'...", indent=2)
                 for file_name, resource in list(package["resources"].items()):
-                    if not utils.is_completed(package, file_name):
+                    if not utils.is_completed(package, file_name, unavailable=True):
                         package = self.process_resource(resource, package, metadata_path, d_types, partial, avoid_data)
                 self.save_metadata(package)
             else:
@@ -375,8 +375,8 @@ class OpenDataCrawler():
 
     def retry_temporarily_unavailable_resources(self, package):
         missing_resources = [
-            file_name for file_name, info in package.get("crawlerInfo", {}).get("resourcesInfo", {}).items()
-            if "resource_temporarily_unavailable" in info.get("fileInfo", {})
+            file_name for file_name, _ in package["crawlerInfo"]["resourcesInfo"].items()
+            if utils.is_completed(package, file_name, complete=False, unavailable=True)
         ]
 
         if missing_resources:
@@ -418,8 +418,8 @@ class OpenDataCrawler():
             logger("WARNING", f"Missing media type for resource '{resource_file_name}' in package '{metadata_path}'...", indent=4)
             return package
 
-        _, ext = os.path.splitext(resource_file_name)
-        if not d_types or ext.lstrip(".") in d_types or not ext:
+        ext = resource_file_name.split(".")[-1].lower() if "." in resource_file_name else None
+        if not d_types or ext in d_types or not ext:
             path, tag = self.save_dataset(download_url, resource_file_name, partial)
 
             if path or tag:
@@ -432,12 +432,8 @@ class OpenDataCrawler():
                     package["crawlerInfo"]["resourcesInfo"][resource_file_name]["fileInfo"].update(utils.add_tag_explanations(tag))
                     package["crawlerInfo"]["resourcesInfo"][resource_file_name]["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
 
-                file_info = package["crawlerInfo"]["resourcesInfo"][resource_file_name]["fileInfo"]
-                if "resource_temporarily_unavailable" in file_info:
-                    del file_info["resource_temporarily_unavailable"]
-
             del resource_file_name, download_url, media_type, ext, path, tag
-        gc.collect()
+            gc.collect()
         return package
 
     def get_package_list(self):
