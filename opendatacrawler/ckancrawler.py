@@ -89,7 +89,6 @@ class CkanCrawler():
                     resource_crawler_info["fileInfo"].update(utils.add_tag_explanations("resource_temporarily_unavailable", tag_data))
             else:
                 resource_crawler_info["fileInfo"].update(utils.add_tag_explanations("resource_temporarily_unavailable", tag_data))
-
             logger("ERROR", f"Error downloading '{base_name}' ({resource["downloadURL"]})", e, indent=2)
 
         return resource, resource_crawler_info
