@@ -6,10 +6,11 @@ from opendatacrawler.setup_logger import log_manager
 logger = log_manager.log
 
 class DatosGobEsCrawler():
-    def __init__(self, domain, data_types, user_agent):
+    def __init__(self, domain, data_types, user_agent, max_sec):
         self.domain = domain.rstrip("/")
         self.data_types = data_types
         self.user_agent = user_agent
+        self.max_sec = max_sec
 
     def get_package_list(self):
         ids = []
@@ -50,9 +51,7 @@ class DatosGobEsCrawler():
 
         resource["name"] = utils.extract_multilang_field(resource_meta.get("title", []), "_lang", "_value")
 
-        resource["downloadURL"] = resource_meta.get("accessURL") or resource_meta.get("downloadURL")
-        if not utils.is_url(resource["downloadURL"]):
-            resource["downloadURL"] = f"https://{resource['downloadURL']}"
+        resource["downloadURL"] = utils.fix_url(resource_meta.get("accessURL") or resource_meta.get("downloadURL"))
 
         meta_media_type = resource_meta.get("format", {}).get("value")
         response, self.user_agent = utils.make_request(resource["downloadURL"], self.user_agent)
@@ -67,32 +66,22 @@ class DatosGobEsCrawler():
         return resource, resource_crawler_info
 
     def get_package(self, dataset_id, metadata_file_name):
-        url = f"https://datos.gob.es/apidata/catalog/dataset/{dataset_id}"
+        url = utils.fix_url(f"{self.domain}/apidata/catalog/dataset/{dataset_id}")
         headers = {
             "Accept": "application/json",
             "Connection": "keep-alive"
         }
 
         metadata = utils.init_metadata()
-        try:
-            response, self.user_agent = utils.make_request(url, self.user_agent, headers=headers)
-            if not response:
-                logger("ERROR", f"No working User-Agent for URL '{url}'")
-                return None
+        response, self.user_agent, error_tag, e = utils.make_request(url, self.user_agent, headers=headers, return_tag=True)
+        if not response:
+            logger("ERROR", f"Error downloading '{metadata_file_name}'", e, indent=2)
 
-            response.raise_for_status()
-        except requests.exceptions.RequestException as e:
-                status_code = getattr(e.response, "status_code", None)
-                tag = None
-                if status_code:
-                    tag = utils.get_https_error_tag(status_code)
+            if error_tag:
+                metadata["crawlerInfo"]["packageInfo"].update(utils.add_tag_explanations(error_tag))
+                metadata["crawlerInfo"]["packageStatus"]["packageCompleted"] = datetime.now().isoformat()
 
-                logger("ERROR", f"Error downloading '{metadata_file_name}' ({url})", e, indent=2)
-                if tag:
-                    metadata["crawlerInfo"]["packageInfo"].update(utils.add_tag_explanations(tag))
-                    metadata["crawlerInfo"]["packageStatus"]["packageCompleted"] = datetime.now().isoformat()
-
-                return metadata
+            return metadata
 
         items = response.json()["result"].get("items", [])
         if not items:
@@ -102,7 +91,7 @@ class DatosGobEsCrawler():
         data = items[0]
 
         metadata["identifier"] = dataset_id
-        metadata["accessURL"] = f"https://datos.gob.es/es/catalogo/{dataset_id}"
+        metadata["accessURL"] = utils.fix_url(f"https://datos.gob.es/es/catalogo/{dataset_id}")
         metadata["requestURL"] = url
 
         metadata["fileName"] = metadata_file_name
@@ -136,8 +125,6 @@ class DatosGobEsCrawler():
 
         temporal = data.get("temporal", {})
         metadata["temporal"] = temporal
-        if temporal:
-            print(temporal)
 
         if isinstance(temporal, dict):
             metadata["temporal"] = {

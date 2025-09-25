@@ -7,10 +7,11 @@ from opendatacrawler.setup_logger import log_manager
 logger = log_manager.log
 
 class CkanCrawler():
-    def __init__(self, domain, data_types, user_agent):
+    def __init__(self, domain, data_types, user_agent, max_sec):
         self.domain = domain.rstrip("/")
         self.data_types = data_types
         self.user_agent = user_agent
+        self.max_sec = max_sec
 
     def get_package_list(self):
         ids = []
@@ -22,7 +23,7 @@ class CkanCrawler():
         }
 
         try:
-            response, self.user_agent = utils.make_request(url, self.user_agent, headers=headers)
+            response, self.user_agent = utils.make_request(url, self.user_agent, headers=headers, max_sec=self.max_sec)
             if not response:
                 logger("ERROR", f"Error fetching package list from '{self.domain}': no working User-Agent found")
                 return ids
@@ -39,39 +40,38 @@ class CkanCrawler():
 
         return ids
 
-    def parse_resource(self, resource_meta, base_name, reparse_data=None):
+    def parse_resource(self, resource_meta, base_name, metadata_file_name, reparse_data=None):
         resource_crawler_info = utils.init_metadata(resource=True)
 
         if reparse_data:
+            logger("...", f"Re-processing resource '{base_name}' from package '{metadata_file_name}'...", indent=4)
             resource = resource_meta
             meta_media_type = reparse_data.get("metaMediaType")
         else:
+            logger("...", f"Processing resource '{base_name}' from package '{metadata_file_name}'...", indent=4)
             resource = {}
             resource["fileName"] = base_name
 
             resource["name"] = resource_meta.get("name")
             resource["description"] = resource_meta.get("description")
 
-            resource["downloadURL"] = resource_meta.get("download_url") or resource_meta.get("url") or resource_meta.get("original_url")
-            if not utils.is_url(resource["downloadURL"]):
-                resource["downloadURL"] = f"https://{resource['downloadURL']}"
+            resource["downloadURL"] = utils.fix_url(resource_meta.get("download_url") or resource_meta.get("url") or resource_meta.get("original_url"))
 
             meta_media_type = resource_meta.get("mimetype") or resource_meta.get("format") or ""
 
-        response, self.user_agent, error_tag, e = utils.make_request(resource["downloadURL"], self.user_agent, return_tag=True)
-        if error_tag:
-            if error_tag == "ssl_error":
-                logger("WARNING", f"SSL error downloading '{base_name}' ({resource['downloadURL']})", e, indent=3)
-                resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag))
-                resource_crawler_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
-            elif error_tag == "resource_temporarily_unavailable":
-                logger("WARNING", f"Temporarily unavailable resource '{base_name}' ({resource['downloadURL']})", e, indent=2)
-                resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag, {"<metaMediaType>": meta_media_type}))
+        response, self.user_agent, error_tag, e = utils.make_request(resource["downloadURL"], self.user_agent, return_tag=True, max_sec=self.max_sec)
+        if not response:
+            if error_tag:
+                if error_tag != "resource_temporarily_unavailable":
+                    resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag))
+                    logger("WARNING", f"Non-retryable error accessing resource '{base_name}'", e, indent=4)
+                    resource_crawler_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
+                else:
+                    resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag, {"<metaMediaType>": meta_media_type}))
+                    logger("WARNING", f"Retryable error accessing resource '{base_name}'", e, indent=4)
             else:
-                logger("WARNING", f"Non-recoverable download error for '{base_name}' ({resource['downloadURL']})", e, indent=2)
-                resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag))
-                resource_crawler_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
-
+                logger("ERROR", f"Error accessing resource '{base_name}'", e, indent=4)
+            
             return resource, resource_crawler_info
 
         media_type, file_name, tag_val = utils.resolve_mediatype_conflict(meta_media_type, response, base_name)
@@ -79,13 +79,18 @@ class CkanCrawler():
         resource["fileName"] = file_name
 
         if tag_val:
-            logger("WARNING", f"Detected a media type mismatch for file {resource['downloadURL']} '{base_name}'", indent=3)
+            logger("WARNING", f"Detected a media type mismatch for file '{resource['downloadURL']}' '{base_name}'", indent=4)
             resource_crawler_info["fileMetadataChanges"].update(utils.add_tag_explanations("mimetype_mismatch", tag_val))
+
+        if reparse_data:
+            logger("OK", f"Successfully re-processed resource '{resource["fileName"]}' from package '{metadata_file_name}'", indent=4)
+        else:
+            logger("OK", f"Successfully processed resource '{resource["fileName"]}' from package '{metadata_file_name}'", indent=4)
 
         return resource, resource_crawler_info
 
-    def get_package(self, dataset_id, metadata_file_name):
-        url = f"{self.domain}/api/3/action/package_show?id={dataset_id}"
+    def get_package(self, package_id, metadata_file_name):
+        url = utils.fix_url(f"{self.domain}/api/3/action/package_show?id={package_id}")
         headers = {
             "Accept": "application/json",
             "Connection": "keep-alive"
@@ -93,23 +98,25 @@ class CkanCrawler():
 
         metadata = utils.init_metadata()
         response, self.user_agent, error_tag, e = utils.make_request(url, self.user_agent, headers=headers, return_tag=True)
-        if error_tag:
-            logger("ERROR", f"Error downloading '{metadata_file_name}' ({url})", e, indent=2)
-            if error_tag:
-                metadata["crawlerInfo"]["packageInfo"].update(utils.add_tag_explanations(error_tag))
-                metadata["crawlerInfo"]["packageStatus"]["packageCompleted"] = datetime.now().isoformat()
-
-            return metadata
-
         if not response:
-            logger("ERROR", f"No working User-Agent for URL '{url}'")
+            if error_tag:
+                if error_tag != "resource_temporarily_unavailable":
+                    logger("WARNING", f"Non-retryable error accessing package '{package_id}' ('{metadata_file_name}')", e, indent=2)
+                    metadata["crawlerInfo"]["packageInfo"].update(utils.add_tag_explanations(error_tag))
+                    metadata["crawlerInfo"]["packageStatus"]["packageCompleted"] = datetime.now().isoformat()
+                    return metadata
+                else:
+                    logger("WARNING", f"Retryable error accessing package '{package_id}' ('{metadata_file_name}')", e, indent=2)
+            else:
+                logger("ERROR", f"Error accessing package '{package_id}' ('{metadata_file_name}')", e, indent=2)
+
             return None
 
         data = response.json()["result"]
 
-        metadata["identifier"] = dataset_id
+        metadata["identifier"] = package_id
         metadata["requestURL"] = url
-        metadata["accessURL"] = f"{self.domain}/dataset/{data.get("name")}"
+        metadata["accessURL"] = utils.fix_url(f"{self.domain}/dataset/{data.get("name")}")
 
         metadata["fileName"] = metadata_file_name
 
@@ -192,11 +199,13 @@ class CkanCrawler():
             if geo:
                 metadata["geo"] = geo
 
-        metadata["resources"] = {}
-        for idx, resource in enumerate(distributions):
-            resource_meta, resource_crawler_info = self.parse_resource(resource, utils.generate_short_filename(f"{metadata['fileName']}_{idx}"))
+        if distributions:
+            logger("...", f"Processing {len(distributions)} resources from package '{package_id}' ('{metadata_file_name}')...", indent=3)
+            metadata["resources"] = {}
+            for idx, resource in enumerate(distributions):
+                resource_meta, resource_crawler_info = self.parse_resource(resource, utils.generate_short_filename(f"{metadata['fileName']}_{idx}"), metadata_file_name)
 
-            metadata["resources"][resource_meta["fileName"]] = resource_meta
-            metadata["crawlerInfo"]["resourcesInfo"][resource_meta["fileName"]] = resource_crawler_info
+                metadata["resources"][resource_meta["fileName"]] = resource_meta
+                metadata["crawlerInfo"]["resourcesInfo"][resource_meta["fileName"]] = resource_crawler_info
 
         return metadata

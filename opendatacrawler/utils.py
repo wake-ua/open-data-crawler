@@ -23,7 +23,7 @@ logger = log_manager.log
 
 ENCODING_CANDIDATES = ["utf-8", "iso-8859-1", "windows-1252", "windows-1250", "cp850"]
 
-NOT_ALLOWED_DELIMITERS = [":", " ",'"', "'", "_", "(", ")", "<", ">", "[", "]", "{", "}", "-", ".", "+", "*", "=", "/", "\\", "�"]
+NOT_ALLOWED_DELIMITERS = [":", " ",'"', "'", "_", "(", ")", "<", ">", "[", "]", "{", "}", "-", ".", "+", "*", "=", "/", "\\", "�", "@"]
 
 RAW_SIGNATURES = [
     (b"\x37\x7A\xBC\xAF\x27\x1C", "application/x-7z-compressed"),
@@ -96,52 +96,52 @@ def is_geojson(field):
 # Request functions
 # ==============================
 
+def fix_url(url):
+    url = url.strip().replace(" ", "%20")
+    if not is_url(url):
+        url = f"https://{url}"
+    return url
+
 def get_user_agent_list(current_agent):
     return [current_agent] + [ua for ua in USER_AGENTS if ua != current_agent] if current_agent else USER_AGENTS
 
 def make_request(url, current_agent, headers=None, params=None, max_sec=None, return_tag=False):
     headers = headers.copy() if headers else {}
 
-    if not is_url(url):
-        url = f"https://{url}"
-
+    all_forbidden = True
     for user_agent in get_user_agent_list(current_agent):
         headers["User-Agent"] = user_agent
         try:
             response = requests.get(url, headers=headers, params=params, verify=False, timeout=max_sec)
-
             if response.status_code == 403:
-                logger("NET", f"Forbidden with User-Agent '{user_agent}' (HTTP 403 - Forbidden), trying next one...")
+                # logger("NET", f"Forbidden with User-Agent '{user_agent}' (HTTP 403 - Forbidden), trying next one...")
                 continue
 
+            all_forbidden = False
             if return_tag:
                 try:
                     response.raise_for_status()
-                except requests.exceptions.SSLError as e:
-                    return None, user_agent, "ssl_error", e
+                except requests.exceptions.SSLError:
+                    return None, user_agent, "ssl_error", f"{CRAWLER_CHANGES_INFO.get("ssl_error").get("tag_explanation").get("reason")} ({url})"
                 except requests.exceptions.RequestException as e:
-                    if "Name or service not known" in str(e):
-                        return None, user_agent, "unresolvable_domain", e
-                    elif "Read timed out" in str(e):
-                        return None, user_agent, "resource_temporarily_unavailable", e
-
-                    status_code = getattr(e.response, "status_code", None)
-                    tag = get_https_error_tag(status_code) if status_code else "resource_temporarily_unavailable"
-                    return None, user_agent, tag, e
+                    tag = get_error_tag_from_exception(e)
+                    return None, user_agent, tag, f"{CRAWLER_CHANGES_INFO.get(tag).get("tag_explanation").get("reason")} ({url})"
 
                 return response, user_agent, None, None
 
             return response, user_agent
 
         except requests.exceptions.RequestException as e:
-            if "Name or service not known" in str(e):
-                return None, user_agent, "unresolvable_domain", e
-            elif "Read timed out" in str(e):
-                return None, user_agent, "resource_temporarily_unavailable", e
+            tag = get_error_tag_from_exception(e)
+            return (None, None, tag, f"{CRAWLER_CHANGES_INFO.get(tag).get("tag_explanation").get("reason")} ({url})") if return_tag else (None, None)
 
-            return (None, None, "resource_temporarily_unavailable", e) if return_tag else (None, None)
+    if return_tag:
+        if all_forbidden:
+            return None, None, "forbidden_resource", f"{CRAWLER_CHANGES_INFO.get("forbidden_resource").get("tag_explanation").get("reason")} ({url})"
 
-    return (None, None, "resource_temporarily_unavailable", None) if return_tag else (None, None)
+        return None, None, None, None
+    else:
+        return None, None
 
 def clean_url(u):
     u = url_normalize(u)
@@ -153,13 +153,30 @@ def clean_url(u):
 
     return u.split("/")[0]
 
+def get_error_tag_from_exception(e):
+    error_str = str(e).lower()
+
+    if "name or service not known" in error_str or "failed to resolve" in error_str:
+        return "unresolvable_domain"
+    elif any(error_text in error_str for error_text in ["read timed out", "timeout", "connection broken: incompleteread"]):
+        return "resource_temporarily_unavailable"
+
+    tag = get_https_error_tag(getattr(getattr(e, "response", None), "status_code", None))
+    if tag:
+        return tag
+
+    raise ValueError(f"Unhandled exception type: {e}")
+
 def get_https_error_tag(status_code):
-    if status_code == 400:
-        return "invalid_request"
-    elif status_code == 404:
-        return "missing_resource"
-    elif status_code == 405:
-        return "method_not_allowed"
+    if status_code:
+        if status_code == 400:
+            return "invalid_request"
+        elif status_code == 404:
+            return "missing_resource"
+        elif status_code == 405:
+            return "method_not_allowed"
+        elif status_code == 500:
+            return "resource_temporarily_unavailable"
     return None
 
 # ==============================

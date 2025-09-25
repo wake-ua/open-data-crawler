@@ -6,10 +6,11 @@ from opendatacrawler.setup_logger import log_manager
 logger = log_manager.log
 
 class ZenodoCrawler():
-    def __init__(self, domain, data_types, user_agent):
+    def __init__(self, domain, data_types, user_agent, max_sec):
         self.domain = domain.rstrip("/")
         self.data_types = data_types
         self.user_agent = user_agent
+        self.max_sec = max_sec
 
         self.token = utils.AUTH_TOKENS.get("zenodo", None)
 

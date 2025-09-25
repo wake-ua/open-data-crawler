@@ -52,13 +52,12 @@ class OpenDataCrawler():
         }
 
         base_url = self.domain.rstrip("/")
-
         headers = {
             "Accept": "application/json",
         }
 
         for dms_name, endpoint in dms_endpoints.items():
-            full_url = base_url + endpoint
+            full_url = utils.fix_url(base_url + endpoint)
             logger("...", f"Checking DMS '{dms_name}' at '{full_url}'...", level="print")
 
             try:
@@ -80,8 +79,8 @@ class OpenDataCrawler():
                         logger("ERROR", f"Can't create folder '{self.save_path}'")
                     break
                 
-            except requests.RequestException:
-                logger("NET", f"Failed to reach '{full_url}'", f"\n{traceback.format_exc()}")
+            except requests.RequestException as e:
+                logger("NET", f"Failed to reach '{full_url}'", [e, traceback.format_exc()])
                 continue
 
         dms_classes = {
@@ -105,9 +104,9 @@ class OpenDataCrawler():
                     elif self.dms in ["OpenDataSoft", "INE"]:
                         self.dms_instance = cls(self.domain, self.save_path, self.user_agent)
                     elif self.dms in ["Socrata", "WorldBank", "dataEuropa", "datosGobEs", "Zenodo"]:
-                        self.dms_instance = cls(self.domain, self.data_types, self.user_agent)
+                        self.dms_instance = cls(self.domain, self.data_types, self.user_agent, self.max_sec)
                     else:
-                        self.dms_instance = cls(self.domain, self.data_types, self.user_agent)
+                        self.dms_instance = cls(self.domain, self.data_types, self.user_agent, self.max_sec)
                 except Exception:
                     logger("ERROR", f"Error instantiating DMS class for '{self.dms}'", f"\n{traceback.format_exc()}")
         else:
@@ -148,65 +147,45 @@ class OpenDataCrawler():
     def save_dataset(self, url, file_name, partial=False):
         logger("...", f"Attempting to download resource '{file_name}' from '{url}'...", indent=2)
 
-        all_forbidden = True
-        for user_agent in utils.get_user_agent_list(self.user_agent):
-            self.user_agent = user_agent
-            headers = {
-                "Accept": "*/*",
-                "User-Agent": self.user_agent,
-                "Connection": "keep-alive"
-            }
+        headers = {
+            "Accept": "*/*", 
+            "Connection": "keep-alive"
+        }
 
-            try:
-                with requests.get(url, stream=True, timeout=self.max_sec, verify=False, headers=headers) as response:
-                    if response.status_code == 403:
-                        logger("NET", f"Forbidden access to url '{url}' with User-Agent '{self.user_agent}' (HTTP 403 - Forbidden), trying next one...", indent=2)
+        response, self.user_agent, error_tag, e = utils.make_request(url, self.user_agent, headers=headers, max_sec=self.max_sec, return_tag=True)
+        if error_tag:
+            logger("ERROR", f"Error downloading resource '{file_name}'", e, indent=3)
+            return None, error_tag
+
+        try:
+            path = os.path.join(self.save_path, file_name)
+            total_bytes = 0
+            line_limit = 50
+            lines_downloaded = 0
+
+            with open(path, "wb") as outfile:
+                for chunk in response.iter_content(chunk_size=1024):
+                    if not chunk:
                         continue
 
-                    all_forbidden = False
-                    response.raise_for_status()
+                    outfile.write(chunk)
+                    total_bytes += len(chunk)
 
-                    path = os.path.join(self.save_path, file_name)
-                    total_bytes = 0
-                    line_limit = 50
-                    lines_downloaded = 0
+                    if partial:
+                        lines_downloaded += chunk.count(b"\n")
+                        if lines_downloaded >= line_limit:
+                            logger("WARNING", f"Partial content downloaded (~{line_limit} lines) for '{file_name}'", indent=2)
+                            break
 
-                    with open(path, "wb") as outfile:
-                        for chunk in response.iter_content(chunk_size=1024):
-                            if not chunk:
-                                continue
+            if not partial and total_bytes == 0:
+                logger("WARNING", f"No data downloaded for resource '{file_name}'", indent=2)
+                return None, "no_data"
 
-                            outfile.write(chunk)
-                            total_bytes += len(chunk)
+            return path, None
 
-                            if partial:
-                                lines_downloaded += chunk.count(b"\n")
-                                if lines_downloaded >= line_limit:
-                                    logger("WARNING", f"Partial content downloaded (~{line_limit} lines) for '{file_name}'", indent=2)
-                                    break
-
-                    if not partial and total_bytes == 0:
-                        logger("WARNING", f"No data downloaded for resource '{file_name}'", indent=2)
-                        return None, "no_data"
-
-                    return path, None
-            except requests.exceptions.SSLError as e:
-                logger("ERROR", f"SSL error downloading '{file_name}' ({url})", e, indent=3)
-                return None, "ssl_error"
-            except requests.exceptions.RequestException as e:
-                status_code = getattr(e.response, "status_code", None)
-                tag = None
-                if status_code:
-                    tag = utils.get_https_error_tag(status_code)
-                
-                logger("ERROR", f"Error downloading '{file_name}' ({url})", e, indent=2)
-                return None, tag
-
-        if all_forbidden:
-            logger("ERROR", f"Error downloading '{file_name}' ({url}): resource is not publicly accessible (HTTP 403)", indent=2)
-            return None, "forbidden_resource"
-
-        return None, None
+        except Exception as e:
+            logger("ERROR", f"Unexpected error saving dataset '{file_name}'", [e, traceback.format_exc()], indent=2)
+            return None, None
 
     def save_metadata(self, package):
         try:
@@ -255,7 +234,7 @@ class OpenDataCrawler():
         metadata_file_name = f"meta_{utils.generate_short_filename(f'{self.domain}_{pkg_id}')}.json"
         try:
             metadata_path = os.path.join(self.save_path, metadata_file_name)
-
+            logger("WORK", f"Processing processing package '{pkg_id}' ('{metadata_file_name}')...", indent=2)
             if not os.path.exists(metadata_path):
                 package = self.get_package(pkg_id, metadata_file_name)
             else:
@@ -274,7 +253,7 @@ class OpenDataCrawler():
                 should_process = mapped_theme and any(cat in mapped_theme for cat in categories)
 
             if should_process and package.get("resources"):
-                logger("WORK", f"Processing package: '{metadata_path}'...", indent=2)
+                logger("WORK", f"Processing resources from package '{pkg_id}' ('{metadata_file_name}')...", indent=2)
                 for file_name, resource in list(package["resources"].items()):
                     if not utils.is_completed(package, file_name, unavailable=True):
                         package = self.process_resource(resource, package, metadata_path, d_types, partial, avoid_data)
@@ -292,7 +271,7 @@ class OpenDataCrawler():
             gc.collect()
 
         except Exception as e:
-            logger("ERROR", f"Error processing package '{pkg_id}'", [e, traceback.format_exc()], indent=2)
+            logger("ERROR", f"Error processing package '{pkg_id}' ('{metadata_file_name}')", [e, traceback.format_exc()], indent=2)
 
     def retry_temporarily_unavailable_resources(self, package):
         missing_resources = [
@@ -310,7 +289,7 @@ class OpenDataCrawler():
                 tag_values = tag_info.get("values", {})
 
                 if resource_meta and tag_values:
-                    new_resource, new_info = self.parse_resource(resource_meta, old_file_name, reparse_data=tag_values)
+                    new_resource, new_info = self.parse_resource(resource_meta, old_file_name, package["fileName"], reparse_data=tag_values)
                     new_file_name = new_resource["fileName"]
 
                     if new_file_name != old_file_name:
@@ -329,13 +308,10 @@ class OpenDataCrawler():
 
     def process_resource(self, resource, package, metadata_path, d_types, partial, avoid_data):
         resource_file_name = resource.get("fileName")
+        download_url = resource.get("downloadURL")
+
         if avoid_data:
             logger("SKIP", f"Skipping resource '{resource_file_name}' of package '{metadata_path}'...", indent=3)
-            return package
-
-        download_url = resource.get("downloadURL")
-        if not download_url:
-            logger("ERROR", f"Missing download URL for resource '{resource_file_name}' in package '{metadata_path}'", indent=3)
             return package
 
         media_type = resource.get("mediaType")
