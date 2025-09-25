@@ -98,33 +98,31 @@ def main():
             packages = id_dataset if id_dataset else crawler.get_package_list()
             logger(None, "=" * 80, level="print")
 
-            packages_to_process = list({
-                pkg for pkg in packages
-                if pkg not in resume_data or pkg in failed_before_pkgs
-            })
-
+            new_packages = [pkg for pkg in packages if pkg not in resume_data]
+            failed_packages = [pkg for pkg in packages if pkg in failed_before_pkgs]
             if max_packages:
-                packages_to_process = packages_to_process[:max_packages]
-                tqdm_total = len(packages_to_process)
-                tqdm_initial = 0
-            else:
-                tqdm_total = len(packages)
-                tqdm_initial = len(packages) - len(packages_to_process)
+                new_packages = new_packages[:max_packages]
 
+            packages_to_process = new_packages + failed_packages
             if packages_to_process:
-                logger("...", f"Processing {len(packages_to_process)} packages...", level="print")
+                if failed_packages:
+                    logger("...", f"Queued {len(packages_to_process)} packages ({len(new_packages)} new packages and {len(failed_packages)} previously failed packages) for processing...", level="print")
+                else:
+                    logger("...", f"Queued {len(packages_to_process)} packages for processing...", level="print")
 
                 with ThreadPoolExecutor(max_workers=max_threads, thread_name_prefix="t") as executor:
-                    futures = (executor.submit(crawler.process_package, pkg_id, categories, d_types, partial, avoid_data) for pkg_id in packages_to_process)
-                    for future in tqdm(as_completed(futures), total=tqdm_total, initial=tqdm_initial, desc="Processing...", colour="green"):
-                        try:
+                    try:
+                        futures = (executor.submit(crawler.process_package, pkg_id, categories, d_types, partial, avoid_data) for pkg_id in packages_to_process)
+                        for future in tqdm(as_completed(futures), total=len(packages_to_process), initial=len(packages) - len(packages_to_process), desc="Processing...", colour="green"):
                             future.result()
-                        except KeyboardInterrupt:
-                            logger("WARNING", "Interrupt received. Waiting for threads to finish gracefully... (this may take a while if many threads are active)", level="print")
-                            executor.shutdown(wait=False, cancel_futures=True)
-                        finally:
-                            del future
-                            gc.collect()
+                    except KeyboardInterrupt:
+                        logger(None, "=" * 80, level="print")
+                        logger("WARNING", "Interrupt received. Terminating all threads immediately", level="print")
+                        logger(None, "=" * 80, level="print")
+                        resume_data, downloaded_after_res, failed_after_res, _ = utils.recover_resume(save_path=crawler.save_path, accepted_types=d_types)
+                        logger("OK", f"{len(downloaded_after_res) - len(downloaded_before_res)} new resources downloaded in this run ({max(0, len(failed_after_res) - len(failed_before_res))} new failures, {len(set(failed_before_res) - set(failed_after_res))} recovered from previous failures): {len(downloaded_after_res)} successfully downloaded resources in total across {len(resume_data)} packages ({len(failed_after_res)} failed resources in total)", level="print")
+                        os._exit(1)
+
                 logger(None, "=" * 80, level="print")
                 resume_data, downloaded_after_res, failed_after_res, _ = utils.recover_resume(save_path=crawler.save_path, accepted_types=d_types)
                 logger("OK", f"{len(downloaded_after_res) - len(downloaded_before_res)} new resources downloaded in this run ({max(0, len(failed_after_res) - len(failed_before_res))} new failures, {len(set(failed_before_res) - set(failed_after_res))} recovered from previous failures): {len(downloaded_after_res)} successfully downloaded resources in total across {len(resume_data)} packages ({len(failed_after_res)} failed resources in total)", level="print")
