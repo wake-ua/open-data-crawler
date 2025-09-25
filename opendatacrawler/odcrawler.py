@@ -448,6 +448,6 @@ class OpenDataCrawler():
         package = self.dms_instance.get_package(pkg_id, metadata_file_name)
         return package
     
-    def parse_resource(self, resource_meta, base_name, reparse_data):
-        resource, resource_crawler_info = self.dms_instance.parse_resource(resource_meta, base_name, reparse_data)
+    def parse_resource(self, resource_meta, base_name, metadata_file_name, reparse_data):
+        resource, resource_crawler_info = self.dms_instance.parse_resource(resource_meta, base_name, metadata_file_name, reparse_data)
         return resource, resource_crawler_info
