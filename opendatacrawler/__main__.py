@@ -108,23 +108,13 @@ def main():
                 else:
                     logger("...", f"Queued {total_to_process} packages for processing...", level="print")
 
-                try:
-                    if new_packages:
-                        logger("...", f"Processing {len(new_packages)} new packages...", level="print")
-                        crawler.process_packages_batch(new_packages, categories, d_types, partial, avoid_data, max_threads, (len(packages) - len(new_packages) - len(failed_packages)), "Processing new packages...", "green")
+                if new_packages:
+                    logger("...", f"Processing {len(new_packages)} new packages...", level="print")
+                    crawler.process_packages_batch(new_packages, categories, d_types, partial, avoid_data, max_threads, (len(packages) - len(new_packages) - len(failed_packages)), "Processing new packages...", "green", downloaded_before_res, failed_before_res)
 
-                    if failed_packages:
-                        logger("...", f"Reprocessing {len(failed_packages)} previously failed packages...", level="print")
-                        crawler.process_packages_batch(failed_packages, categories, d_types, partial, avoid_data, max_threads, (len(packages) - len(failed_packages)), "Reprocessing failed packages...", "yellow")
-
-                except KeyboardInterrupt:
-                    logger(None, "=" * 80, level="print")
-                    logger("WARNING", "Interrupt received, terminating all threads immediately", level="print")
-                    logger(None, "=" * 80, level="print")
-
-                    resume_data, downloaded_after_res, failed_after_res, _ = utils.recover_resume(save_path=crawler.save_path, accepted_types=d_types)
-                    crawler.log_run_summary(downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, resume_data)
-                    os._exit(1)
+                if failed_packages:
+                    logger("...", f"Reprocessing {len(failed_packages)} previously failed packages...", level="print")
+                    crawler.process_packages_batch(failed_packages, categories, d_types, partial, avoid_data, max_threads, (len(packages) - len(failed_packages)), "Reprocessing failed packages...", "yellow", downloaded_before_res, failed_before_res)
 
                 resume_data, downloaded_after_res, failed_after_res, _ = utils.recover_resume(save_path=crawler.save_path, accepted_types=d_types)
                 crawler.log_run_summary(downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, resume_data)

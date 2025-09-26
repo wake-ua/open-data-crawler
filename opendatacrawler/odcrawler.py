@@ -148,11 +148,20 @@ class OpenDataCrawler():
                      f"{len(downloaded_after_res)} successfully downloaded resources in total across {len(resume_data)} packages "
                      f"({len(failed_after_res)} failed resources in total)", level="print")
 
-    def process_packages_batch(self, packages, categories, d_types, partial, avoid_data, max_threads, tqdm_initial, tqdm_desc, tqdm_colour):
+    def process_packages_batch(self, packages, categories, d_types, partial, avoid_data, max_threads, tqdm_initial, tqdm_desc, tqdm_colour, downloaded_before_res, failed_before_res):
         with ThreadPoolExecutor(max_workers=max_threads, thread_name_prefix="t") as executor:
-            futures = [executor.submit(self.process_package, pkg_id, categories, d_types, partial, avoid_data) for pkg_id in packages]
-            for future in tqdm(futures, total=len(futures) + tqdm_initial, initial=tqdm_initial, desc=tqdm_desc, colour=tqdm_colour):
-                future.result()
+            try:
+                futures = [executor.submit(self.process_package, pkg_id, categories, d_types, partial, avoid_data) for pkg_id in packages]
+                for future in tqdm(as_completed(futures), total=len(futures) + tqdm_initial, initial=tqdm_initial, desc=tqdm_desc, colour=tqdm_colour):
+                    future.result()
+            except KeyboardInterrupt:
+                logger(None, "=" * 80, level="print")
+                logger("WARNING", "Interrupt received, terminating all threads immediately", level="print")
+                logger(None, "=" * 80, level="print")
+
+                resume_data, downloaded_after_res, failed_after_res, _ = utils.recover_resume(save_path=self.save_path, accepted_types=d_types)
+                self.log_run_summary(downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, resume_data)
+                os._exit(1)
 
     # ==============================
 
@@ -166,7 +175,6 @@ class OpenDataCrawler():
 
         response, self.user_agent, error_tag, e = utils.make_request(url, self.user_agent, headers=headers, max_sec=self.max_sec, return_tag=True)
         if error_tag:
-            logger("ERROR", f"Error downloading resource '{file_name}'", e, indent=3)
             return None, error_tag, e
 
         try:
