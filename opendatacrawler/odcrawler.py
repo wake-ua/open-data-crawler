@@ -154,6 +154,7 @@ class OpenDataCrawler():
                 futures = [executor.submit(self.process_package, pkg_id, categories, d_types, partial, avoid_data) for pkg_id in packages]
                 for future in tqdm(as_completed(futures), total=len(futures) + tqdm_initial, initial=tqdm_initial, desc=tqdm_desc, colour=tqdm_colour):
                     future.result()
+
             except KeyboardInterrupt:
                 logger(None, "=" * 80, level="print")
                 logger("WARNING", "Interrupt received, terminating all threads immediately", level="print")
