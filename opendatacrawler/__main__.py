@@ -30,6 +30,8 @@ def main():
                         help="Maximum number of packages to process (default: all)")
     parser.add_argument("-mt", "--max_threads", type=int, required=False,
                         help="Maximum number of threads to use (default: based on CPU count, up to 32)")
+    parser.add_argument("-mrt", "--max_resource_threads", type=int, required=False,
+                        help="Maximum number of threads to use per package for processing resources (default: 4)")
     parser.add_argument("--reset-domain", required=False, action=argparse.BooleanOptionalAction,
                         help="Delete all data and logs for the specified domain before crawling")
 
@@ -45,13 +47,14 @@ def main():
     avoid_data = args["no_dataset"]
     max_packages = args.get("max_packages")
     max_threads = args["max_threads"] if args["max_threads"] else min(32, (os.cpu_count() or 1) * 5)
+    max_resource_threads = args["max_resource_threads"] if args.get("max_resource_threads") else 4
     reset_domain = args.get("reset_domain")
 
     utils.print_intro()
     crawler = None
     try:
         if utils.is_url(url):
-            crawler = OpenDataCrawler(url, path=d_path, data_types=d_types, sec=max_sec)
+            crawler = OpenDataCrawler(url, path=d_path, data_types=d_types, categories=categories, partial=partial, avoid_data=avoid_data, max_sec=max_sec, max_threads=max_threads, max_resource_threads=max_resource_threads)
 
             if not crawler.dms:
                 log_manager.move_to_domain("_unknownDomain", move_file=True)
@@ -110,11 +113,11 @@ def main():
 
                 if new_packages:
                     logger("...", f"Processing {len(new_packages)} new packages...", level="print")
-                    crawler.process_packages_batch(new_packages, categories, d_types, partial, avoid_data, max_threads, len(packages) - len(new_packages) - len(failed_packages), "Processing new packages...", "green", downloaded_before_res, failed_before_res)
+                    crawler.process_packages_batch(new_packages, len(packages) - len(new_packages) - len(failed_packages), "Processing new packages...", "green", downloaded_before_res, failed_before_res)
 
                 if failed_packages:
                     logger("...", f"Reprocessing {len(failed_packages)} previously failed packages...", level="print")
-                    crawler.process_packages_batch(failed_packages, categories, d_types, partial, avoid_data, max_threads, len(packages) - len(failed_packages), "Reprocessing failed packages...", "yellow", downloaded_before_res, failed_before_res)
+                    crawler.process_packages_batch(failed_packages, len(packages) - len(failed_packages), "Reprocessing failed packages...", "yellow", downloaded_before_res, failed_before_res)
                 
                 resume_data, downloaded_after_res, failed_after_res, _ = utils.recover_resume(save_path=crawler.save_path, accepted_types=d_types)
                 crawler.log_run_summary(downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, resume_data)

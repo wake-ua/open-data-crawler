@@ -7,9 +7,8 @@ from opendatacrawler.setup_logger import log_manager
 logger = log_manager.log
 
 class CkanCrawler():
-    def __init__(self, domain, data_types, user_agent, max_sec):
+    def __init__(self, domain, user_agent, max_sec):
         self.domain = domain.rstrip("/")
-        self.data_types = data_types
         self.user_agent = user_agent
         self.max_sec = max_sec
 
@@ -44,11 +43,11 @@ class CkanCrawler():
         resource_crawler_info = utils.init_metadata(resource=True)
 
         if reparse_data:
-            logger("...", f"Re-processing resource '{base_name}' from package '{metadata_file_name}'...", indent=4)
+            logger("...", f"Re-parsing resource '{base_name}' from package '{metadata_file_name}'...", indent=4)
             resource = resource_meta
             meta_media_type = reparse_data.get("metaMediaType")
         else:
-            logger("...", f"Processing resource '{base_name}' from package '{metadata_file_name}'...", indent=4)
+            logger("...", f"Parsing resource '{base_name}' from package '{metadata_file_name}'...", indent=4)
             resource = {}
             resource["fileName"] = base_name
 
@@ -64,11 +63,11 @@ class CkanCrawler():
             if error_tag:
                 if error_tag != "resource_temporarily_unavailable":
                     resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag))
-                    logger("WARNING", f"Non-retryable error accessing resource '{base_name}'", e, indent=4)
+                    logger("WARNING", f"Non-retryable error accessing resource '{base_name}' for parsing", e, indent=4)
                     resource_crawler_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
                 else:
                     resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag, {"<metaMediaType>": meta_media_type}))
-                    logger("WARNING", f"Retryable error accessing resource '{base_name}'", e, indent=4)
+                    logger("WARNING", f"Retryable error accessing resource '{base_name}' for parsing", e, indent=4)
             else:
                 logger("ERROR", f"Error accessing resource '{base_name}'", e, indent=4)
             
@@ -83,9 +82,9 @@ class CkanCrawler():
             resource_crawler_info["fileMetadataChanges"].update(utils.add_tag_explanations("mimetype_mismatch", tag_val))
 
         if reparse_data:
-            logger("OK", f"Successfully re-processed resource '{resource["fileName"]}' from package '{metadata_file_name}'", indent=4)
+            logger("OK", f"Successfully re-parsed resource '{resource["fileName"]}' from package '{metadata_file_name}'", indent=4)
         else:
-            logger("OK", f"Successfully processed resource '{resource["fileName"]}' from package '{metadata_file_name}'", indent=4)
+            logger("OK", f"Successfully parsed resource '{resource["fileName"]}' from package '{metadata_file_name}'", indent=4)
 
         return resource, resource_crawler_info
 
@@ -97,6 +96,12 @@ class CkanCrawler():
         }
 
         metadata = utils.init_metadata()
+        metadata["identifier"] = package_id
+        metadata["requestURL"] = url
+
+        metadata["fileName"] = metadata_file_name
+        metadata["img"] = "https://www.ckan.org/img/ckan-logo-256.png"
+
         response, self.user_agent, error_tag, e = utils.make_request(url, self.user_agent, headers=headers, return_tag=True)
         if not response:
             if error_tag:
@@ -109,18 +114,11 @@ class CkanCrawler():
                     logger("WARNING", f"Retryable error accessing package '{package_id}' ('{metadata_file_name}')", e, indent=2)
             else:
                 logger("ERROR", f"Error accessing package '{package_id}' ('{metadata_file_name}')", e, indent=2)
-
             return None
 
         data = response.json()["result"]
 
-        metadata["identifier"] = package_id
-        metadata["requestURL"] = url
         metadata["accessURL"] = utils.fix_url(f"{self.domain}/dataset/{data.get("name")}")
-
-        metadata["fileName"] = metadata_file_name
-
-        metadata["img"] = "https://www.ckan.org/img/ckan-logo-256.png"
 
         metadata["title"] = data.get("title", {})
         metadata["description"] = data.get("notes", {})
@@ -200,7 +198,7 @@ class CkanCrawler():
                 metadata["geo"] = geo
 
         if distributions:
-            logger("...", f"Processing {len(distributions)} resources from package '{package_id}' ('{metadata_file_name}')...", indent=3)
+            logger("...", f"Parsing {len(distributions)} resources from package '{package_id}' ('{metadata_file_name}')...", indent=3)
             metadata["resources"] = {}
             for idx, resource in enumerate(distributions):
                 resource_meta, resource_crawler_info = self.parse_resource(resource, utils.generate_short_filename(f"{metadata['fileName']}_{idx}"), metadata_file_name)

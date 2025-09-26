@@ -106,14 +106,14 @@ def fix_url(url):
 def get_user_agent_list(current_agent):
     return [current_agent] + [ua for ua in USER_AGENTS if ua != current_agent] if current_agent else USER_AGENTS
 
-def make_request(url, current_agent, headers=None, params=None, max_sec=None, return_tag=False):
+def make_request(url, current_agent, headers=None, params=None, max_sec=None, stream=False, return_tag=False):
     headers = headers.copy() if headers else {}
 
     all_forbidden = True
     for user_agent in get_user_agent_list(current_agent):
         headers["User-Agent"] = user_agent
         try:
-            response = requests.get(url, headers=headers, params=params, verify=False, timeout=max_sec)
+            response = requests.get(url, headers=headers, params=params, verify=False, timeout=max_sec, stream=stream)
             if response.status_code == 403:
                 # logger("NET", f"Forbidden with User-Agent '{user_agent}' (HTTP 403 - Forbidden), trying next one...")
                 continue
@@ -143,8 +143,7 @@ def make_request(url, current_agent, headers=None, params=None, max_sec=None, re
 
     if return_tag:
         if all_forbidden:
-            return None, None, "forbidden_resource", f"{CRAWLER_CHANGES_INFO.get(tag, {}).get("tag_explanation", {}).get("reason", "Unknown reason")} ({url})"
-
+            return None, None, "forbidden_resource", f"{CRAWLER_CHANGES_INFO.get("forbidden_resource", {}).get("tag_explanation", {}).get("reason", "Unknown reason")} ({url})"
         return None, None, None, None
     else:
         return None, None
@@ -170,6 +169,8 @@ def get_error_tag_from_exception(e):
     elif isinstance(e, requests.exceptions.SSLError):
         return "ssl_error"
     elif isinstance(e, ConnectionResetError):
+        return "resource_temporarily_unavailable"
+    elif isinstance(e, requests.exceptions.ChunkedEncodingError):
         return "resource_temporarily_unavailable"
 
     status_code = getattr(getattr(e, "response", None), "status_code", None)
