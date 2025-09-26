@@ -11,6 +11,7 @@ import tempfile
 import mmap
 import codecs
 import statistics
+import socket
 from datetime import datetime
 from collections import Counter
 from ftfy.badness import is_bad
@@ -121,23 +122,28 @@ def make_request(url, current_agent, headers=None, params=None, max_sec=None, re
             if return_tag:
                 try:
                     response.raise_for_status()
-                except requests.exceptions.SSLError:
-                    return None, user_agent, "ssl_error", f"{CRAWLER_CHANGES_INFO.get("ssl_error").get("tag_explanation").get("reason")} ({url})"
                 except requests.exceptions.RequestException as e:
                     tag = get_error_tag_from_exception(e)
-                    return None, user_agent, tag, f"{CRAWLER_CHANGES_INFO.get(tag).get("tag_explanation").get("reason")} ({url})"
-
+                    tag_explanation = CRAWLER_CHANGES_INFO.get(tag, {}).get("tag_explanation", {}).get("reason", "Unknown reason")
+                    if tag == "resource_temporarily_unavailable":
+                        return None, user_agent, tag, f"{tag_explanation} ({url}) - [{e}]"
+                    else:
+                        return None, user_agent, tag, f"{tag_explanation} ({url})"
                 return response, user_agent, None, None
 
             return response, user_agent
 
         except requests.exceptions.RequestException as e:
             tag = get_error_tag_from_exception(e)
-            return (None, None, tag, f"{CRAWLER_CHANGES_INFO.get(tag).get("tag_explanation").get("reason")} ({url})") if return_tag else (None, None)
+            tag_explanation = CRAWLER_CHANGES_INFO.get(tag, {}).get("tag_explanation", {}).get("reason", "Unknown reason")
+            if tag == "resource_temporarily_unavailable":
+                return None, None, tag, f"{tag_explanation} ({url}) - [{e}]" if return_tag else (None, None)
+            else:
+                return None, None, tag, f"{tag_explanation} ({url})" if return_tag else (None, None)
 
     if return_tag:
         if all_forbidden:
-            return None, None, "forbidden_resource", f"{CRAWLER_CHANGES_INFO.get("forbidden_resource").get("tag_explanation").get("reason")} ({url})"
+            return None, None, "forbidden_resource", f"{CRAWLER_CHANGES_INFO.get(tag, {}).get("tag_explanation", {}).get("reason", "Unknown reason")} ({url})"
 
         return None, None, None, None
     else:
@@ -154,14 +160,20 @@ def clean_url(u):
     return u.split("/")[0]
 
 def get_error_tag_from_exception(e):
-    error_str = str(e).lower()
+    if isinstance(e, tuple) and len(e) == 2 and isinstance(e[1], BaseException):
+        e = e[1]
 
-    if "name or service not known" in error_str or "failed to resolve" in error_str:
+    if isinstance(e, (requests.exceptions.ConnectionError, socket.gaierror)):
         return "unresolvable_domain"
-    elif any(error_text in error_str for error_text in ["read timed out", "timeout", "connection broken: incompleteread"]):
+    elif isinstance(e, (requests.exceptions.Timeout, requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout)):
+        return "resource_temporarily_unavailable"
+    elif isinstance(e, requests.exceptions.SSLError):
+        return "ssl_error"
+    elif isinstance(e, ConnectionResetError):
         return "resource_temporarily_unavailable"
 
-    tag = get_https_error_tag(getattr(getattr(e, "response", None), "status_code", None))
+    status_code = getattr(getattr(e, "response", None), "status_code", None)
+    tag = get_https_error_tag(status_code)
     if tag:
         return tag
 
@@ -175,7 +187,9 @@ def get_https_error_tag(status_code):
             return "missing_resource"
         elif status_code == 405:
             return "method_not_allowed"
-        elif status_code == 500:
+        elif status_code == 410:
+            return "resource_removed"
+        elif status_code in [500, 502, 503, 504]:
             return "resource_temporarily_unavailable"
     return None
 

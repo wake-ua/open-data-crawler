@@ -7,6 +7,8 @@ import gc
 from datetime import datetime
 import traceback
 from frictionless import describe, Dialect
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
 from opendatacrawler import utils
 from opendatacrawler.datosgobescrawler import DatosGobEsCrawler
 from opendatacrawler.ckancrawler import CkanCrawler
@@ -34,8 +36,6 @@ class OpenDataCrawler():
         logger("...", f"Detecting DMS for domain '{self.domain}'...", level="print")
         self.detect_dms()
 
-    # ==============================
-    # DMS detection and setup functions
     # ==============================
 
     def detect_dms(self):
@@ -113,8 +113,6 @@ class OpenDataCrawler():
             logger("ERROR", f"No accessible or supported DMS detected at '{self.domain}'", level="print")
 
     # ==============================
-    # Cleanup and reset functions
-    # ==============================
 
     def reset_domain(self, reset_domain, has_data, has_logs):
         if reset_domain and (has_data or has_logs):
@@ -140,8 +138,22 @@ class OpenDataCrawler():
         log_manager.move_to_domain(self.clean_domain, move_file=True)
         log_manager.clean_unused_logs()
 
-    # ==============================
-    # Dataset download and processing functions
+    def log_run_summary(self, downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, resume_data):
+        new_downloads = len(downloaded_after_res) - len(downloaded_before_res)
+        new_failures = max(0, len(failed_after_res) - len(failed_before_res))
+        recovered = len(set(failed_before_res) - set(failed_after_res))
+
+        logger("OK", f"{new_downloads} new resources downloaded in this run "
+                     f"({new_failures} new failures, {recovered} recovered from previous failures): "
+                     f"{len(downloaded_after_res)} successfully downloaded resources in total across {len(resume_data)} packages "
+                     f"({len(failed_after_res)} failed resources in total)", level="print")
+
+    def process_packages_batch(self, packages, categories, d_types, partial, avoid_data, max_threads, tqdm_initial, tqdm_desc, tqdm_colour):
+        with ThreadPoolExecutor(max_workers=max_threads, thread_name_prefix="t") as executor:
+            futures = [executor.submit(self.process_package, pkg_id, categories, d_types, partial, avoid_data) for pkg_id in packages]
+            for future in tqdm(futures, total=len(futures) + tqdm_initial, initial=tqdm_initial, desc=tqdm_desc, colour=tqdm_colour):
+                future.result()
+
     # ==============================
 
     def save_dataset(self, url, file_name, partial=False):
@@ -155,7 +167,7 @@ class OpenDataCrawler():
         response, self.user_agent, error_tag, e = utils.make_request(url, self.user_agent, headers=headers, max_sec=self.max_sec, return_tag=True)
         if error_tag:
             logger("ERROR", f"Error downloading resource '{file_name}'", e, indent=3)
-            return None, error_tag
+            return None, error_tag, e
 
         try:
             path = os.path.join(self.save_path, file_name)
@@ -179,13 +191,13 @@ class OpenDataCrawler():
 
             if not partial and total_bytes == 0:
                 logger("WARNING", f"No data downloaded for resource '{file_name}'", indent=2)
-                return None, "no_data"
+                return None, "no_data", None
 
-            return path, None
+            return path, None, None
 
         except Exception as e:
             logger("ERROR", f"Unexpected error saving dataset '{file_name}'", [e, traceback.format_exc()], indent=2)
-            return None, None
+            return None, None, None
 
     def save_metadata(self, package):
         try:
@@ -321,7 +333,7 @@ class OpenDataCrawler():
 
         ext = resource_file_name.split(".")[-1].lower() if "." in resource_file_name else None
         if not d_types or ext in d_types or not ext:
-            path, tag = self.save_dataset(download_url, resource_file_name, partial)
+            path, tag, e = self.save_dataset(download_url, resource_file_name, partial)
 
             if path or tag:
                 if path:
@@ -334,7 +346,14 @@ class OpenDataCrawler():
                         logger("OK", f"Resource '{path}' saved successfully processed from package '{metadata_path}'", indent=3)
 
                 if tag:
-                    package["crawlerInfo"]["resourcesInfo"][resource_file_name]["fileInfo"].update(utils.add_tag_explanations(tag))
+                    if tag == "resource_temporarily_unavailable":
+                        logger("WARNING", f"Retryable error downloading resource '{resource_file_name}'", e, indent=2)
+                        package["crawlerInfo"]["resourcesInfo"][resource_file_name]["fileInfo"].update(utils.add_tag_explanations(tag, {"<metaMediaType>": media_type}))
+                    else:
+                        package["crawlerInfo"]["resourcesInfo"][resource_file_name]["fileInfo"].update(utils.add_tag_explanations(tag))
+                        if tag != "no_data":
+                            logger("WARNING", f"Non-retryable error downloading resource '{resource_file_name}'", e, indent=2)
+                        
                     package["crawlerInfo"]["resourcesInfo"][resource_file_name]["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
 
             del resource_file_name, download_url, media_type, ext, path, tag

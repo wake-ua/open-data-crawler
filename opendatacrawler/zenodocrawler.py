@@ -14,6 +14,33 @@ class ZenodoCrawler():
 
         self.token = utils.AUTH_TOKENS.get("zenodo", None)
 
+    def get_package_list(self):
+        ids = []
+        base_url = f"{self.domain}/api/records"
+
+        page_size = 100
+
+        all_ids = set()
+        last_max_date = None
+
+        if os.path.exists(STATE_FILE):
+            try:
+                with open(STATE_FILE, "r") as f:
+                    state = json.load(f)
+                all_ids = set(state.get("ids", []))
+                last_date = date.fromisoformat(state.get("lastDate"))
+                last_hour = state.get("lastHour", 0)
+                logger("...", f"Reanudando desde {last_date} {last_hour:02d}h | IDs cargados: {len(all_ids)}", level="print")
+            except Exception as e:
+                logger("ERROR", f"Error cargando estado desde '{STATE_FILE}'", [e])
+                return set()
+
+
+
+
+
+
+
     def get_package_list_oai2d(self):
         ids = []
         url = f"{self.domain}/oai2d"

@@ -62,6 +62,12 @@
             "reason": "The resource could not be accessed because the domain of the download URL could not be resolved (e.g. DNS resolution failure), which may indicate a non-existent or private domain"
         }    
     },
+    "resource_removed": {
+        "tag_placeholders": [],
+        "tag_explanation": {
+            "reason": "The resource was permanently removed from the server and is no longer available (HTTP 410 - Gone)"
+        }
+    },
     "resource_temporarily_unavailable": {
         "tag_placeholders": ["<metaMediaType>"],
         "tag_explanation": {
