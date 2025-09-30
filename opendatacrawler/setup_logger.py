@@ -43,11 +43,20 @@ class LogManager:
         class ThreadNameFilter(logging.Filter):
             def filter(self, record):
                 if record.threadName == "MainThread":
-                    record.threadName = ""
+                    record.threadName = "[_______]"
                 else:
-                    match = re.search(r"_(\d+)$", record.threadName)
+                    match = re.match(r"(.+?)_(\d+)(?:_(\d+))?$", record.threadName)
                     if match:
-                        record.threadName = f"[t_{int(match.group(1)):02d}]"
+                        prefix = match.group(1)
+                        subidx = match.group(3)
+
+                        idx_str = f"{int(match.group(2)):02d}"
+                        if subidx is not None:
+                            subidx_str = f"{int(subidx):02d}"
+                            record.threadName = f"[{prefix}_{idx_str}_{subidx_str}]"
+                        else:
+                            filler = "_" * (7 - len(prefix) - 3)
+                            record.threadName = f"[{prefix}_{idx_str}{filler}]"
                     else:
                         record.threadName = f"[{record.threadName}]"
                 return True

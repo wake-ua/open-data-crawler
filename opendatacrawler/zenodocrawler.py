@@ -1,95 +1,111 @@
 import requests
+from requests import Request
+import os
+import json
 from tqdm import tqdm
-import traceback
+from concurrent.futures import ThreadPoolExecutor
+import threading
+from datetime import datetime, date, timedelta
+import xml.etree.ElementTree as ET
 from opendatacrawler import utils
 from opendatacrawler.setup_logger import log_manager
 logger = log_manager.log
 
 class ZenodoCrawler():
-    def __init__(self, domain, data_types, user_agent, max_sec):
+    def __init__(self, domain, user_agent, max_sec):
         self.domain = domain.rstrip("/")
-        self.data_types = data_types
         self.user_agent = user_agent
         self.max_sec = max_sec
 
-        self.token = utils.AUTH_TOKENS.get("zenodo", None)
-
-    def get_package_list(self):
-        ids = []
-        base_url = f"{self.domain}/api/records"
-
-        page_size = 100
-
-        all_ids = set()
-        last_max_date = None
-
-        if os.path.exists(STATE_FILE):
-            try:
-                with open(STATE_FILE, "r") as f:
-                    state = json.load(f)
-                all_ids = set(state.get("ids", []))
-                last_date = date.fromisoformat(state.get("lastDate"))
-                last_hour = state.get("lastHour", 0)
-                logger("...", f"Reanudando desde {last_date} {last_hour:02d}h | IDs cargados: {len(all_ids)}", level="print")
-            except Exception as e:
-                logger("ERROR", f"Error cargando estado desde '{STATE_FILE}'", [e])
-                return set()
-
-
-
-
-
-
-
-    def get_package_list_oai2d(self):
-        ids = []
-        url = f"{self.domain}/oai2d"
-
-        params = {
-            "verb": "ListIdentifiers",
-            "metadataPrefix": "oai_dc"
+        self.token = utils.AUTH_TOKENS.get("zenodo")
+        self.ns = {
+            "oai": "http://www.openarchives.org/OAI/2.0/",
+            "rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+            "dct": "http://purl.org/dc/terms/",
+            "dcat": "http://www.w3.org/ns/dcat#",
+            "foaf": "http://xmlns.com/foaf/0.1/",
         }
 
-        pbar = None
+    def get_state_file(self, url, path=utils.ZENODO_STATE_FILE):
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                state = json.load(f)
+
+            ids = set(state.get("ids", []))
+            last_date = date.fromisoformat(state.get("lastDate"))
+            last_hour = state.get("lastHour", 0)
+        else:
+            response, self.user_agent = utils.make_request(url, self.user_agent, params={"size": 1, "sort": "oldest"}, max_sec=self.max_sec)
+            ids = set()
+            last_date = datetime.fromisoformat(response.json()["hits"]["hits"][0]["created"].replace("Z", "+00:00")).date()
+            last_hour = 0
+
+        return ids, last_date, last_hour
+
+    def get_package_list(self):
+        url = f"{self.domain}/api/records?type=dataset"
+        ids, last_date, last_hour = self.get_state_file(url)
+
+        page_size = 25
+        last_max_date = None
         try:
             while True:
-                response, self.user_agent = utils.make_request(url, self.user_agent, params=params)
-                if not response:
-                    logger("ERROR", f"Error fetching package list from '{self.domain}': no working User-Agent found")
-                    return ids
+                response, self.user_agent = utils.make_request(url, self.user_agent, params={"size": 1, "sort": "newest"}, max_sec=self.max_sec)
+                max_date = datetime.fromisoformat(response.json()["hits"]["hits"][0]["created"].replace("Z", "+00:00")).date()
 
-                response.raise_for_status()
-                data = ET.fromstring(response.text)
-
-                for header in data.findall(".//oai:header", self.ns):
-                    identifier = header.find("oai:identifier", self.ns).text
-                    if identifier and identifier.startswith("oai:zenodo.org:"):
-                        id_num = int(identifier.split(":")[-1])
-                        ids.append(id_num)
-
-                resumption_token = data.find(".//oai:resumptionToken", self.ns)
-                if resumption_token is not None and resumption_token.text:
-                    total = resumption_token.attrib.get("completeListSize")
-                    cursor = resumption_token.attrib.get("cursor")
-
-                    if total and cursor:
-                        if pbar is None:
-                            pbar = tqdm(total=int(total), desc="Obtaining...", unit="records")
-                            pbar.update(int(cursor))
-                        else:
-                            delta = int(cursor) - pbar.n
-                            if delta > 0:
-                                pbar.update(delta)
-
-                    params = {
-                        "verb": "ListIdentifiers",
-                        "resumptionToken": resumption_token.text.strip()
-                    }
-                else:
-                    if pbar:
-                        pbar.update(pbar.total - pbar.n)
-                        pbar.close()
+                if last_max_date == max_date:
                     break
+
+                last_max_date = max_date
+
+                total_hours = ((max_date - last_date).days * 24) + (24 - last_hour)
+                with tqdm(total=total_hours, desc=f"Fetching packages...", colour="blue") as pbar:
+                    while last_date <= max_date:
+                        for hour in range(last_hour, 24):
+                            hour_start = f"{last_date}T{hour:02d}:00:00Z"
+                            hour_end = f"{last_date}T{hour:02d}:59:59Z"
+
+                            page = 1
+                            while True:
+                                params = {
+                                    "page": page,
+                                    "size": page_size,
+                                    "sort": "oldest",
+                                    "q": f"created:[{hour_start} TO {hour_end}]"
+                                }
+
+                                response, self.user_agent, tag, e = utils.make_request(url, self.user_agent, params=params, max_sec=self.max_sec, return_tag=True)
+                                if not response:
+                                    if tag == "resource_temporarily_unavailable":
+                                        page_size = max(page_size // 2, 10)
+                                    continue
+
+                                hits = response.json().get("hits", {}).get("hits", [])
+                                if not hits:
+                                    break
+
+                                for record in hits:
+                                    if record["id"] not in ids:
+                                        ids.add(record["id"])
+
+                                if len(hits) < page_size:
+                                    break
+
+                                page += 1
+
+                            state = {
+                                "lastDate": last_date.isoformat(),
+                                "lastHour": hour + 1 if hour < 23 else 0,
+                                "totalIds": len(ids),
+                                "ids": list(ids)
+                            }
+                            with open(utils.ZENODO_STATE_FILE, "w", encoding="utf-8") as f:
+                                json.dump(state, f, indent=2)
+
+                            pbar.update(1)
+
+                        last_date += timedelta(days=1)
+                        last_hour = 0
 
             logger("OK", f"Retrieved {len(ids)} packages from '{self.domain}'", level="print")
 
@@ -98,145 +114,258 @@ class ZenodoCrawler():
         except Exception as e:
             logger("ERROR", f"Unexpected error parsing response from '{self.domain}'", e)
 
-        return ids
+        return list(ids)
 
-    def get_package_list(self):
-        ids = []
+    def parse_resource(self, resource_meta, base_name, metadata_file_name, reparse_data=None):
+        resource_crawler_info = utils.init_metadata(resource=True)
+
+        if reparse_data:
+            logger("...", f"Re-parsing resource '{base_name}' from package '{metadata_file_name}'...", indent=4)
+            resource = resource_meta
+            meta_media_type = reparse_data.get("metaMediaType")
+        else:
+            logger("...", f"Parsing resource '{base_name}' from package '{metadata_file_name}'...", indent=4)
+            resource = {}
+            resource["fileName"] = base_name
+
+            resource["identifier"] = resource_meta.get("id", None)
+            resource["name"] = resource_meta.get("key", None)
+
+            resource["downloadURL"] = utils.fix_url(resource_meta.get("links", {}).get("self", None))
+            print(resource)
+            if not resource["downloadURL"]:
+                print(resource_meta)
+                return None, None
+
+            meta_media_type = resource_meta.get("key", None)
+            if meta_media_type:
+                ext = meta_media_type.split(".")[-1].lower() if "." in meta_media_type else None
+                meta_media_type = utils.EXT_TO_MIME.get(ext)
+
+        response, self.user_agent, error_tag, e = utils.make_request(resource["downloadURL"], self.user_agent, return_tag=True, max_sec=self.max_sec)
+        if not response:
+            if error_tag:
+                if error_tag != "resource_temporarily_unavailable":
+                    resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag))
+                    logger("WARNING", f"Non-retryable error accessing resource '{base_name}' for parsing", e, indent=4)
+                    resource_crawler_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
+                else:
+                    resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag, {"<metaMediaType>": meta_media_type}))
+                    logger("WARNING", f"Retryable error accessing resource '{base_name}' for parsing", e, indent=4)
+            else:
+                logger("ERROR", f"Error accessing resource '{base_name}'", e, indent=4)
+            
+            return resource, resource_crawler_info
+
+        media_type, file_name, tag_val = utils.resolve_mediatype_conflict(meta_media_type, response, base_name)
+        resource["mediaType"] = media_type
+        resource["fileName"] = file_name
+
+        if tag_val:
+            logger("WARNING", f"Detected a media type mismatch for file '{resource['downloadURL']}' '{base_name}'", indent=4)
+            resource_crawler_info["fileMetadataChanges"].update(utils.add_tag_explanations("mimetype_mismatch", tag_val))
+
+        if reparse_data:
+            logger("OK", f"Successfully re-parsed resource '{resource["fileName"]}' from package '{metadata_file_name}'", indent=4)
+        else:
+            logger("OK", f"Successfully parsed resource '{resource["fileName"]}' from package '{metadata_file_name}'", indent=4)
+
+        return resource, resource_crawler_info
+
+    def get_package(self, package_id, metadata_file_name):
+        url = utils.fix_url(f"{self.domain}/api/records/{package_id}")
+
         headers = {
-            "Accept": "application/json",
-            "Connection": "keep-alive",
-            "Authorization": f"Bearer m69fGQgHiAGSRxRJwUtzXIHcEJy1ZhB71hY5MAYJNQe82aC9NU7A0xrgfJrV"
+            "Authorization": f"Bearer {self.token}"
         }
 
-        page_size = 200
-        url = f"{self.domain}/api/records?page=1&size={page_size}&type=dataset"
-        try:
-            pbar = None
+        metadata = utils.init_metadata()
+        metadata["identifier"] = package_id
+        metadata["requestURL"] = url
 
-            while url:
-                response, self.user_agent = utils.make_request(url, self.user_agent, headers=headers, max_sec=360)
-                if not response:
-                    logger("ERROR", f"Error fetching package list from '{self.domain}': no working User-Agent found")
-                    break
+        metadata["fileName"] = metadata_file_name
+        metadata["img"] = "https://zenodo.org/static/images/invenio-rdm.svg"
 
-                response.raise_for_status()
-                data = response.json()
-
-                if pbar is None:
-                    total = data.get("hits", {}).get("total", 0)
-                    pbar = tqdm(total=total, desc="Obtaining...", unit="package")
-
-                hits = data.get("hits", {}).get("hits", [])
-                for record in hits:
-                    ids.append(record.get("id"))
-                pbar.update(len(hits))
-
-                url = data.get("links", {}).get("next")
-
-            if pbar:
-                pbar.close()
-
-            logger("OK", f"Retrieved {len(ids)} packages from '{self.domain}'", level="print")
-
-        except requests.RequestException as e:
-            logger("ERROR", f"Error fetching package list from '{self.domain}': {e}")
-        except Exception as e:
-            logger("ERROR", f"Unexpected error parsing response from '{self.domain}': {e}")
-
-        return ids
-
-    def get_requests_ids(file_type, token):
-        skip = 1
-        ids = []
-        fin = False
-
-        while not fin:
-            response = requests.get('https://zenodo.org/api/records/?type=dataset&file_type=' + file_type + '&size=200&page='+str(skip)+'&access_token='+str(token))
-            if response.status_code == 200:
-                packages = response.json()['hits']['hits']
-                if len(packages) > 0:
-                    skip += 1
-                    for p in packages:
-                        ids.append(p['id'])
+        response, self.user_agent, error_tag, e = utils.make_request(url, self.user_agent, headers=headers, return_tag=True)
+        if not response:
+            if error_tag:
+                if error_tag != "resource_temporarily_unavailable":
+                    logger("WARNING", f"Non-retryable error accessing package '{package_id}' ('{metadata_file_name}')", e, indent=2)
+                    metadata["crawlerInfo"]["packageInfo"].update(utils.add_tag_explanations(error_tag))
+                    metadata["crawlerInfo"]["packageStatus"]["packageCompleted"] = datetime.now().isoformat()
+                    return metadata
                 else:
-                    fin = True
+                    logger("WARNING", f"Retryable error accessing package '{package_id}' ('{metadata_file_name}')", e, indent=2)
             else:
-                fin = True
-        return ids
-
-    def get_package_list_falso(self):
-        total_ids = []
-        
-        ids_csv = get_requests_ids('csv', self.token)
-        ids_zip = get_requests_ids('zip', self.token)
-        ids_xlsx = get_requests_ids('xlsx', self.token)
-        
-        # Add ids        
-        cont_csv = 0
-        for x in ids_csv:
-            total_ids.append(x)
-            cont_csv = cont_csv + 1
-            
-        cont_zip = 0    
-        for y in ids_zip:
-            total_ids.append(y)
-            cont_zip = cont_zip + 1
-            
-        cont_xlsx = 0    
-        for z in ids_xlsx:
-            total_ids.append(z)
-            cont_xlsx = cont_xlsx + 1
-            
-        return total_ids
-
-    def get_package(self, id):
-        """Build a dict of package metadata"""
-        try:
-            response = requests.get('https://zenodo.org/api/records/' + str(id))
-            
-            if response.status_code == 200:
-                # Timer start counting
-                utils.timer_start()
-                
-                meta_json = response.json()
-
-                metadata = dict()
-                
-                metadata['identifier'] = id
-                
-                meta = meta_json.get('metadata', None)
-                
-                if meta is not None:
-                    metadata['title'] = meta.get('title', None)
-                    metadata['description'] = meta.get('description', None)
-                    if meta.get('keywords', None) is not None:
-                        metadata['theme'] = utils.extract_keywords(meta.get('keywords', None)[0])
-                
-                resource_list = []
-
-                aux = dict()
-
-                if meta_json.get('files', None) is not None:
-                    url = meta_json.get('files', None)[0]
-                    aux['downloadUrl'] = url.get('links', None).get('self', None)
-                    aux['mediaType'] = url.get('type', None)
-
-                resource_list.append(aux)
-
-                metadata['resources'] = resource_list
-                metadata['modified'] = meta.get('publication_date', None)
-                #metadata['license'] = requests.get('https://zenodo.org/api/licenses/')
-                metadata['license'] = None
-                metadata['source'] = self.domain
-                
-                return metadata
-            else:
-                # Timer stops when it can't make any more calls to the API
-                rest = utils.timer_stop()
-                if rest < 60:
-                    time.sleep(60 - rest)
-                    return (self.get_package(id))
-        except Exception as e:
-            print(traceback.format_exc())
-            logger.info(e)
+                logger("ERROR", f"Error accessing package '{package_id}' ('{metadata_file_name}')", e, indent=2)
             return None
+
+        data = response.json()
+
+        metadata["title"] = data.get("metadata", {}).get("title", {})
+        metadata["description"] = data.get("metadata", {}).get("description", {})
+        metadata["doi"] = data.get("metadata", {}).get("doi", {})
+
+        distributions = data.get("files", {})
+        if not isinstance(distributions, list):
+            distributions = [distributions]
+
+        metadata["publisher"] = data.get("metadata", {}).get("creators", {})
+
+        metadata["language"] = data.get("metadata", {}).get("language", {})
+        metadata["keyword"] = data.get("metadata", {}).get("keywords", {})
+
+        #metadata["theme"] = []
+        #metadata["accrualPeriodicity"] = None
+
+        metadata["modified"] = data.get("modified", None)
+        #metadata["issued"] = None
+
+        metadata["license"] = data.get("metadata", {}).get("license", {}).get("id", None)
+
+        metadata["source"] = self.domain
+
+        #metadata["temporal"] = None
+        #metadata["spatial"] = None
+
+        if distributions:
+            logger("...", f"Parsing {len(distributions)} resources from package '{package_id}' ('{metadata_file_name}')...", indent=3)
+            metadata["resources"] = {}
+            for idx, resource in enumerate(distributions):
+                resource_meta, resource_crawler_info = self.parse_resource(resource, utils.generate_short_filename(f"{metadata['fileName']}_{idx}"), metadata_file_name)
+                if resource_meta and resource_crawler_info:
+                    metadata["resources"][resource_meta["fileName"]] = resource_meta
+                    metadata["crawlerInfo"]["resourcesInfo"][resource_meta["fileName"]] = resource_crawler_info
+
+        metadata["dataRaw"] = data
+
+    def parse_resource_oai(self, resource_meta, base_name, metadata_file_name, reparse_data=None):
+        resource_crawler_info = utils.init_metadata(resource=True)
+
+        if reparse_data:
+            logger("...", f"Re-parsing resource '{base_name}' from package '{metadata_file_name}'...", indent=4)
+            resource = resource_meta
+            meta_media_type = reparse_data.get("metaMediaType")
+        else:
+            logger("...", f"Parsing resource '{base_name}' from package '{metadata_file_name}'...", indent=4)
+            resource = {}
+            resource["fileName"] = base_name
+
+            download_url = resource_meta.find("dcat:downloadURL", self.ns)
+            resource["downloadURL"] = download_url.attrib.get(f"{{{self.ns['rdf']}}}resource") if download_url else None
+            if not resource["downloadURL"]:
+                return None, None
+
+            meta_media_type = resource_meta.find("dcat:mediaType", self.ns)
+            meta_media_type = meta_media_type.text if meta_media_type else None
+
+        response, self.user_agent, error_tag, e = utils.make_request(resource["downloadURL"], self.user_agent, return_tag=True, max_sec=self.max_sec)
+        if not response:
+            if error_tag:
+                if error_tag != "resource_temporarily_unavailable":
+                    resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag))
+                    logger("WARNING", f"Non-retryable error accessing resource '{base_name}' for parsing", e, indent=4)
+                    resource_crawler_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
+                else:
+                    resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag, {"<metaMediaType>": meta_media_type}))
+                    logger("WARNING", f"Retryable error accessing resource '{base_name}' for parsing", e, indent=4)
+            else:
+                logger("ERROR", f"Error accessing resource '{base_name}'", e, indent=4)
+            
+            return resource, resource_crawler_info
+
+        media_type, file_name, tag_val = utils.resolve_mediatype_conflict(meta_media_type, response, base_name)
+        resource["mediaType"] = media_type
+        resource["fileName"] = file_name
+
+        if tag_val:
+            logger("WARNING", f"Detected a media type mismatch for file '{resource['downloadURL']}' '{base_name}'", indent=4)
+            resource_crawler_info["fileMetadataChanges"].update(utils.add_tag_explanations("mimetype_mismatch", tag_val))
+
+        if reparse_data:
+            logger("OK", f"Successfully re-parsed resource '{resource["fileName"]}' from package '{metadata_file_name}'", indent=4)
+        else:
+            logger("OK", f"Successfully parsed resource '{resource["fileName"]}' from package '{metadata_file_name}'", indent=4)
+
+        return resource, resource_crawler_info
+
+    def get_package_oai(self, package_id, metadata_file_name):
+        url = utils.fix_url(f"{self.domain}/oai2d")
+        params = {
+            "verb": "GetRecord",
+            "metadataPrefix": "dcat",
+            "identifier": f"oai:zenodo.org:{package_id}"
+        }
+
+        metadata = utils.init_metadata()
+        metadata["identifier"] = package_id
+        metadata["requestURL"] = Request("GET", url, params=params).prepare().url
+
+        metadata["fileName"] = metadata_file_name
+        metadata["img"] = "https://zenodo.org/static/images/invenio-rdm.svg"
+
+        response, self.user_agent, error_tag, e = utils.make_request(url, self.user_agent, params=params, return_tag=True)
+        if not response:
+            if error_tag:
+                if error_tag != "resource_temporarily_unavailable":
+                    logger("WARNING", f"Non-retryable error accessing package '{package_id}' ('{metadata_file_name}')", e, indent=2)
+                    metadata["crawlerInfo"]["packageInfo"].update(utils.add_tag_explanations(error_tag))
+                    metadata["crawlerInfo"]["packageStatus"]["packageCompleted"] = datetime.now().isoformat()
+                    return metadata
+                else:
+                    logger("WARNING", f"Retryable error accessing package '{package_id}' ('{metadata_file_name}')", e, indent=2)
+            else:
+                logger("ERROR", f"Error accessing package '{package_id}' ('{metadata_file_name}')", e, indent=2)
+            return None
+
+        data = ET.fromstring(response.text).find(".//rdf:Description", self.ns)
+
+        title =  data.find("dct:title", self.ns)
+        metadata["title"] = title.text if title else None
+
+        description = data.find("dct:description", self.ns)
+        metadata["description"] = description.text if description else None
+
+        distributions = data.findall("dcat:distribution", self.ns)
+        if not isinstance(distributions, list):
+            distributions = [distributions]
+
+        publisher = data.find("dct:publisher/foaf:Agent/foaf:name", self.ns)
+        metadata["publisher"] = publisher.text if publisher is not None else None
+
+        language = data.find("dct:language", self.ns)
+        metadata["language"] = language.split("/")[-1] if language else None
+
+        keywords = [keyword.text for keyword in data.findall("dcat:keyword", self.ns) if keyword.text]
+        subjects = [subject.text for subject in data.findall("dct:subject", self.ns) if subject.text]
+        metadata["keyword"] = keywords + subjects
+
+        metadata["theme"] = []
+        metadata["accrualPeriodicity"] = None
+
+        metadata["modified"] = None
+        metadata["issued"] = None
+
+        metadata["license"] = None
+
+        metadata["source"] = self.domain
+
+        metadata["temporal"] = None
+
+        metadata["spatial"] = None
+
+        if distributions:
+            logger("...", f"Parsing {len(distributions)} resources from package '{package_id}' ('{metadata_file_name}')...", indent=3)
+            metadata["resources"] = {}
+            with ThreadPoolExecutor(max_workers=8, thread_name_prefix=f"{threading.current_thread().name}") as executor:
+                futures = []
+                for idx, resource in enumerate(distributions):
+                    futures.append(executor.submit(self.parse_resource_oai, resource, utils.generate_short_filename(f"{metadata['fileName']}_{idx}"), metadata_file_name))
+
+                for future in futures:
+                    resource_meta, resource_crawler_info = future.result()
+                    if resource_meta and resource_crawler_info:
+                        metadata["resources"][resource_meta["fileName"]] = resource_meta
+                        metadata["crawlerInfo"]["resourcesInfo"][resource_meta["fileName"]] = resource_crawler_info
+
+        metadata["dataRaw"] = data.text

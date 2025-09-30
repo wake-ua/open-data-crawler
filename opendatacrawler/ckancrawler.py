@@ -3,6 +3,8 @@ from urllib.parse import urlparse
 from opendatacrawler import utils
 import json
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+import threading
 from opendatacrawler.setup_logger import log_manager
 logger = log_manager.log
 
@@ -200,10 +202,14 @@ class CkanCrawler():
         if distributions:
             logger("...", f"Parsing {len(distributions)} resources from package '{package_id}' ('{metadata_file_name}')...", indent=3)
             metadata["resources"] = {}
-            for idx, resource in enumerate(distributions):
-                resource_meta, resource_crawler_info = self.parse_resource(resource, utils.generate_short_filename(f"{metadata['fileName']}_{idx}"), metadata_file_name)
+            with ThreadPoolExecutor(max_workers=8, thread_name_prefix=f"{threading.current_thread().name}") as executor:
+                futures = []
+                for idx, resource in enumerate(distributions):
+                    futures.append(executor.submit(self.parse_resource, resource, utils.generate_short_filename(f"{metadata['fileName']}_{idx}"), metadata_file_name))
 
-                metadata["resources"][resource_meta["fileName"]] = resource_meta
-                metadata["crawlerInfo"]["resourcesInfo"][resource_meta["fileName"]] = resource_crawler_info
+                for future in futures:
+                    resource_meta, resource_crawler_info = future.result()
+                    metadata["resources"][resource_meta["fileName"]] = resource_meta
+                    metadata["crawlerInfo"]["resourcesInfo"][resource_meta["fileName"]] = resource_crawler_info
 
         return metadata

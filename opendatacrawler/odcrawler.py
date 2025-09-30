@@ -4,6 +4,7 @@ import shutil
 import requests
 import humanize
 import gc
+import threading
 from datetime import datetime
 import traceback
 from frictionless import describe, Dialect
@@ -105,6 +106,9 @@ class OpenDataCrawler():
             if cls:
                 try:
                     self.dms_instance = cls(self.domain, self.user_agent, self.max_sec)
+                    if self.domain in ["https://zenodo.org/"]:
+                        self.max_threads = 1
+                        self.max_resource_threads = 1
                 except Exception:
                     logger("ERROR", f"Error instantiating DMS class for '{self.dms}'", f"\n{traceback.format_exc()}")
         else:
@@ -164,7 +168,7 @@ class OpenDataCrawler():
 
     # ==============================
 
-    def save_dataset(self, url, file_name, log_indent=4):
+    def save_dataset(self, url, file_name, chunk_size=64*1024, log_indent=4):
         logger("...", f"Attempting to download resource '{file_name}' from '{url}'...", indent=log_indent)
 
         headers = {
@@ -182,19 +186,24 @@ class OpenDataCrawler():
             line_limit = 50
             lines_downloaded = 0
 
-            with open(path, "wb") as outfile:
-                for chunk in response.iter_content(chunk_size=1024):
-                    if not chunk:
-                        continue
+            response.raw.decode_content = True
+            try:
+                with open(path, "wb") as outfile:
+                    for chunk in response.iter_content(chunk_size=chunk_size):
+                        if not chunk:
+                            continue
 
-                    outfile.write(chunk)
-                    total_bytes += len(chunk)
+                        outfile.write(chunk)
+                        total_bytes += len(chunk)
 
-                    if self.partial:
-                        lines_downloaded += chunk.count(b"\n")
-                        if lines_downloaded >= line_limit:
-                            logger("WARNING", f"Partial content downloaded (~{line_limit} lines) for '{file_name}'", indent=log_indent)
-                            break
+                        if self.partial:
+                            lines_downloaded += chunk.count(b"\n")
+                            if lines_downloaded >= line_limit:
+                                logger("WARNING", f"Partial content downloaded (~{line_limit} lines) for '{file_name}'", indent=log_indent)
+                                break
+            except (requests.exceptions.ChunkedEncodingError, requests.exceptions.ConnectionError) as e:
+                logger("WARNING", f"Chunked connection error while saving '{file_name}'", e, indent=log_indent)
+                return None, "resource_temporarily_unavailable", e
 
             if not self.partial and total_bytes == 0:
                 logger("WARNING", f"No data downloaded for resource '{file_name}'", indent=log_indent)
@@ -286,7 +295,7 @@ class OpenDataCrawler():
         metadata_file_name = f"meta_{utils.generate_short_filename(f'{self.domain}_{pkg_id}')}.json"
         try:
             metadata_path = os.path.join(self.save_path, metadata_file_name)
-            logger("WORK", f"Processing package '{pkg_id}' ('{metadata_file_name}')...", indent=log_indent)
+            logger("WORK", f"Processing package '{pkg_id}' ('{metadata_file_name}')...", indent=log_indent-1)
 
             if not os.path.exists(metadata_path):
                 package = self.get_package(pkg_id, metadata_file_name)
@@ -313,8 +322,8 @@ class OpenDataCrawler():
                     self.save_metadata(package)
                     return
 
-            logger("WORK", f"Processing {len(package['resources'])} resources from package '{pkg_id}' ('{metadata_path}')...", indent=log_indent)
-            with ThreadPoolExecutor(max_workers=self.max_resource_threads, thread_name_prefix="tt") as executor:
+            logger("WORK", f"Processing {len(package['resources'])} resources from package '{pkg_id}' ('{metadata_path}')...", indent=log_indent-1)
+            with ThreadPoolExecutor(max_workers=self.max_resource_threads, thread_name_prefix=f"{threading.current_thread().name}") as executor:
                 futures = []
                 for file_name, resource in package["resources"].items():
                     if utils.is_completed(package, file_name, unavailable=True):
@@ -331,7 +340,7 @@ class OpenDataCrawler():
 
                     ext = file_name.split(".")[-1].lower() if "." in file_name else None
                     if self.data_types and ext and ext not in self.data_types:
-                        logger("SKIP", f"Skipping resource '{file_name}' (ext '{ext}' not in accepted types)", indent=log_indent)
+                        logger("SKIP", f"Skipping resource '{file_name}' (media type '{media_type}' with extension '.{ext}' not in accepted types)", indent=log_indent)
                         continue
 
                     futures.append(executor.submit(self.process_resource, resource, package, metadata_path))
@@ -414,7 +423,6 @@ class OpenDataCrawler():
             if temp_path:
                 shutil.move(temp_path, dataset_path)
                 logger("FIX", f"Overwrote cleaned content into '{dataset_path}'", indent=log_indent)
-
             if raw_flags:
                 package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations(raw_flags, raw_flags))
 
@@ -431,7 +439,6 @@ class OpenDataCrawler():
                 if temp_path:
                     shutil.move(temp_path, dataset_path)
                     logger("FIX", f"Cleaned and saved fixed tabular file to '{dataset_path}'", indent=log_indent)
-
                 if tag:
                     for tag_key, tag_data in tag:
                         package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations(tag_key, tag_data))

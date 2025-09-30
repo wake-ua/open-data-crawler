@@ -105,6 +105,10 @@ def main():
                 new_packages = new_packages[:max_packages]
 
             if new_packages or failed_packages:
+                if crawler.domain in ["https://zenodo.org/"]:
+                    logger("WARNING", f"Parallel processing for domain '{crawler.domain}' disabled due to API rate limits", level="print")
+                    logger(None, "=" * 80, level="print")
+
                 total_to_process = len(new_packages) + len(failed_packages)
                 if failed_packages:
                     logger("...", f"Queued {total_to_process} packages ({len(new_packages)} new packages and {len(failed_packages)} previously failed packages) for processing...", level="print")

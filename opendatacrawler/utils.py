@@ -7,6 +7,7 @@ import olefile
 import re
 import configparser
 import gc
+import time
 import tempfile
 import mmap
 import codecs
@@ -106,40 +107,52 @@ def fix_url(url):
 def get_user_agent_list(current_agent):
     return [current_agent] + [ua for ua in USER_AGENTS if ua != current_agent] if current_agent else USER_AGENTS
 
-def make_request(url, current_agent, headers=None, params=None, max_sec=None, stream=False, return_tag=False):
+def make_request(url, current_agent, headers=None, params=None, max_sec=None, stream=False, sleep_time=3, return_tag=False):
     headers = headers.copy() if headers else {}
 
     all_forbidden = True
     for user_agent in get_user_agent_list(current_agent):
         headers["User-Agent"] = user_agent
-        try:
-            response = requests.get(url, headers=headers, params=params, verify=False, timeout=max_sec, stream=stream)
-            if response.status_code == 403:
-                # logger("NET", f"Forbidden with User-Agent '{user_agent}' (HTTP 403 - Forbidden), trying next one...")
-                continue
 
-            all_forbidden = False
-            if return_tag:
-                try:
-                    response.raise_for_status()
-                except requests.exceptions.RequestException as e:
-                    tag = get_error_tag_from_exception(e)
-                    tag_explanation = CRAWLER_CHANGES_INFO.get(tag, {}).get("tag_explanation", {}).get("reason", "Unknown reason")
-                    if tag == "resource_temporarily_unavailable":
-                        return None, user_agent, tag, f"{tag_explanation} ({url}) - [{e}]"
-                    else:
-                        return None, user_agent, tag, f"{tag_explanation} ({url})"
-                return response, user_agent, None, None
+        while True:
+            print("e")
+            try:
+                response = requests.get(url, headers=headers, params=params, verify=False, timeout=max_sec, stream=stream)
+                if response:
+                    print(response)
+                    print(response.text)
+                else:
+                    print(None)
+                if response.status_code == 403:
+                    # logger("NET", f"Forbidden with User-Agent '{user_agent}' (HTTP 403 - Forbidden), trying next one...")
+                    break
+                elif response.status_code == 429:
+                    logger("NET", f"Too Many Requests (HTTP 429 - Too Many Requests), retrying with same User-Agent after {sleep_time}s", indent=2)
+                    time.sleep(sleep_time)
+                    continue
 
-            return response, user_agent
+                all_forbidden = False
+                if return_tag:
+                    try:
+                        response.raise_for_status()
+                    except requests.exceptions.RequestException as e:
+                        tag = get_error_tag_from_exception(e)
+                        tag_explanation = CRAWLER_CHANGES_INFO.get(tag, {}).get("tag_explanation", {}).get("reason", "Unknown reason")
+                        if tag == "resource_temporarily_unavailable":
+                            return None, user_agent, tag, f"{tag_explanation} ({url}) - [{e}]"
+                        else:
+                            return None, user_agent, tag, f"{tag_explanation} ({url})"
+                    return response, user_agent, None, None
 
-        except requests.exceptions.RequestException as e:
-            tag = get_error_tag_from_exception(e)
-            tag_explanation = CRAWLER_CHANGES_INFO.get(tag, {}).get("tag_explanation", {}).get("reason", "Unknown reason")
-            if tag == "resource_temporarily_unavailable":
-                return None, None, tag, f"{tag_explanation} ({url}) - [{e}]" if return_tag else (None, None)
-            else:
-                return None, None, tag, f"{tag_explanation} ({url})" if return_tag else (None, None)
+                return response, user_agent
+
+            except requests.exceptions.RequestException as e:
+                tag = get_error_tag_from_exception(e)
+                tag_explanation = CRAWLER_CHANGES_INFO.get(tag, {}).get("tag_explanation", {}).get("reason", "Unknown reason")
+                if tag == "resource_temporarily_unavailable":
+                    return None, None, tag, f"{tag_explanation} ({url}) - [{e}]" if return_tag else (None, None)
+                else:
+                    return None, None, tag, f"{tag_explanation} ({url})" if return_tag else (None, None)
 
     if return_tag:
         if all_forbidden:
@@ -162,16 +175,21 @@ def get_error_tag_from_exception(e):
     if isinstance(e, tuple) and len(e) == 2 and isinstance(e[1], BaseException):
         e = e[1]
 
-    if isinstance(e, (requests.exceptions.ConnectionError, socket.gaierror)):
+    if isinstance(e, socket.gaierror):
         return "unresolvable_domain"
-    elif isinstance(e, (requests.exceptions.Timeout, requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout)):
+
+    if isinstance(e, (
+        requests.exceptions.ConnectionError,
+        requests.exceptions.Timeout,
+        requests.exceptions.ConnectTimeout,
+        requests.exceptions.ReadTimeout,
+        requests.exceptions.ChunkedEncodingError,
+        ConnectionResetError,
+    )):
         return "resource_temporarily_unavailable"
-    elif isinstance(e, requests.exceptions.SSLError):
+
+    if isinstance(e, requests.exceptions.SSLError):
         return "ssl_error"
-    elif isinstance(e, ConnectionResetError):
-        return "resource_temporarily_unavailable"
-    elif isinstance(e, requests.exceptions.ChunkedEncodingError):
-        return "resource_temporarily_unavailable"
 
     status_code = getattr(getattr(e, "response", None), "status_code", None)
     tag = get_https_error_tag(status_code)
@@ -352,7 +370,7 @@ def are_quotes_balanced(line):
     while i < len(line):
         if line[i] == '"':
             if i + 1 < len(line) and line[i + 1] == '"':
-                i += 2
+                i += 2  # comilla escapada
             else:
                 in_quotes = not in_quotes
                 i += 1
@@ -360,28 +378,78 @@ def are_quotes_balanced(line):
             i += 1
     return not in_quotes
 
-def check_unbalanced_quotes(path, encoding):
+def fix_bad_inner_quotes(line):
+    fixed = []
+    in_quotes = False
+    i = 0
+    while i < len(line):
+        char = line[i]
+        if char == '"':
+            if in_quotes:
+                if i + 1 < len(line) and line[i + 1] == '"':
+                    if i + 2 < len(line) and line[i + 2] != '"':
+                        fixed.append('"')
+                        in_quotes = False
+                        i += 1
+                    else:
+                        fixed.append('"')
+                        i += 2
+                else:
+                    fixed.append('"')
+                    in_quotes = False
+                    i += 1
+            else:
+                fixed.append('"')
+                in_quotes = True
+                i += 1
+        else:
+            fixed.append(char)
+            i += 1
+    return ''.join(fixed)
+
+def check_unbalanced_quotes(path, encoding, max_row_lines=50):
     reconstructed_lines = 0
+
     try:
         with open(path, "r", encoding=encoding) as f, tempfile.NamedTemporaryFile(mode="w", encoding=encoding, delete=False) as temp_out:
             partial_row = []
+            current_line = 0
+            start_line = None
 
             for line in f:
+                current_line += 1
                 line = line.strip()
-                partial_row.append(line)
-                joined = "\n".join(partial_row)
 
-                if are_quotes_balanced(joined):
-                    reconstructed = "".join(partial_row)
+                if not partial_row:
+                    start_line = current_line
+
+                partial_row.append(line)
+
+                if len(partial_row) > max_row_lines:
+                    logger("WARNING", f"Exceeded {max_row_lines} lines while reconstructing quotes (lines {start_line}-{current_line}) in file '{path}'", indent=4)
+                    logger("FIX", f"Forcing partial reconstruction despite unbalanced quotes (file '{path}')", indent=4)
+                    raw_block = "\n".join(partial_row)
+                    cleaned_block = fix_bad_inner_quotes(raw_block)
+                    temp_out.write(cleaned_block + "\n")
+                    partial_row = []
+                    continue
+
+                joined_line = "\n".join(partial_row)
+                cleaned_line = fix_bad_inner_quotes(joined_line)
+
+                if are_quotes_balanced(cleaned_line):
                     if len(partial_row) > 1:
                         reconstructed_lines += 1
-                    temp_out.write(reconstructed + "\n")
+                    temp_out.write(cleaned_line + "\n")
                     partial_row = []
 
             if partial_row:
-                temp_out.write("".join(partial_row) + "\n")
+                logger("WARNING", f"File ended with unfinished multiline block in '{path}', forcing final reconstruction", indent=4)
+                final_line = fix_bad_inner_quotes("\n".join(partial_row))
+                temp_out.write(final_line + "\n")
 
             return temp_out.name, reconstructed_lines
+
     except Exception as e:
         logger("ERROR", f"Error reconstructing quotes in file '{path}'", e, indent=4)
         return None, 0
@@ -460,33 +528,39 @@ def process_fix_tabular(dataset_path, encoding):
     process_fix_path = dataset_path
     was_modified = False
 
+    logger("...", f"Starting tabular cleaning for '{dataset_path}' (encoding: {encoding})", indent=4)
+    logger("...", f"Checking for unnecessary outer quotes in '{dataset_path}'...", indent=4)
     temp_path, was_stripped = strip_outer_quotes(process_fix_path, encoding)
     if temp_path:
         process_fix_path = temp_path
         temp_paths.append(temp_path)
     if was_stripped:
         was_modified = True
-        logger("WARNING", f"File '{dataset_path}' appears to have unnecessary outer quotes, attempting removal...", indent=4)
+        logger("WARNING", f"File '{dataset_path}' appears to have unnecessary outer quotes", indent=4)
         logger("FIX", f"Removed unnecessary outer quotes in file '{dataset_path}'", indent=4)
         tags.append(("stripped_outer_quotes", {}))
-    gc.collect()
 
+    logger("...", f"Checking for broken multiline values in '{dataset_path}'...", indent=4)
     temp_path, reconstructed_lines = check_unbalanced_quotes(process_fix_path, encoding)
     if temp_path:
         process_fix_path = temp_path
         temp_paths.append(temp_path)
     if reconstructed_lines > 0:
         was_modified = True
-        logger("WARNING", f"File '{dataset_path}' appears to contain broken multiline values, attempting reconstruction...", indent=4)
+        logger("WARNING", f"File '{dataset_path}' appears to contain broken multiline values", indent=4)
         logger("FIX", f"Reconstructed {reconstructed_lines} multiline rows in file '{dataset_path}'", indent=4)
         tags.append(("reconstructed_lines", {"<reconstructed_lines>": reconstructed_lines}))
-    gc.collect()
 
+    logger("...", f"Checking if file '{dataset_path}' contains only one line...", indent=4)
     if check_single_line(process_fix_path, encoding):
+        logger("WARNING", f"File '{dataset_path}' appears to contain only one line", indent=4)
         tags.append(("one_line", {}))
 
     if temp_paths:
         delete_tempfiles(temp_paths, process_fix_path)
+
+    if was_modified:
+        logger("OK", f"Finished tabular cleaning for '{dataset_path}'", indent=4)
 
     del temp_path, temp_paths
     gc.collect()
@@ -839,16 +913,18 @@ def resolve_mediatype_conflict(meta_mimetype_og, response, base_name):
 
     return final_mime, final_file_name, tag_val
 
-
 def get_mime_and_ext(pos_mime_value):
-    pos_mime_value = pos_mime_value.strip().lower()
-    if "/" in pos_mime_value:
-        return pos_mime_value, get_extension_mime(pos_mime_value)
-    elif "_" in pos_mime_value:
-        guessed_ext = pos_mime_value.split("_")[-1]
-        return EXT_TO_MIME.get(guessed_ext), guessed_ext
-    else:
-        return EXT_TO_MIME.get(pos_mime_value), pos_mime_value
+    if pos_mime_value:
+        pos_mime_value = pos_mime_value.strip().lower()
+        if "/" in pos_mime_value:
+            return pos_mime_value, get_extension_mime(pos_mime_value)
+        elif "_" in pos_mime_value:
+            guessed_ext = pos_mime_value.split("_")[-1]
+            return EXT_TO_MIME.get(guessed_ext), guessed_ext
+        else:
+            return EXT_TO_MIME.get(pos_mime_value), pos_mime_value
+
+    return None, None
 
 def get_resource_ext_info(response):
     if not response:
@@ -1078,6 +1154,7 @@ def build_extension_to_mime_map(mime_map):
                     ext_to_mime[first_ext] = mime
     return ext_to_mime
 
+ZENODO_STATE_FILE = os.path.join(BASE_DIR, "resources", "zenodo_state.json")
 AUTH_TOKENS = load_tokens()
 
 USER_AGENTS = load_resource("user_agents.json")
