@@ -77,7 +77,7 @@ class LogManager:
                 final_message += f" : {error}"
 
         if indent:
-            final_message = textwrap.indent(final_message, "-" * indent)
+            final_message = textwrap.indent(" " + final_message, "-" * indent)
 
         with self._log_lock:
             if tag == "ERROR":

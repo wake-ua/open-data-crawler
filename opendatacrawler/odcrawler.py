@@ -151,20 +151,24 @@ class OpenDataCrawler():
                      f"({len(failed_after_res)} failed resources in total)", level="print")
 
     def process_packages_batch(self, packages, tqdm_initial, tqdm_desc, tqdm_colour, downloaded_before_res, failed_before_res):
-        with ThreadPoolExecutor(max_workers=self.max_threads, thread_name_prefix="t") as executor:
-            try:
-                futures = [executor.submit(self.process_package, pkg_id) for pkg_id in packages]
-                for future in tqdm(as_completed(futures), total=len(futures) + tqdm_initial, initial=tqdm_initial, desc=tqdm_desc, colour=tqdm_colour):
-                    future.result()
+        if self.max_threads == 1:
+            for _, pkg_id in enumerate(tqdm(packages, total=len(packages) + tqdm_initial, initial=tqdm_initial, desc=tqdm_desc, colour=tqdm_colour)):
+                self.process_package(pkg_id)
+        else:
+            with ThreadPoolExecutor(max_workers=self.max_threads, thread_name_prefix="t") as executor:
+                try:
+                    futures = [executor.submit(self.process_package, pkg_id) for pkg_id in packages]
+                    for future in tqdm(as_completed(futures), total=len(futures) + tqdm_initial, initial=tqdm_initial, desc=tqdm_desc, colour=tqdm_colour):
+                        future.result()
 
-            except KeyboardInterrupt:
-                logger(None, "=" * 80, level="print")
-                logger("WARNING", "Interrupt received, terminating all threads immediately", level="print")
-                logger(None, "=" * 80, level="print")
+                except KeyboardInterrupt:
+                    logger(None, "=" * 80, level="print")
+                    logger("WARNING", "Interrupt received, terminating all threads immediately", level="print")
+                    logger(None, "=" * 80, level="print")
 
-                resume_data, downloaded_after_res, failed_after_res, _ = utils.recover_resume(save_path=self.save_path, accepted_types=self.data_types)
-                self.log_run_summary(downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, resume_data)
-                os._exit(1)
+                    resume_data, downloaded_after_res, failed_after_res, _ = utils.recover_resume(save_path=self.save_path, accepted_types=self.data_types)
+                    self.log_run_summary(downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, resume_data)
+                    os._exit(1)
 
     # ==============================
 
@@ -323,31 +327,36 @@ class OpenDataCrawler():
                     return
 
             logger("WORK", f"Processing {len(package['resources'])} resources from package '{pkg_id}' ('{metadata_path}')...", indent=log_indent-1)
-            with ThreadPoolExecutor(max_workers=self.max_resource_threads, thread_name_prefix=f"{threading.current_thread().name}") as executor:
-                futures = []
-                for file_name, resource in package["resources"].items():
-                    if utils.is_completed(package, file_name, unavailable=True):
-                        continue
+            resources_to_process = []
+            for file_name, resource in package["resources"].items():
+                if utils.is_completed(package, file_name, unavailable=True):
+                    continue
 
-                    if self.avoid_data:
-                        logger("SKIP", f"Skipping resource '{file_name}' (avoid_data)...", indent=log_indent)
-                        continue
+                if self.avoid_data:
+                    logger("SKIP", f"Skipping resource '{file_name}' (avoid_data)...", indent=log_indent)
+                    continue
 
-                    media_type = resource.get("mediaType")
-                    if not media_type:
-                        logger("WARNING", f"Missing media type for resource '{file_name}' in package '{metadata_file_name}', skipping...", indent=log_indent)
-                        continue
+                media_type = resource.get("mediaType")
+                if not media_type:
+                    logger("WARNING", f"Missing media type for resource '{file_name}' in package '{metadata_file_name}', skipping...", indent=log_indent)
+                    continue
 
-                    ext = file_name.split(".")[-1].lower() if "." in file_name else None
-                    if self.data_types and ext and ext not in self.data_types:
-                        logger("SKIP", f"Skipping resource '{file_name}' (media type '{media_type}' with extension '.{ext}' not in accepted types)", indent=log_indent)
-                        continue
+                ext = file_name.split(".")[-1].lower() if "." in file_name else None
+                if self.data_types and ext and ext not in self.data_types:
+                    logger("SKIP", f"Skipping resource '{file_name}' (media type '{media_type}' with extension '.{ext}' not in accepted types)", indent=log_indent)
+                    continue
 
-                    futures.append(executor.submit(self.process_resource, resource, package, metadata_path))
+                resources_to_process.append((file_name, resource))
 
-                for future in futures:
-                    future.result()
-
+            if self.max_resource_threads == 1:
+                for file_name, resource in resources_to_process:
+                    self.process_resource(resource, package, metadata_path)
+            else:
+                with ThreadPoolExecutor(max_workers=self.max_resource_threads, thread_name_prefix=f"{threading.current_thread().name}") as executor:
+                    futures = [executor.submit(self.process_resource, resource, package, metadata_path) for _, resource in resources_to_process]
+                    for future in futures:
+                        future.result()
+                        
             self.save_metadata(package)
 
             del package, metadata_path

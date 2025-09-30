@@ -1,12 +1,9 @@
 import requests
-from requests import Request
 import os
 import json
+import re
 from tqdm import tqdm
-from concurrent.futures import ThreadPoolExecutor
-import threading
 from datetime import datetime, date, timedelta
-import xml.etree.ElementTree as ET
 from opendatacrawler import utils
 from opendatacrawler.setup_logger import log_manager
 logger = log_manager.log
@@ -57,15 +54,16 @@ class ZenodoCrawler():
                     break
 
                 last_max_date = max_date
-
                 total_hours = ((max_date - last_date).days * 24) + (24 - last_hour)
-                with tqdm(total=total_hours, desc=f"Fetching packages...", colour="blue") as pbar:
+                with tqdm(total=total_hours, desc="Fetching packages...", colour="blue") as pbar:
                     while last_date <= max_date:
+                        last_successful_hour = None
                         for hour in range(last_hour, 24):
                             hour_start = f"{last_date}T{hour:02d}:00:00Z"
                             hour_end = f"{last_date}T{hour:02d}:59:59Z"
 
                             page = 1
+                            
                             while True:
                                 params = {
                                     "page": page,
@@ -83,7 +81,8 @@ class ZenodoCrawler():
                                 hits = response.json().get("hits", {}).get("hits", [])
                                 if not hits:
                                     break
-
+                                
+                                last_successful_hour = hour
                                 for record in hits:
                                     if record["id"] not in ids:
                                         ids.add(record["id"])
@@ -93,12 +92,23 @@ class ZenodoCrawler():
 
                                 page += 1
 
+                            if last_date == max_date and last_successful_hour is not None:
+                                last_hour = last_successful_hour - 1 if last_successful_hour > 0 else 0
+                            else:
+                                last_hour = 0
+
                             state = {
                                 "lastDate": last_date.isoformat(),
-                                "lastHour": hour + 1 if hour < 23 else 0,
+                                "lastHour" : last_hour, 
                                 "totalIds": len(ids),
                                 "ids": list(ids)
                             }
+
+                            if last_date == max_date and last_successful_hour is not None:
+                                state["lastHour"] = last_successful_hour
+                            else:
+                                state["lastHour"] = hour + 1 if hour < 23 else 0
+
                             with open(utils.ZENODO_STATE_FILE, "w", encoding="utf-8") as f:
                                 json.dump(state, f, indent=2)
 
@@ -132,7 +142,6 @@ class ZenodoCrawler():
             resource["name"] = resource_meta.get("key", None)
 
             resource["downloadURL"] = utils.fix_url(resource_meta.get("links", {}).get("self", None))
-            print(resource)
             if not resource["downloadURL"]:
                 print(resource_meta)
                 return None, None
@@ -142,7 +151,7 @@ class ZenodoCrawler():
                 ext = meta_media_type.split(".")[-1].lower() if "." in meta_media_type else None
                 meta_media_type = utils.EXT_TO_MIME.get(ext)
 
-        response, self.user_agent, error_tag, e = utils.make_request(resource["downloadURL"], self.user_agent, return_tag=True, max_sec=self.max_sec)
+        response, self.user_agent, error_tag, e = utils.make_request(resource["downloadURL"], self.user_agent, return_tag=True, max_sec=self.max_sec, stream=True)
         if not response:
             if error_tag:
                 if error_tag != "resource_temporarily_unavailable":
@@ -176,6 +185,8 @@ class ZenodoCrawler():
         url = utils.fix_url(f"{self.domain}/api/records/{package_id}")
 
         headers = {
+            "Accept": "application/json",
+            "Connection": "keep-alive",
             "Authorization": f"Bearer {self.token}"
         }
 
@@ -213,7 +224,18 @@ class ZenodoCrawler():
         metadata["publisher"] = data.get("metadata", {}).get("creators", {})
 
         metadata["language"] = data.get("metadata", {}).get("language", {})
-        metadata["keyword"] = data.get("metadata", {}).get("keywords", {})
+
+        keywords = data.get("metadata", {}).get("keywords", [])
+        if isinstance(keywords, str):
+            print(keywords)
+            keywords_list = []
+            for keyword in re.split(r"[;]", keywords):
+                keyword = keyword.strip()
+                if keyword:
+                    keywords_list.append(keyword)
+            metadata["keyword"] = keywords_list
+        else:
+            metadata["keyword"] = keywords
 
         #metadata["theme"] = []
         #metadata["accrualPeriodicity"] = None
@@ -239,133 +261,4 @@ class ZenodoCrawler():
 
         metadata["dataRaw"] = data
 
-    def parse_resource_oai(self, resource_meta, base_name, metadata_file_name, reparse_data=None):
-        resource_crawler_info = utils.init_metadata(resource=True)
-
-        if reparse_data:
-            logger("...", f"Re-parsing resource '{base_name}' from package '{metadata_file_name}'...", indent=4)
-            resource = resource_meta
-            meta_media_type = reparse_data.get("metaMediaType")
-        else:
-            logger("...", f"Parsing resource '{base_name}' from package '{metadata_file_name}'...", indent=4)
-            resource = {}
-            resource["fileName"] = base_name
-
-            download_url = resource_meta.find("dcat:downloadURL", self.ns)
-            resource["downloadURL"] = download_url.attrib.get(f"{{{self.ns['rdf']}}}resource") if download_url else None
-            if not resource["downloadURL"]:
-                return None, None
-
-            meta_media_type = resource_meta.find("dcat:mediaType", self.ns)
-            meta_media_type = meta_media_type.text if meta_media_type else None
-
-        response, self.user_agent, error_tag, e = utils.make_request(resource["downloadURL"], self.user_agent, return_tag=True, max_sec=self.max_sec)
-        if not response:
-            if error_tag:
-                if error_tag != "resource_temporarily_unavailable":
-                    resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag))
-                    logger("WARNING", f"Non-retryable error accessing resource '{base_name}' for parsing", e, indent=4)
-                    resource_crawler_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
-                else:
-                    resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag, {"<metaMediaType>": meta_media_type}))
-                    logger("WARNING", f"Retryable error accessing resource '{base_name}' for parsing", e, indent=4)
-            else:
-                logger("ERROR", f"Error accessing resource '{base_name}'", e, indent=4)
-            
-            return resource, resource_crawler_info
-
-        media_type, file_name, tag_val = utils.resolve_mediatype_conflict(meta_media_type, response, base_name)
-        resource["mediaType"] = media_type
-        resource["fileName"] = file_name
-
-        if tag_val:
-            logger("WARNING", f"Detected a media type mismatch for file '{resource['downloadURL']}' '{base_name}'", indent=4)
-            resource_crawler_info["fileMetadataChanges"].update(utils.add_tag_explanations("mimetype_mismatch", tag_val))
-
-        if reparse_data:
-            logger("OK", f"Successfully re-parsed resource '{resource["fileName"]}' from package '{metadata_file_name}'", indent=4)
-        else:
-            logger("OK", f"Successfully parsed resource '{resource["fileName"]}' from package '{metadata_file_name}'", indent=4)
-
-        return resource, resource_crawler_info
-
-    def get_package_oai(self, package_id, metadata_file_name):
-        url = utils.fix_url(f"{self.domain}/oai2d")
-        params = {
-            "verb": "GetRecord",
-            "metadataPrefix": "dcat",
-            "identifier": f"oai:zenodo.org:{package_id}"
-        }
-
-        metadata = utils.init_metadata()
-        metadata["identifier"] = package_id
-        metadata["requestURL"] = Request("GET", url, params=params).prepare().url
-
-        metadata["fileName"] = metadata_file_name
-        metadata["img"] = "https://zenodo.org/static/images/invenio-rdm.svg"
-
-        response, self.user_agent, error_tag, e = utils.make_request(url, self.user_agent, params=params, return_tag=True)
-        if not response:
-            if error_tag:
-                if error_tag != "resource_temporarily_unavailable":
-                    logger("WARNING", f"Non-retryable error accessing package '{package_id}' ('{metadata_file_name}')", e, indent=2)
-                    metadata["crawlerInfo"]["packageInfo"].update(utils.add_tag_explanations(error_tag))
-                    metadata["crawlerInfo"]["packageStatus"]["packageCompleted"] = datetime.now().isoformat()
-                    return metadata
-                else:
-                    logger("WARNING", f"Retryable error accessing package '{package_id}' ('{metadata_file_name}')", e, indent=2)
-            else:
-                logger("ERROR", f"Error accessing package '{package_id}' ('{metadata_file_name}')", e, indent=2)
-            return None
-
-        data = ET.fromstring(response.text).find(".//rdf:Description", self.ns)
-
-        title =  data.find("dct:title", self.ns)
-        metadata["title"] = title.text if title else None
-
-        description = data.find("dct:description", self.ns)
-        metadata["description"] = description.text if description else None
-
-        distributions = data.findall("dcat:distribution", self.ns)
-        if not isinstance(distributions, list):
-            distributions = [distributions]
-
-        publisher = data.find("dct:publisher/foaf:Agent/foaf:name", self.ns)
-        metadata["publisher"] = publisher.text if publisher is not None else None
-
-        language = data.find("dct:language", self.ns)
-        metadata["language"] = language.split("/")[-1] if language else None
-
-        keywords = [keyword.text for keyword in data.findall("dcat:keyword", self.ns) if keyword.text]
-        subjects = [subject.text for subject in data.findall("dct:subject", self.ns) if subject.text]
-        metadata["keyword"] = keywords + subjects
-
-        metadata["theme"] = []
-        metadata["accrualPeriodicity"] = None
-
-        metadata["modified"] = None
-        metadata["issued"] = None
-
-        metadata["license"] = None
-
-        metadata["source"] = self.domain
-
-        metadata["temporal"] = None
-
-        metadata["spatial"] = None
-
-        if distributions:
-            logger("...", f"Parsing {len(distributions)} resources from package '{package_id}' ('{metadata_file_name}')...", indent=3)
-            metadata["resources"] = {}
-            with ThreadPoolExecutor(max_workers=8, thread_name_prefix=f"{threading.current_thread().name}") as executor:
-                futures = []
-                for idx, resource in enumerate(distributions):
-                    futures.append(executor.submit(self.parse_resource_oai, resource, utils.generate_short_filename(f"{metadata['fileName']}_{idx}"), metadata_file_name))
-
-                for future in futures:
-                    resource_meta, resource_crawler_info = future.result()
-                    if resource_meta and resource_crawler_info:
-                        metadata["resources"][resource_meta["fileName"]] = resource_meta
-                        metadata["crawlerInfo"]["resourcesInfo"][resource_meta["fileName"]] = resource_crawler_info
-
-        metadata["dataRaw"] = data.text
+        return metadata

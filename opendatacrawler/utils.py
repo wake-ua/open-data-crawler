@@ -113,18 +113,12 @@ def make_request(url, current_agent, headers=None, params=None, max_sec=None, st
     all_forbidden = True
     for user_agent in get_user_agent_list(current_agent):
         headers["User-Agent"] = user_agent
-
         while True:
-            print("e")
             try:
                 response = requests.get(url, headers=headers, params=params, verify=False, timeout=max_sec, stream=stream)
-                if response:
-                    print(response)
-                    print(response.text)
-                else:
-                    print(None)
+
                 if response.status_code == 403:
-                    # logger("NET", f"Forbidden with User-Agent '{user_agent}' (HTTP 403 - Forbidden), trying next one...")
+                    #logger("NET", f"Forbidden with User-Agent '{user_agent}' (HTTP 403 - Forbidden), trying next one...")
                     break
                 elif response.status_code == 429:
                     logger("NET", f"Too Many Requests (HTTP 429 - Too Many Requests), retrying with same User-Agent after {sleep_time}s", indent=2)
