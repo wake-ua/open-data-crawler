@@ -227,15 +227,16 @@ class ZenodoCrawler():
 
         keywords = data.get("metadata", {}).get("keywords", [])
         if isinstance(keywords, str):
-            print(keywords)
-            keywords_list = []
-            for keyword in re.split(r"[;]", keywords):
-                keyword = keyword.strip()
-                if keyword:
-                    keywords_list.append(keyword)
-            metadata["keyword"] = keywords_list
-        else:
-            metadata["keyword"] = keywords
+            keywords = [keywords]
+        keywords_list = []
+        if isinstance(keywords, list):
+            for item in keywords:
+                if isinstance(item, str):
+                    for keyword in re.split(r"[;,]", item):
+                        kw = keyword.strip()
+                        if kw:
+                            keywords_list.append(kw)
+        metadata["keyword"] = keywords_list
 
         #metadata["theme"] = []
         #metadata["accrualPeriodicity"] = None
