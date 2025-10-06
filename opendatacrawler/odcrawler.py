@@ -106,9 +106,9 @@ class OpenDataCrawler():
             if cls:
                 try:
                     self.dms_instance = cls(self.domain, self.user_agent, self.max_sec)
-                    if self.domain in ["https://zenodo.org/"]:
-                        self.max_threads = 1
-                        self.max_resource_threads = 1
+                    #if self.domain in ["https://zenodo.org/"]:
+                        #self.max_threads = 1
+                        #self.max_resource_threads = 1
                 except Exception:
                     logger("ERROR", f"Error instantiating DMS class for '{self.dms}'", f"\n{traceback.format_exc()}")
         else:
@@ -150,25 +150,43 @@ class OpenDataCrawler():
                      f"{len(downloaded_after_res)} successfully downloaded resources in total across {len(resume_data)} packages "
                      f"({len(failed_after_res)} failed resources in total)", level="print")
 
-    def process_packages_batch(self, packages, tqdm_initial, tqdm_desc, tqdm_colour, downloaded_before_res, failed_before_res):
-        if self.max_threads == 1:
-            for _, pkg_id in enumerate(tqdm(packages, total=len(packages) + tqdm_initial, initial=tqdm_initial, desc=tqdm_desc, colour=tqdm_colour)):
-                self.process_package(pkg_id)
+    def run_threaded_function(self, items, func, max_workers=1, thread_name_prefix=None, use_tqdm=False, tqdm_initial=0, tqdm_desc="", tqdm_colour=None):
+        results = []
+        if max_workers == 1:
+            iterable = items
+            if use_tqdm:
+                iterable = tqdm(items, total=len(items) + tqdm_initial, initial=tqdm_initial, desc=tqdm_desc, colour=tqdm_colour)
+            for item in iterable:
+                results.append(func(item))
         else:
-            with ThreadPoolExecutor(max_workers=self.max_threads, thread_name_prefix="t") as executor:
-                try:
-                    futures = [executor.submit(self.process_package, pkg_id) for pkg_id in packages]
-                    for future in tqdm(as_completed(futures), total=len(futures) + tqdm_initial, initial=tqdm_initial, desc=tqdm_desc, colour=tqdm_colour):
-                        future.result()
+            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=f"{thread_name_prefix}") as executor:
+                futures = [executor.submit(func, item) for item in items]
+                if use_tqdm:
+                    futures_iter = tqdm(as_completed(futures), total=len(futures) + tqdm_initial, initial=tqdm_initial, desc=tqdm_desc, colour=tqdm_colour)
+                else:
+                    futures_iter = as_completed(futures)
+                for future in futures_iter:
+                    results.append(future.result())
+        return results
 
-                except KeyboardInterrupt:
-                    logger(None, "=" * 80, level="print")
-                    logger("WARNING", "Interrupt received, terminating all threads immediately", level="print")
-                    logger(None, "=" * 80, level="print")
+    def process_packages_batch(self, packages, tqdm_initial, tqdm_desc, tqdm_colour, downloaded_before_res, failed_before_res):
+        try:
+            self.run_threaded_function(
+                items=packages, func=lambda pkg_id: self.process_package(pkg_id),
+                max_workers=self.max_threads, thread_name_prefix="t",
+                use_tqdm=True, tqdm_desc=tqdm_desc, tqdm_colour=tqdm_colour, tqdm_initial=tqdm_initial
+            )
+        except KeyboardInterrupt:
+            logger(None, "=" * 80, level="print")
+            if self.max_threads == 1:
+                logger("WARNING", "Interrupt received, terminating execution", level="print")
+            else:
+                logger("WARNING", "Interrupt received, terminating all threads immediately", level="print")
+            logger(None, "=" * 80, level="print")
 
-                    resume_data, downloaded_after_res, failed_after_res, _ = utils.recover_resume(save_path=self.save_path, accepted_types=self.data_types)
-                    self.log_run_summary(downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, resume_data)
-                    os._exit(1)
+            resume_data, downloaded_after_res, failed_after_res, _ = utils.recover_resume(save_path=self.save_path, accepted_types=self.data_types)
+            self.log_run_summary(downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, resume_data)
+            os._exit(1)
 
     # ==============================
 
@@ -268,32 +286,50 @@ class OpenDataCrawler():
             if utils.is_completed(package, file_name, complete=False, unavailable=True)
         ]
 
-        if missing_resources:
-            logger("...", f"Re-parsing {len(missing_resources)} temporarily unavailable resources...", indent=log_indent)
-            for old_file_name in missing_resources:
-                resource_meta = package["resources"].get(old_file_name)
-                info = package["crawlerInfo"]["resourcesInfo"].get(old_file_name, {})
+        def reparse_resource(old_file_name):
+            resource_meta = package["resources"].get(old_file_name)
+            info = package["crawlerInfo"]["resourcesInfo"].get(old_file_name, {})
 
-                tag_info = info.get("fileInfo", {}).get("resource_temporarily_unavailable", {})
-                tag_values = tag_info.get("values", {})
+            tag_info = info.get("fileInfo", {}).get("resource_temporarily_unavailable", {})
+            tag_values = tag_info.get("values", {})
 
-                if resource_meta and tag_values:
-                    new_resource, new_info = self.parse_resource(resource_meta, old_file_name, package["fileName"], reparse_data=tag_values)
-                    new_file_name = new_resource["fileName"]
+            if resource_meta and tag_values:
+                new_resource, new_info = self.parse_resource(resource_meta, old_file_name, package["fileName"], reparse_data=tag_values)
+                new_file_name = new_resource["fileName"]
 
-                    if new_file_name != old_file_name:
-                        logger("FIX", f"Resource name changed from '{old_file_name}' to '{new_file_name}'", indent=log_indent)
-                        package["resources"].pop(old_file_name, None)
-                        package["crawlerInfo"]["resourcesInfo"].pop(old_file_name, None)
+                if new_file_name != old_file_name:
+                    logger("FIX", f"Resource name changed from '{old_file_name}' to '{new_file_name}'", indent=log_indent)
+                    package["resources"].pop(old_file_name, None)
+                    package["crawlerInfo"]["resourcesInfo"].pop(old_file_name, None)
 
-                    package["resources"][new_file_name] = new_resource
-                    package["crawlerInfo"]["resourcesInfo"][new_file_name] = new_info
+                package["resources"][new_file_name] = new_resource
+                package["crawlerInfo"]["resourcesInfo"][new_file_name] = new_info
 
-                    del new_resource, new_info, new_file_name
-                del old_file_name, resource_meta, info, tag_info, tag_values
                 gc.collect()
 
+        if missing_resources:
+            logger("...", f"Re-parsing {len(missing_resources)} temporarily unavailable resources...", indent=log_indent)
+            self.run_threaded_function(
+                items=missing_resources, func=reparse_resource,
+                max_workers=self.max_resource_threads, thread_name_prefix=threading.current_thread().name
+            )
+
         return package
+
+    def parse_and_update_resource(self, item, package):
+        old_file_name, resource = item
+        resource_meta, resource_crawler_info = self.parse_resource(
+            resource, old_file_name, package["fileName"], reparse_data=None
+        )
+
+        new_file_name = resource_meta["fileName"]
+
+        if new_file_name != old_file_name:
+            package["resources"].pop(old_file_name, None)
+            package["crawlerInfo"]["resourcesInfo"].pop(old_file_name, None)
+
+        package["resources"][new_file_name] = resource_meta
+        package["crawlerInfo"]["resourcesInfo"][new_file_name] = resource_crawler_info
 
     def process_package(self, pkg_id, log_indent=1):
         metadata_file_name = f"meta_{utils.generate_short_filename(f'{self.domain}_{pkg_id}')}.json"
@@ -327,13 +363,23 @@ class OpenDataCrawler():
                     return
 
             logger("WORK", f"Processing {len(package['resources'])} resources from package '{pkg_id}' ('{metadata_path}')...", indent=log_indent-1)
+            resources_to_parse = [
+                (file_name, resource) for file_name, resource in package["resources"].items()
+                if not package["crawlerInfo"]["resourcesInfo"].get(file_name, {}).get("fileStatus", {}).get("fileCrawled")
+            ]
+
+            if resources_to_parse:
+                self.run_threaded_function(
+                    items=resources_to_parse, func=lambda item: self.parse_and_update_resource(item, package),
+                    max_workers=self.max_resource_threads, thread_name_prefix=threading.current_thread().name
+                )
+
             resources_to_process = []
             for file_name, resource in package["resources"].items():
                 if utils.is_completed(package, file_name, unavailable=True):
                     continue
 
                 if self.avoid_data:
-                    logger("SKIP", f"Skipping resource '{file_name}' (avoid_data)...", indent=log_indent)
                     continue
 
                 media_type = resource.get("mediaType")
@@ -348,17 +394,12 @@ class OpenDataCrawler():
 
                 resources_to_process.append((file_name, resource))
 
-            if self.max_resource_threads == 1:
-                for file_name, resource in resources_to_process:
-                    self.process_resource(resource, package, metadata_path)
-            else:
-                with ThreadPoolExecutor(max_workers=self.max_resource_threads, thread_name_prefix=f"{threading.current_thread().name}") as executor:
-                    futures = [executor.submit(self.process_resource, resource, package, metadata_path) for _, resource in resources_to_process]
-                    for future in futures:
-                        future.result()
-                        
-            self.save_metadata(package)
+            self.run_threaded_function(
+                items=resources_to_process, func=lambda item: self.process_resource(item[1], package, metadata_path),
+                max_workers=self.max_resource_threads, thread_name_prefix=threading.current_thread().name
+            )
 
+            self.save_metadata(package)
             del package, metadata_path
             gc.collect()
 

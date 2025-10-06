@@ -1064,8 +1064,8 @@ def extract_first_nonempty_value(field):
 
 # == crawlerChangesInfo functions ==
 
-def init_metadata(resource=False):
-    if not resource:
+def init_metadata(package=True, crawled=True):
+    if package:
         return {
             "crawlerInfo": {
                 "packageInfo" : {},
@@ -1076,14 +1076,15 @@ def init_metadata(resource=False):
             }
         }
     else:
-        return {
+        base = {
             "fileMetadataChanges": {},
             "binaryFileChanges": {},
             "fileInfo": {},
-            "fileStatus": {
-                "fileCrawled": datetime.now().isoformat()
-            }
+            "fileStatus": {}
         }
+        if crawled:
+            base["fileStatus"]["fileCrawled"] = datetime.now().isoformat()
+        return base
 
 def add_tag_explanations(tags, data_source=None):
     if isinstance(tags, dict):

@@ -69,10 +69,12 @@ Open Data Crawler is a tool designed to extract datasets, and optionally their m
 ### Currently Supported Portals and Sites
 - [x] [datos.gob.es](https://datos.gob.es)
 - [x] CKAN
+- [x] [Zenodo](https://zenodo.org/)
 - [ ] Socrata *
 - [ ] [Eurostat](https://ec.europa.eu/eurostat) *
 - [ ] [World Bank Data Catalog](https://datacatalogapi.worldbank.org/) *
 - [ ] OpenDataSoft *
+- [ ] [INE (Instituto Nacional de Estadística)](https://www.ine.es/)
 
 \* Works with restrictions or download limitations  
 

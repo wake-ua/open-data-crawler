@@ -32,7 +32,7 @@ def main():
                         help="Maximum number of threads to use (default: based on CPU count, up to 32)")
     parser.add_argument("-mrt", "--max_resource_threads", type=int, required=False,
                         help="Maximum number of threads to use per package for processing resources (default: 4)")
-    parser.add_argument("--reset-domain", required=False, action=argparse.BooleanOptionalAction,
+    parser.add_argument("-rd", "--reset-domain", required=False, action=argparse.BooleanOptionalAction,
                         help="Delete all data and logs for the specified domain before crawling")
 
     args = vars(parser.parse_args())
@@ -91,7 +91,7 @@ def main():
             if resume_data:
                 logger("OK", f"Loaded resume with {len(resume_data)} packages and {len(downloaded_before_res)} downloaded resources", level="print")
                 if failed_before_pkgs:
-                    logger("...", f"Reattempting {len(failed_before_pkgs)} packages with {len(failed_before_res)} failed resources of accepted types ({d_types})...", level="print")
+                    logger("...", f"Reattempting {len(failed_before_pkgs)} packages with {len(failed_before_res)} failed resources of accepted types ({", ".join(f".{ext}" for ext in d_types)})...", level="print")
                 logger(None, "=" * 80, level="print")
 
             logger("...", f"Obtaining packages from '{url}'...", level="print")
@@ -105,9 +105,9 @@ def main():
                 new_packages = new_packages[:max_packages]
 
             if new_packages or failed_packages:
-                if crawler.domain in ["https://zenodo.org/"]:
-                    logger("WARNING", f"Parallel processing for domain '{crawler.domain}' disabled due to API rate limits", level="print")
-                    logger(None, "=" * 80, level="print")
+                #if crawler.domain in ["https://zenodo.org/"]:
+                    #logger("WARNING", f"Parallel processing for domain '{crawler.domain}' disabled due to API rate limits", level="print")
+                    #logger(None, "=" * 80, level="print")
 
                 total_to_process = len(new_packages) + len(failed_packages)
                 if failed_packages:

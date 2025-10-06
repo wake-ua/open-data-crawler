@@ -42,7 +42,7 @@ class CkanCrawler():
         return ids
 
     def parse_resource(self, resource_meta, base_name, metadata_file_name, reparse_data=None):
-        resource_crawler_info = utils.init_metadata(resource=True)
+        resource_crawler_info = utils.init_metadata(package=False)
 
         if reparse_data:
             logger("...", f"Re-parsing resource '{base_name}' from package '{metadata_file_name}'...", indent=4)
@@ -200,16 +200,12 @@ class CkanCrawler():
                 metadata["geo"] = geo
 
         if distributions:
-            logger("...", f"Parsing {len(distributions)} resources from package '{package_id}' ('{metadata_file_name}')...", indent=3)
             metadata["resources"] = {}
-            with ThreadPoolExecutor(max_workers=8, thread_name_prefix=f"{threading.current_thread().name}") as executor:
-                futures = []
-                for idx, resource in enumerate(distributions):
-                    futures.append(executor.submit(self.parse_resource, resource, utils.generate_short_filename(f"{metadata['fileName']}_{idx}"), metadata_file_name))
-
-                for future in futures:
-                    resource_meta, resource_crawler_info = future.result()
-                    metadata["resources"][resource_meta["fileName"]] = resource_meta
-                    metadata["crawlerInfo"]["resourcesInfo"][resource_meta["fileName"]] = resource_crawler_info
+            metadata["crawlerInfo"]["resourcesInfo"] = {}
+            for idx, resource in enumerate(distributions):
+                base_name = utils.generate_short_filename(f"{metadata['fileName']}_{idx}")
+                resource["fileName"] = base_name
+                metadata["resources"][base_name] = resource
+                metadata["crawlerInfo"]["resourcesInfo"][base_name] = utils.init_metadata(package=False, crawled=False)
 
         return metadata

@@ -127,7 +127,7 @@ class ZenodoCrawler():
         return list(ids)
 
     def parse_resource(self, resource_meta, base_name, metadata_file_name, reparse_data=None):
-        resource_crawler_info = utils.init_metadata(resource=True)
+        resource_crawler_info = utils.init_metadata(package=False)
 
         if reparse_data:
             logger("...", f"Re-parsing resource '{base_name}' from package '{metadata_file_name}'...", indent=4)
@@ -252,13 +252,13 @@ class ZenodoCrawler():
         #metadata["spatial"] = None
 
         if distributions:
-            logger("...", f"Parsing {len(distributions)} resources from package '{package_id}' ('{metadata_file_name}')...", indent=3)
             metadata["resources"] = {}
+            metadata["crawlerInfo"]["resourcesInfo"] = {}
             for idx, resource in enumerate(distributions):
-                resource_meta, resource_crawler_info = self.parse_resource(resource, utils.generate_short_filename(f"{metadata['fileName']}_{idx}"), metadata_file_name)
-                if resource_meta and resource_crawler_info:
-                    metadata["resources"][resource_meta["fileName"]] = resource_meta
-                    metadata["crawlerInfo"]["resourcesInfo"][resource_meta["fileName"]] = resource_crawler_info
+                base_name = utils.generate_short_filename(f"{metadata['fileName']}_{idx}")
+                resource["fileName"] = base_name
+                metadata["resources"][base_name] = resource
+                metadata["crawlerInfo"]["resourcesInfo"][base_name] = utils.init_metadata(package=False, crawled=False)
 
         metadata["dataRaw"] = data
 

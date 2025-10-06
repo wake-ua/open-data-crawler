@@ -46,7 +46,7 @@ class DatosGobEsCrawler():
 
     def parse_resource(self, resource_meta, base_name, reparse=None):
         resource = {}
-        resource_crawler_info = utils.init_metadata(resource=True)
+        resource_crawler_info = utils.init_metadata(package=False)
 
         resource["name"] = utils.extract_multilang_field(resource_meta.get("title", []), "_lang", "_value")
 
@@ -133,11 +133,13 @@ class DatosGobEsCrawler():
 
         metadata["geo"] = utils.extract_mapped_field(data.get("spatial"), utils.DATOSGOBESCRAWLER_SPATIAL_MAP)
 
-        metadata["resources"] = {}
-        for idx, resource in enumerate(distributions):
-            resource_meta, resource_crawler_info = self.parse_resource(resource, utils.generate_short_filename(f"{metadata['fileName']}_{idx}"))
-
-            metadata["resources"][resource_meta["fileName"]] = resource_meta
-            metadata["crawlerInfo"]["resourcesInfo"][resource_meta["fileName"]] = resource_crawler_info
+        if distributions:
+            metadata["resources"] = {}
+            metadata["crawlerInfo"]["resourcesInfo"] = {}
+            for idx, resource in enumerate(distributions):
+                base_name = utils.generate_short_filename(f"{metadata['fileName']}_{idx}")
+                resource["fileName"] = base_name
+                metadata["resources"][base_name] = resource
+                metadata["crawlerInfo"]["resourcesInfo"][base_name] = utils.init_metadata(package=False, crawled=False)
 
         return metadata
