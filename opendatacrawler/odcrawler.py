@@ -14,12 +14,13 @@ from opendatacrawler import utils
 from opendatacrawler.datosgobescrawler import DatosGobEsCrawler
 from opendatacrawler.ckancrawler import CkanCrawler
 from opendatacrawler.zenodocrawler import ZenodoCrawler
+from opendatacrawler.gbifcrawler import GbifCrawler
 from opendatacrawler.setup_logger import log_manager
 logger = log_manager.log
 
 class OpenDataCrawler():
     def __init__(self, domain, path=None, data_types=None, categories=None, partial=False, avoid_data=None, max_sec=None, max_threads=None, max_resource_threads=None):
-        self.domain = domain
+        self.domain = domain.rstrip("/")
         self.dms = None
         self.dms_instance = None
         self.max_sec = max_sec
@@ -53,6 +54,7 @@ class OpenDataCrawler():
             #"WorldBank": "/ddhxext/DatasetList",
             #"EuroStat": "/estat-navtree-portlet-prod/BulkDownloadListing?sort=1&dir=metadata",
             "Zenodo": "/oai2d?verb=Identify",
+            "GBIF" : "/v1/dataset/search?limit=1&offset=0",
             "OpenDataSoft": "/api/v2/catalog",
             "INE": "/wstempus/js/ES/OPERACIONES_DISPONIBLES"
         }
@@ -96,6 +98,7 @@ class OpenDataCrawler():
             #"EuroStat": EurostatCrawler,
             "datosGobEs": DatosGobEsCrawler,
             "Zenodo": ZenodoCrawler,
+            "GBIF" : GbifCrawler,
             #"OpenDataSoft": OpenDataSoftCrawler,
             #"INE": INECrawler,
             #"dataEuropa": DataEuropaCrawler
@@ -106,8 +109,8 @@ class OpenDataCrawler():
             if cls:
                 try:
                     self.dms_instance = cls(self)
-                    #if self.domain in ["https://zenodo.org/"]:
-                        #self.max_threads = 1
+                    if self.domain in ["https://zenodo.org/"]:
+                        self.max_threads = 1
                         #self.max_resource_threads = 1
                 except Exception:
                     logger("ERROR", f"Error instantiating DMS class for '{self.dms}'", f"\n{traceback.format_exc()}")
@@ -161,12 +164,18 @@ class OpenDataCrawler():
         else:
             with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=f"{thread_name_prefix}") as executor:
                 futures = [executor.submit(func, item) for item in items]
-                if use_tqdm:
-                    futures_iter = tqdm(as_completed(futures), total=len(futures) + tqdm_initial, initial=tqdm_initial, desc=tqdm_desc, colour=tqdm_colour)
-                else:
-                    futures_iter = as_completed(futures)
-                for future in futures_iter:
-                    results.append(future.result())
+                try:
+                    if use_tqdm:
+                        futures_iter = tqdm(as_completed(futures), total=len(futures) + tqdm_initial, initial=tqdm_initial, desc=tqdm_desc, colour=tqdm_colour)
+                    else:
+                        futures_iter = as_completed(futures)
+                    for future in futures_iter:
+                        results.append(future.result())
+                except KeyboardInterrupt:
+                    for f in futures:
+                        f.cancel()
+                    executor.shutdown(wait=False)
+                    raise
         return results
 
     def process_packages_batch(self, packages, tqdm_initial, tqdm_desc, tqdm_colour, downloaded_before_res, failed_before_res):
@@ -363,7 +372,7 @@ class OpenDataCrawler():
 
             if not package.get("resources"):
                 logger("WARNING", f"No distributions found in package metadata '{pkg_id}' ('{metadata_path}')", indent=log_indent)
-                package["crawlerInfo"]["packageInfo"].update(utils.add_tag_explanations("no_resources"))
+                package["crawlerInfo"]["packageInfo"].update(utils.add_tag_explanations("missing_distributions"))
                 package["crawlerInfo"]["packageStatus"]["packageCompleted"] = datetime.now().isoformat()
                 self.save_metadata(package)
                 return
@@ -500,34 +509,34 @@ class OpenDataCrawler():
                 logger("ERROR", f"Failed to clean tabular file '{dataset_path}'", [e, traceback.format_exc()], indent=log_indent)
                 return False
 
-        try:
-            delimiter, start_row = utils.detect_delimiter(dataset_path, resource["encoding"])
-            if delimiter:
-                resource["delimiter"] = delimiter
+            try:
+                delimiter, start_row = utils.detect_delimiter(dataset_path, resource["encoding"])
+                if delimiter:
+                    resource["delimiter"] = delimiter
 
-                if start_row:
-                    package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["fileInfo"].update(utils.add_tag_explanations("skip_rows", {"<skipped_rows>": start_row}))
-                    dialect = Dialect.from_descriptor({"delimiter": delimiter, "comment_rows": [start_row]})
+                    if start_row:
+                        package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["fileInfo"].update(utils.add_tag_explanations("skip_rows", {"<skipped_rows>": start_row}))
+                        dialect = Dialect.from_descriptor({"delimiter": delimiter, "comment_rows": [start_row]})
+                    else:
+                        dialect = Dialect.from_descriptor({"delimiter": delimiter})
+
+                    try:
+                        resource_metadata = describe(dataset_path, encoding=resource["encoding"], dialect=dialect).to_dict()
+                        resource["schema"] = resource_metadata.get("schema")
+                        logger("OK", f"Schema extracted from '{dataset_path}' (encoding: '{resource['encoding']}', delimiter: '{delimiter}', start_row: {start_row})", indent=4)
+                    except Exception as e:
+                        logger("ERROR", f"Failed to extract schema from file '{dataset_path}'", [e, traceback.format_exc()], indent=log_indent)
+                        return False
+
+                    del delimiter, start_row, resource_metadata, dialect
+                    gc.collect()
                 else:
-                    dialect = Dialect.from_descriptor({"delimiter": delimiter})
-
-                try:
-                    resource_metadata = describe(dataset_path, encoding=resource["encoding"], dialect=dialect).to_dict()
-                    resource["schema"] = resource_metadata.get("schema")
-                    logger("OK", f"Schema extracted from '{dataset_path}' (encoding: '{resource['encoding']}', delimiter: '{delimiter}', start_row: {start_row})", indent=4)
-                except Exception as e:
-                    logger("ERROR", f"Failed to extract schema from file '{dataset_path}'", [e, traceback.format_exc()], indent=log_indent)
+                    package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["fileInfo"].update(utils.add_tag_explanations("no_delimiter_detected"))
+                    logger("WARNING", f"File '{dataset_path}' appears to not contain a delimiter, likely not a structured/tabular file", indent=log_indent)
                     return False
-
-                del delimiter, start_row, resource_metadata, dialect
-                gc.collect()
-            else:
-                package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["fileInfo"].update(utils.add_tag_explanations("no_delimiter_detected"))
-                logger("WARNING", f"File '{dataset_path}' appears to not contain a delimiter, likely not a structured/tabular file", indent=log_indent)
+            except Exception as e:
+                logger("ERROR", f"Failed to detect delimiter for file '{dataset_path}'", [e, traceback.format_exc()], indent=log_indent)
                 return False
-        except Exception as e:
-            logger("ERROR", f"Failed to detect delimiter for file '{dataset_path}'", [e, traceback.format_exc()], indent=log_indent)
-            return False
 
         resource["size"] = humanize.naturalsize(os.path.getsize(dataset_path))
         package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["fileStatus"]["fileCompleted"] = datetime.now().isoformat()

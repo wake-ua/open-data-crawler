@@ -6,35 +6,41 @@ from datetime import datetime
 from opendatacrawler.setup_logger import log_manager
 logger = log_manager.log
 
-class CkanCrawler():
+class GbifCrawler():
     def __init__(self, odcrawler):
         self.odcrawler = odcrawler
 
     def get_package_list(self):
-        ids = []
-        url = f"{self.odcrawler.domain}/api/3/action/package_list"
+        url = f"{self.odcrawler.domain}/v1/dataset/search?limit=1&offset=0"
+        response, self.odcrawler.user_agent = utils.make_request(url, self.odcrawler.user_agent, max_sec=self.odcrawler.max_sec)
+        if not response:
+            logger("ERROR", f"Error fetching package list from '{self.odcrawler.domain}'")
+            return []
+        
+        limit = 100
+        max_pages = response.json().get("count") // limit + 1
+        offsets = [i * limit for i in range(max_pages)]
 
-        headers = {
-            "Accept": "application/json",
-            "Connection": "keep-alive"
-        }
-
-        try:
-            response, self.odcrawler.user_agent = utils.make_request(url, self.odcrawler.user_agent, headers=headers, max_sec=self.odcrawler.max_sec)
+        def fetch_page(offset):
+            url = f"{self.odcrawler.domain}/v1/dataset/search?limit={limit}&offset={offset}"
+            
+            response, self.odcrawler.user_agent = utils.make_request(url, self.odcrawler.user_agent, max_sec=self.odcrawler.max_sec)
             if not response:
-                logger("ERROR", f"Error fetching package list from '{self.odcrawler.domain}': no working User-Agent found")
-                return ids
+                return []
 
-            response.raise_for_status()
-            ids = response.json().get("result", [])
+            data = response.json()
+            ids = [str(pkg["key"]) for pkg in data.get("results", []) if pkg.get("key")]
 
-            logger("OK", f"Retrieved {len(ids)} packages from '{self.odcrawler.domain}'", level="print")
+            return ids
 
-        except requests.RequestException as e:
-            logger("ERROR", f"Error fetching package list from '{self.odcrawler.domain}'", e)
-        except Exception as e:
-            logger("ERROR", f"Unexpected error parsing response from '{self.odcrawler.domain}'", e)
+        ids_list = self.odcrawler.run_threaded_function(
+            items=offsets, func=fetch_page, max_workers=self.odcrawler.max_threads,
+            use_tqdm=True, tqdm_desc="Fetching packages IDs...", tqdm_colour="blue"
+        )
 
+        ids = [pkg_id for sublist in ids_list for pkg_id in sublist]
+
+        logger("OK", f"Retrieved {len(ids)} packages from '{self.odcrawler.domain}'", level="print")
         return ids
 
     def parse_resource(self, resource_meta, base_name, metadata_file_name, reparse_data=None):
@@ -49,12 +55,12 @@ class CkanCrawler():
             resource = {}
             resource["fileName"] = base_name
 
-            resource["name"] = resource_meta.get("name")
+            resource["name"] = resource_meta.get("name") or resource_meta.get("key")
             resource["description"] = resource_meta.get("description")
 
-            resource["downloadURL"] = utils.fix_url(resource_meta.get("download_url") or resource_meta.get("url") or resource_meta.get("original_url"))
+            resource["downloadURL"] = utils.fix_url(resource_meta.get("url"))
 
-            meta_media_type = resource_meta.get("mimetype") or resource_meta.get("format") or ""
+            meta_media_type = resource_meta.get("format", "")
 
         response, self.odcrawler.user_agent, error_tag, e = utils.make_request(resource["downloadURL"], self.odcrawler.user_agent, return_tag=True, max_sec=self.odcrawler.max_sec)
         if not response:
@@ -87,7 +93,7 @@ class CkanCrawler():
         return resource, resource_crawler_info
 
     def get_package(self, package_id, metadata_file_name):
-        url = utils.fix_url(f"{self.odcrawler.domain}/api/3/action/package_show?id={package_id}")
+        url = utils.fix_url(f"{self.odcrawler.domain}/v1/dataset/{package_id}")
         headers = {
             "Accept": "application/json",
             "Connection": "keep-alive"
@@ -98,7 +104,7 @@ class CkanCrawler():
         metadata["requestURL"] = url
 
         metadata["fileName"] = metadata_file_name
-        metadata["img"] = "https://www.ckan.org/img/ckan-logo-256.png"
+        metadata["img"] = "https://images.ctfassets.net/uo17ejk9rkwj/4rmEF9F4ZGiCwQk2WSMcce/b47146eacaf7b0dfc166656678c7ffe6/GBIF-2015.png"
 
         response, self.odcrawler.user_agent, error_tag, e = utils.make_request(url, self.odcrawler.user_agent, headers=headers, return_tag=True)
         if not response:
@@ -114,89 +120,81 @@ class CkanCrawler():
                 logger("ERROR", f"Error accessing package '{package_id}' ('{metadata_file_name}')", e, indent=2)
             return None
 
-        data = response.json()["result"]
+        data = response.json()
 
-        metadata["accessURL"] = utils.fix_url(f"{self.odcrawler.domain}/dataset/{data.get("name")}")
+        metadata["accessURL"] = utils.fix_url(f"{self.odcrawler.domain}/dataset/{package_id}")
 
         metadata["title"] = data.get("title", {})
-        metadata["description"] = data.get("notes", {})
+        metadata["description"] = data.get("description", {})
 
-        distributions = data.get("resources", [])
-        if not isinstance(distributions, list):
-            distributions = [distributions]
+        language = data.get("language", [])
+        language = [language] if isinstance(language, str) else language
+        data_language = data.get("dataLanguage", [])
+        data_language = [data_language] if isinstance(data_language, str) else data_language
+        metadata["language"] = list(set(language + data_language))
 
-        publisher = data.get("organization", {})
+        metadata["doi"] = data.get("doi", "")
+
+        publisher = next((contact for contact in data.get("contacts", []) if contact.get("type") == "ORIGINATOR"),{})
         metadata["publisher"] = {
-            "identifier": publisher.get("id", ""),
-            "title": utils.extract_first_nonempty_value(publisher.get("title", "")),
+            "identifier": publisher.get("key", ""),
+            "title": utils.extract_first_nonempty_value(publisher.get("organization", "")),
+            "homepage": data.get("homepage", ""),
         }
 
-        if distributions:
-            download_url = distributions[0].get("url") or distributions[0].get("original_url")
-            if download_url:
-                metadata["publisher"]["homepage"] = f"https://{urlparse(download_url).netloc}"
+        distributions = []
+        endpoints_res = data.get("endpoints", [])
+        for endpoint in endpoints_res:
+            if endpoint.get("type") not in {"EML"}:
+                distributions.append(endpoint)
 
-        metadata["language"] = data.get("language", [])
+        data_descriptions_res = data.get("dataDescriptions", [])
+        for dd_res in data_descriptions_res:
+            if dd_res.get("url"):
+                distributions.append(dd_res)
 
-        metadata["keyword"] = data.get("keywords", [])
-        if not metadata["keyword"]:
-            keywords = data.get("original_tags") or data.get("tags") or []
+        metadata["theme"] = data.get("tags", [])
+
+        metadata["keyword"] = []
+        for collection in data.get("keywordCollections", []):
+            keywords = collection.get("keywords", [])
             if isinstance(keywords, list):
-                for keyword in keywords:
-                    if isinstance(keyword, dict):
-                        state = keyword.get("state")
-                        if not state or state == "active":
-                            display_name = keyword.get("display_name") or keyword.get("name")
-                            if display_name:
-                                metadata["keyword"].append(display_name)
-                    else:
-                        metadata["keyword"].append(keyword)
-
-        metadata["theme"] = []
-        themes = data.get("theme") or data.get("groups")
-        if isinstance(themes, list):
-            for theme in themes:
-                if isinstance(theme, dict):
-                    display_name = theme.get("display_name") or theme.get("title")
-                    if display_name:
-                            metadata["theme"].append(display_name)
-                else:
-                    metadata["theme"].append(theme)
+                metadata["keyword"].extend(keywords)
+        metadata["keyword"] = list(set(metadata["keyword"]))
 
         metadata["accrualPeriodicity"] = data.get("accrualPeriodicity")
 
-        metadata["modified"] = data.get("metadata_modified", "")
+        metadata["modified"] = data.get("modified", "")
         metadata["issued"] = data.get("metadata_created", "")
-        metadata["license"] = data.get("license_url", "") or data.get("license_id", "")
-        if not metadata["license"] and distributions:
-            metadata["license"] = distributions[0].get("license", "")
+        metadata["license"] = data.get("license", "")
 
         metadata["source"] = self.odcrawler.domain
 
-        temporals = data.get("temporal", {}) or data.get("temporals", {})
-        if not isinstance(temporals, list):
-            temporals = [temporals]
-        
+        temporals = data.get("temporalCoverages", {})
         for temporal in temporals:
             if isinstance(temporal, dict):
                 metadata["temporal"] = {
-                    "startDate": temporal.get("startDate") or temporal.get("start_date"),
-                    "endDate": temporal.get("endDate") or temporal.get("end_date"),
+                    "startDate": temporal.get("start"),
+                    "endDate": temporal.get("end")
                 }
 
-        location = data.get("location", "")
-        spatial = data.get("spatial", "")
-        geo = utils.extract_mapped_field(location, utils.CKANCRAWLER_SPATIAL_MAP)
-        if utils.is_geojson(spatial):
-            metadata["spatial"] = json.loads(spatial) if isinstance(spatial, str) else spatial
-        else:
-            if not geo:
-                geo = utils.extract_mapped_field(spatial, utils.CKANCRAWLER_SPATIAL_MAP)
-            if geo:
-                metadata["geo"] = geo
+        spatials = data.get("geographicCoverages", [])
+        metadata["geo"] = []
+        metadata["spatial"] = []
+        for spatial in spatials:
+            if isinstance(spatial, dict):
+                description = spatial.get("description")
+                bbox = spatial.get("boundingBox")
+                if description:
+                    metadata["geo"].append(description)
+                if bbox and not bbox.get("globalCoverage"):
+                    metadata["spatial"].append(bbox)
 
         if distributions:
             logger("WORK", f"Processing {len(distributions)} resources from package '{package_id}' ('{metadata_file_name}')...", indent=2)
             self.odcrawler.init_and_parse_resources(metadata, distributions)
+
+        metadata["distributions"] = distributions
+        metadata["rawData"] = data
 
         return metadata

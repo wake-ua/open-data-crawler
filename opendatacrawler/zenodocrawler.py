@@ -53,7 +53,7 @@ class ZenodoCrawler():
 
                 last_max_date = max_date
                 total_hours = ((max_date - last_date).days * 24) + (24 - last_hour)
-                with tqdm(total=total_hours, desc="Fetching packages...", colour="blue") as pbar:
+                with tqdm(total=total_hours, desc="Fetching packages IDs...", colour="blue") as pbar:
                     while last_date <= max_date:
                         last_successful_hour = None
                         for hour in range(last_hour, 24):
