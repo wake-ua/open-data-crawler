@@ -6,10 +6,8 @@ from opendatacrawler.setup_logger import log_manager
 logger = log_manager.log
 
 class DatosGobEsCrawler():
-    def __init__(self, domain, user_agent, max_sec):
-        self.domain = domain.rstrip("/")
-        self.user_agent = user_agent
-        self.max_sec = max_sec
+    def __init__(self, odcrawler):
+        self.odcrawler = odcrawler
 
     def get_package_list(self):
         ids = []
@@ -21,26 +19,26 @@ class DatosGobEsCrawler():
 
         headers = {
             "Accept": "application/sparql-results+json",
-            "User-Agent": self.user_agent,
+            "User-Agent": self.odcrawler.user_agent,
             "Connection": "keep-alive"
         }
 
         try:
-            response, self.user_agent = utils.make_request(url, self.user_agent, headers=headers, params=params)
+            response, self.odcrawler.user_agent = utils.make_request(url, self.odcrawler.user_agent, headers=headers, params=params)
             if not response:
-                logger("ERROR", f"Error fetching package list from '{self.domain}': no working User-Agent found")
+                logger("ERROR", f"Error fetching package list from '{self.odcrawler.domain}': no working User-Agent found")
                 return ids
 
             response.raise_for_status()
             for result in response.json().get("results", {}).get("bindings", []):
                 ids.append(result.get("dataset", {}).get("value").split("/")[-1])
 
-            logger("OK", f"Retrieved {len(ids)} packages from '{self.domain}'", level="print")
+            logger("OK", f"Retrieved {len(ids)} packages from '{self.odcrawler.domain}'", level="print")
 
         except requests.RequestException as e:
-            logger("ERROR", f"Error fetching package list from '{self.domain}'", e)
+            logger("ERROR", f"Error fetching package list from '{self.odcrawler.domain}'", e)
         except Exception as e:
-            logger("ERROR", f"Unexpected error parsing response from '{self.domain}'", e)
+            logger("ERROR", f"Unexpected error parsing response from '{self.odcrawler.domain}'", e)
 
         return ids
 
@@ -53,7 +51,7 @@ class DatosGobEsCrawler():
         resource["downloadURL"] = utils.fix_url(resource_meta.get("accessURL") or resource_meta.get("downloadURL"))
 
         meta_media_type = resource_meta.get("format", {}).get("value")
-        response, self.user_agent = utils.make_request(resource["downloadURL"], self.user_agent)
+        response, self.odcrawler.user_agent = utils.make_request(resource["downloadURL"], self.odcrawler.user_agent)
         media_type, file_name, tag_val = utils.resolve_mediatype_conflict(meta_media_type, response, base_name)
 
         resource["mediaType"] = media_type
@@ -64,15 +62,15 @@ class DatosGobEsCrawler():
 
         return resource, resource_crawler_info
 
-    def get_package(self, dataset_id, metadata_file_name):
-        url = utils.fix_url(f"{self.domain}/apidata/catalog/dataset/{dataset_id}")
+    def get_package(self, package_id, metadata_file_name):
+        url = utils.fix_url(f"{self.odcrawler.domain}/apidata/catalog/dataset/{package_id}")
         headers = {
             "Accept": "application/json",
             "Connection": "keep-alive"
         }
 
         metadata = utils.init_metadata()
-        response, self.user_agent, error_tag, e = utils.make_request(url, self.user_agent, headers=headers, return_tag=True)
+        response, self.odcrawler.user_agent, error_tag, e = utils.make_request(url, self.odcrawler.user_agent, headers=headers, return_tag=True)
         if not response:
             logger("ERROR", f"Error downloading '{metadata_file_name}'", e, indent=2)
 
@@ -84,13 +82,13 @@ class DatosGobEsCrawler():
 
         items = response.json()["result"].get("items", [])
         if not items:
-            logger("WARNING", f"No data returned for package '{dataset_id}'")
+            logger("WARNING", f"No data returned for package '{package_id}'")
             return None
 
         data = items[0]
 
-        metadata["identifier"] = dataset_id
-        metadata["accessURL"] = utils.fix_url(f"https://datos.gob.es/es/catalogo/{dataset_id}")
+        metadata["identifier"] = package_id
+        metadata["accessURL"] = utils.fix_url(f"https://datos.gob.es/es/catalogo/{package_id}")
         metadata["requestURL"] = url
 
         metadata["fileName"] = metadata_file_name
@@ -120,7 +118,7 @@ class DatosGobEsCrawler():
         metadata["modified"] = data.get("modified")
         metadata["issued"] = data.get("issued")
         metadata["license"] = data.get("license")
-        metadata["source"] = self.domain
+        metadata["source"] = self.odcrawler.domain
 
         temporal = data.get("temporal", {})
         metadata["temporal"] = temporal
@@ -134,12 +132,7 @@ class DatosGobEsCrawler():
         metadata["geo"] = utils.extract_mapped_field(data.get("spatial"), utils.DATOSGOBESCRAWLER_SPATIAL_MAP)
 
         if distributions:
-            metadata["resources"] = {}
-            metadata["crawlerInfo"]["resourcesInfo"] = {}
-            for idx, resource in enumerate(distributions):
-                base_name = utils.generate_short_filename(f"{metadata['fileName']}_{idx}")
-                resource["fileName"] = base_name
-                metadata["resources"][base_name] = resource
-                metadata["crawlerInfo"]["resourcesInfo"][base_name] = utils.init_metadata(package=False, crawled=False)
+            logger("WORK", f"Processing {len(distributions)} resources from package '{package_id}' ('{metadata_file_name}')...", indent=2)
+            self.odcrawler.init_and_parse_resources(metadata, distributions)
 
         return metadata

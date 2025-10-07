@@ -105,7 +105,7 @@ class OpenDataCrawler():
             cls = dms_classes.get(self.dms)
             if cls:
                 try:
-                    self.dms_instance = cls(self.domain, self.user_agent, self.max_sec)
+                    self.dms_instance = cls(self)
                     #if self.domain in ["https://zenodo.org/"]:
                         #self.max_threads = 1
                         #self.max_resource_threads = 1
@@ -316,20 +316,33 @@ class OpenDataCrawler():
 
         return package
 
-    def parse_and_update_resource(self, item, package):
-        old_file_name, resource = item
-        resource_meta, resource_crawler_info = self.parse_resource(
-            resource, old_file_name, package["fileName"], reparse_data=None
+    def init_and_parse_resources(self, metadata, distributions, log_indent=2):
+        metadata["resources"] = {}
+        metadata["crawlerInfo"]["resourcesInfo"] = {}
+
+        def parse_resource_func(item):
+            idx, resource = item
+            base_name = utils.generate_short_filename(f"{metadata['fileName']}_{idx}")
+            resource["fileName"] = base_name
+            metadata["resources"][base_name] = resource
+            metadata["crawlerInfo"]["resourcesInfo"][base_name] = utils.init_metadata(package=False, crawled=False)
+
+            parsed_resource, parsed_info = self.parse_resource(resource, base_name, metadata["fileName"], reparse_data=None)
+            new_file_name = parsed_resource["fileName"]
+
+            if new_file_name != base_name:
+                logger("FIX", f"Resource name changed from '{base_name}' to '{new_file_name}'", indent=log_indent)
+                metadata["resources"].pop(base_name, None)
+                metadata["crawlerInfo"]["resourcesInfo"].pop(base_name, None)
+
+            metadata["resources"][new_file_name] = parsed_resource
+            metadata["crawlerInfo"]["resourcesInfo"][new_file_name] = parsed_info
+
+        logger("...", f"Parsing {len(distributions)} resources from package '{metadata['fileName']}'...", indent=log_indent)
+        self.run_threaded_function(
+            items=list(enumerate(distributions)), func=parse_resource_func,
+            max_workers=self.max_resource_threads, thread_name_prefix=threading.current_thread().name
         )
-
-        new_file_name = resource_meta["fileName"]
-
-        if new_file_name != old_file_name:
-            package["resources"].pop(old_file_name, None)
-            package["crawlerInfo"]["resourcesInfo"].pop(old_file_name, None)
-
-        package["resources"][new_file_name] = resource_meta
-        package["crawlerInfo"]["resourcesInfo"][new_file_name] = resource_crawler_info
 
     def process_package(self, pkg_id, log_indent=1):
         metadata_file_name = f"meta_{utils.generate_short_filename(f'{self.domain}_{pkg_id}')}.json"
@@ -361,18 +374,6 @@ class OpenDataCrawler():
                     logger("SKIP", f"Package '{pkg_id}' ('{metadata_path}') does not match specified categories ({', '.join(self.categories)}), skipping all resources", indent=log_indent)
                     self.save_metadata(package)
                     return
-
-            logger("WORK", f"Processing {len(package['resources'])} resources from package '{pkg_id}' ('{metadata_path}')...", indent=log_indent-1)
-            resources_to_parse = [
-                (file_name, resource) for file_name, resource in package["resources"].items()
-                if not package["crawlerInfo"]["resourcesInfo"].get(file_name, {}).get("fileStatus", {}).get("fileCrawled")
-            ]
-
-            if resources_to_parse:
-                self.run_threaded_function(
-                    items=resources_to_parse, func=lambda item: self.parse_and_update_resource(item, package),
-                    max_workers=self.max_resource_threads, thread_name_prefix=threading.current_thread().name
-                )
 
             resources_to_process = []
             for file_name, resource in package["resources"].items():

@@ -9,10 +9,8 @@ from opendatacrawler.setup_logger import log_manager
 logger = log_manager.log
 
 class ZenodoCrawler():
-    def __init__(self, domain, user_agent, max_sec):
-        self.domain = domain.rstrip("/")
-        self.user_agent = user_agent
-        self.max_sec = max_sec
+    def __init__(self, odcrawler):
+        self.odcrawler = odcrawler
 
         self.token = utils.AUTH_TOKENS.get("zenodo")
         self.ns = {
@@ -32,7 +30,7 @@ class ZenodoCrawler():
             last_date = date.fromisoformat(state.get("lastDate"))
             last_hour = state.get("lastHour", 0)
         else:
-            response, self.user_agent = utils.make_request(url, self.user_agent, params={"size": 1, "sort": "oldest"}, max_sec=self.max_sec)
+            response, self.odcrawler.user_agent = utils.make_request(url, self.odcrawler.user_agent, params={"size": 1, "sort": "oldest"}, max_sec=self.odcrawler.max_sec)
             ids = set()
             last_date = datetime.fromisoformat(response.json()["hits"]["hits"][0]["created"].replace("Z", "+00:00")).date()
             last_hour = 0
@@ -40,14 +38,14 @@ class ZenodoCrawler():
         return ids, last_date, last_hour
 
     def get_package_list(self):
-        url = f"{self.domain}/api/records?type=dataset"
+        url = f"{self.odcrawler.domain}/api/records?type=dataset"
         ids, last_date, last_hour = self.get_state_file(url)
 
         page_size = 25
         last_max_date = None
         try:
             while True:
-                response, self.user_agent = utils.make_request(url, self.user_agent, params={"size": 1, "sort": "newest"}, max_sec=self.max_sec)
+                response, self.odcrawler.user_agent = utils.make_request(url, self.odcrawler.user_agent, params={"size": 1, "sort": "newest"}, max_sec=self.odcrawler.max_sec)
                 max_date = datetime.fromisoformat(response.json()["hits"]["hits"][0]["created"].replace("Z", "+00:00")).date()
 
                 if last_max_date == max_date:
@@ -72,7 +70,7 @@ class ZenodoCrawler():
                                     "q": f"created:[{hour_start} TO {hour_end}]"
                                 }
 
-                                response, self.user_agent, tag, e = utils.make_request(url, self.user_agent, params=params, max_sec=self.max_sec, return_tag=True)
+                                response, self.odcrawler.user_agent, tag, e = utils.make_request(url, self.odcrawler.user_agent, params=params, max_sec=self.odcrawler.max_sec, return_tag=True)
                                 if not response:
                                     if tag == "resource_temporarily_unavailable":
                                         page_size = max(page_size // 2, 10)
@@ -117,12 +115,12 @@ class ZenodoCrawler():
                         last_date += timedelta(days=1)
                         last_hour = 0
 
-            logger("OK", f"Retrieved {len(ids)} packages from '{self.domain}'", level="print")
+            logger("OK", f"Retrieved {len(ids)} packages from '{self.odcrawler.domain}'", level="print")
 
         except requests.RequestException as e:
-            logger("ERROR", f"Error fetching package list from '{self.domain}'", e)
+            logger("ERROR", f"Error fetching package list from '{self.odcrawler.domain}'", e)
         except Exception as e:
-            logger("ERROR", f"Unexpected error parsing response from '{self.domain}'", e)
+            logger("ERROR", f"Unexpected error parsing response from '{self.odcrawler.domain}'", e)
 
         return list(ids)
 
@@ -151,7 +149,7 @@ class ZenodoCrawler():
                 ext = meta_media_type.split(".")[-1].lower() if "." in meta_media_type else None
                 meta_media_type = utils.EXT_TO_MIME.get(ext)
 
-        response, self.user_agent, error_tag, e = utils.make_request(resource["downloadURL"], self.user_agent, return_tag=True, max_sec=self.max_sec, stream=True)
+        response, self.odcrawler.user_agent, error_tag, e = utils.make_request(resource["downloadURL"], self.odcrawler.user_agent, return_tag=True, max_sec=self.odcrawler.max_sec, stream=True)
         if not response:
             if error_tag:
                 if error_tag != "resource_temporarily_unavailable":
@@ -182,7 +180,7 @@ class ZenodoCrawler():
         return resource, resource_crawler_info
 
     def get_package(self, package_id, metadata_file_name):
-        url = utils.fix_url(f"{self.domain}/api/records/{package_id}")
+        url = utils.fix_url(f"{self.odcrawler.domain}/api/records/{package_id}")
 
         headers = {
             "Accept": "application/json",
@@ -197,7 +195,7 @@ class ZenodoCrawler():
         metadata["fileName"] = metadata_file_name
         metadata["img"] = "https://zenodo.org/static/images/invenio-rdm.svg"
 
-        response, self.user_agent, error_tag, e = utils.make_request(url, self.user_agent, headers=headers, return_tag=True)
+        response, self.odcrawler.user_agent, error_tag, e = utils.make_request(url, self.odcrawler.user_agent, headers=headers, return_tag=True)
         if not response:
             if error_tag:
                 if error_tag != "resource_temporarily_unavailable":
@@ -246,19 +244,14 @@ class ZenodoCrawler():
 
         metadata["license"] = data.get("metadata", {}).get("license", {}).get("id", None)
 
-        metadata["source"] = self.domain
+        metadata["source"] = self.odcrawler.domain
 
         #metadata["temporal"] = None
         #metadata["spatial"] = None
 
         if distributions:
-            metadata["resources"] = {}
-            metadata["crawlerInfo"]["resourcesInfo"] = {}
-            for idx, resource in enumerate(distributions):
-                base_name = utils.generate_short_filename(f"{metadata['fileName']}_{idx}")
-                resource["fileName"] = base_name
-                metadata["resources"][base_name] = resource
-                metadata["crawlerInfo"]["resourcesInfo"][base_name] = utils.init_metadata(package=False, crawled=False)
+            logger("WORK", f"Processing {len(distributions)} resources from package '{package_id}' ('{metadata_file_name}')...", indent=2)
+            self.odcrawler.init_and_parse_resources(metadata, distributions)
 
         metadata["dataRaw"] = data
 
