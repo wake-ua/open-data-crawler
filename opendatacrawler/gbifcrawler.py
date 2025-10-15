@@ -156,11 +156,14 @@ class GbifCrawler():
         metadata["theme"] = data.get("tags", [])
 
         metadata["keyword"] = []
+        keywords = data.get("keywords", [])
+        if isinstance(keywords, list):
+            metadata["keyword"].extend(keywords)
         for collection in data.get("keywordCollections", []):
             keywords = collection.get("keywords", [])
             if isinstance(keywords, list):
                 metadata["keyword"].extend(keywords)
-        metadata["keyword"] = list(set(metadata["keyword"]))
+        metadata["keyword"] = list(dict.fromkeys(metadata["keyword"]))
 
         metadata["accrualPeriodicity"] = data.get("accrualPeriodicity")
 

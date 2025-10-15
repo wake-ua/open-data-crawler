@@ -38,8 +38,8 @@ def main():
     args = vars(parser.parse_args())
 
     url = args["domain"]
-    d_types = [c.lower() for c in args["data_types"]] if args["data_types"] else None
-    categories = [c.lower() for c in args["categories"]] if args["categories"] else None
+    d_types = [c.lower() for c in args["data_types"]] if args["data_types"] else []
+    categories = [c.lower() for c in args["categories"]] if args["categories"] else []
     d_path = args["path"]
     max_sec = args["max_seconds"]
     partial = args["partial_dataset"]
@@ -72,7 +72,7 @@ def main():
                     logger("WARNING", f"Are you absolutely sure you want to delete all data ({len(resume_data)} packages and {len(downloaded_before_res)} resources) and logs for domain '{url}' ({crawler.dms})? This action cannot be undone. [Y/N]:", level="print")
                     reset_domain_input = input().strip().lower() in {"y", "yes"}
                 elif has_logs:
-                    logger("WARNING", f"No resume data found, but there are logs for domain '{url}' ({crawler.dms}). Do you want to delete them? This action cannot be undone. [Y/N]:", level="print")
+                    logger("WARNING", f"No resume data found, but there are logs for domain '{crawler.domain}' ({crawler.dms}). Do you want to delete them? This action cannot be undone. [Y/N]:", level="print")
                     reset_domain_input = input().strip().lower() in {"y", "yes"}
                 else:
                     reset_domain_input = True
@@ -94,7 +94,7 @@ def main():
                     logger("...", f"Reattempting {len(failed_before_pkgs)} packages with {len(failed_before_res)} failed resources of accepted types ({", ".join(f".{ext}" for ext in d_types)})...", level="print")
                 logger(None, "=" * 80, level="print")
 
-            logger("...", f"Obtaining packages from '{url}'...", level="print")
+            logger("...", f"Obtaining packages from '{crawler.domain}'...", level="print")
             packages = id_dataset if id_dataset else crawler.get_package_list()
             logger(None, "=" * 80, level="print")
 

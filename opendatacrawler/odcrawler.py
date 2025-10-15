@@ -20,7 +20,7 @@ logger = log_manager.log
 
 class OpenDataCrawler():
     def __init__(self, domain, path=None, data_types=None, categories=None, partial=False, avoid_data=None, max_sec=None, max_threads=None, max_resource_threads=None):
-        self.domain = domain.rstrip("/")
+        self.domain = utils.normalize_domain(domain).rstrip("/")
         self.dms = None
         self.dms_instance = None
         self.max_sec = max_sec
@@ -44,7 +44,7 @@ class OpenDataCrawler():
         self.detect_dms()
 
     # ==============================
-
+    
     def detect_dms(self):
         dms_endpoints = {
             #"dataEuropa": "/api/hub/repo/",

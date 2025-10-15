@@ -104,6 +104,15 @@ def fix_url(url):
         url = f"https://{url}"
     return url
 
+def normalize_domain(domain):
+    if "gbif.org" in domain and not domain.startswith("http://api.gbif.org"):
+        return "http://api.gbif.org"
+
+    lang_suffix = re.compile(r"/[a-z]{2}$", re.IGNORECASE)
+    domain = lang_suffix.sub("", domain)
+
+    return domain
+
 def get_user_agent_list(current_agent):
     return [current_agent] + [ua for ua in USER_AGENTS if ua != current_agent] if current_agent else USER_AGENTS
 
