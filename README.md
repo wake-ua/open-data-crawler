@@ -67,9 +67,9 @@ Open Data Crawler is a tool designed to extract datasets, and optionally their m
 - Filter datasets by topic or category
 
 ### Currently Supported Portals and Sites
-- [x] [datos.gob.es](https://datos.gob.es)
+- [x] [datos.gob.es](https://datos.gob.es) * (request limit ≈ 5 req/sec ~ 18 000 req/hour)
 - [x] CKAN
-- [x] [Zenodo](https://zenodo.org/) *
+- [x] [Zenodo](https://zenodo.org/) * (request limit ≈ 1.39 req/sec ~ 5000 req/hour)
 - [x] [GBIF](https://www.gbif.org/es/)
 - [ ] Socrata *
 - [ ] [Eurostat](https://ec.europa.eu/eurostat) *

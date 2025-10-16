@@ -12,8 +12,7 @@ class ZenodoCrawler():
     def __init__(self, odcrawler):
         self.odcrawler = odcrawler
 
-        # deberia ser segundos, no horas para seguir la logica jeje
-        self.odcrawler.init_rate_limit(limit_req_sec=5000/60/60)
+        self.odcrawler.init_rate_limit(limit_req_per_sec=5000 / 3600)
 
         self.token = utils.AUTH_TOKENS.get("zenodo")
         #self.ns = {

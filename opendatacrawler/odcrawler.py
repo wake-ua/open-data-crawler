@@ -201,7 +201,7 @@ class OpenDataCrawler():
     def init_rate_limit(self, limit_req_per_sec=None):
         self.limit_req_per_sec = limit_req_per_sec
         if limit_req_per_sec:
-            logger("WARNING", f"Parallel processing for domain '{self.domain}' disabled due to API rate limits ({self.limit_req_per_sec:.3f} req/s ~ {self.limit_req_per_sec * 3600:.0f} req/h)", level="print")
+            logger("WARNING", f"Parallel processing for domain '{self.domain}' disabled due to API rate limits ({self.limit_req_per_sec:.3f} req/s ~ {self.limit_req_per_sec * 3600:.0f} req/hour)", level="print")
             logger(None, "=" * 80, level="print")
 
             self.req_interval = 1.0 / limit_req_per_sec
