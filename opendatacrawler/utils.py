@@ -130,7 +130,7 @@ def make_request(url, current_agent, headers=None, params=None, max_sec=None, st
                     #logger("NET", f"Forbidden with User-Agent '{user_agent}' (HTTP 403 - Forbidden), trying next one...")
                     break
                 elif response.status_code == 429:
-                    logger("NET", f"Too Many Requests (HTTP 429 - Too Many Requests), retrying with same User-Agent after {sleep_time}s", indent=2)
+                    #logger("NET", f"Too Many Requests (HTTP 429 - Too Many Requests), retrying with same User-Agent after {sleep_time}s", indent=2)
                     time.sleep(sleep_time)
                     continue
 

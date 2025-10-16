@@ -12,7 +12,7 @@ class GbifCrawler():
 
     def get_package_list(self):
         url = f"{self.odcrawler.domain}/v1/dataset/search?limit=1&offset=0"
-        response, self.odcrawler.user_agent = utils.make_request(url, self.odcrawler.user_agent, max_sec=self.odcrawler.max_sec)
+        response, self.odcrawler.user_agent = self.odcrawler.make_request(url, self.odcrawler.user_agent, max_sec=self.odcrawler.max_sec)
         if not response:
             logger("ERROR", f"Error fetching package list from '{self.odcrawler.domain}'")
             return []
@@ -24,7 +24,7 @@ class GbifCrawler():
         def fetch_page(offset):
             url = f"{self.odcrawler.domain}/v1/dataset/search?limit={limit}&offset={offset}"
             
-            response, self.odcrawler.user_agent = utils.make_request(url, self.odcrawler.user_agent, max_sec=self.odcrawler.max_sec)
+            response, self.odcrawler.user_agent = self.odcrawler.make_request(url, self.odcrawler.user_agent, max_sec=self.odcrawler.max_sec)
             if not response:
                 return []
 
@@ -62,7 +62,7 @@ class GbifCrawler():
 
             meta_media_type = resource_meta.get("format", "")
 
-        response, self.odcrawler.user_agent, error_tag, e = utils.make_request(resource["downloadURL"], self.odcrawler.user_agent, return_tag=True, max_sec=self.odcrawler.max_sec)
+        response, self.odcrawler.user_agent, error_tag, e = self.odcrawler.make_request(resource["downloadURL"], self.odcrawler.user_agent, return_tag=True, max_sec=self.odcrawler.max_sec)
         if not response:
             if error_tag:
                 if error_tag != "resource_temporarily_unavailable":
@@ -106,7 +106,7 @@ class GbifCrawler():
         metadata["fileName"] = metadata_file_name
         metadata["img"] = "https://images.ctfassets.net/uo17ejk9rkwj/4rmEF9F4ZGiCwQk2WSMcce/b47146eacaf7b0dfc166656678c7ffe6/GBIF-2015.png"
 
-        response, self.odcrawler.user_agent, error_tag, e = utils.make_request(url, self.odcrawler.user_agent, headers=headers, return_tag=True)
+        response, self.odcrawler.user_agent, error_tag, e = self.odcrawler.make_request(url, self.odcrawler.user_agent, headers=headers, return_tag=True)
         if not response:
             if error_tag:
                 if error_tag != "resource_temporarily_unavailable":

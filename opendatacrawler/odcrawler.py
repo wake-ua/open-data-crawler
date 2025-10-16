@@ -5,7 +5,8 @@ import requests
 import humanize
 import gc
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
+import time
 import traceback
 from frictionless import describe, Dialect
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -42,6 +43,7 @@ class OpenDataCrawler():
 
         logger("...", f"Detecting DMS for domain '{self.domain}'...", level="print")
         self.detect_dms()
+        self.init_rate_limit()
 
     # ==============================
     
@@ -109,9 +111,6 @@ class OpenDataCrawler():
             if cls:
                 try:
                     self.dms_instance = cls(self)
-                    if self.domain in ["https://zenodo.org/"]:
-                        self.max_threads = 1
-                        #self.max_resource_threads = 1
                 except Exception:
                     logger("ERROR", f"Error instantiating DMS class for '{self.dms}'", f"\n{traceback.format_exc()}")
         else:
@@ -199,6 +198,49 @@ class OpenDataCrawler():
 
     # ==============================
 
+    def init_rate_limit(self, limit_req_hour=None):
+        self.limit_req_hour = limit_req_hour
+        if limit_req_hour:
+            logger("WARNING", f"Parallel processing for domain '{self.domain}' disabled due to API rate limits", level="print")
+            logger(None, "=" * 80, level="print")
+            self.max_threads = 1
+            self.max_resource_threads = 1
+
+            self.req_count = 1
+            self.window_start = datetime.now()
+
+
+        else:
+            self.req_count = None
+            self.window_start = None
+
+    def check_rate_limit(self):
+        if not self.limit_req_hour:
+            return
+
+        now = datetime.now()
+        elapsed = (now - self.window_start).total_seconds()
+
+        if elapsed >= 3600:
+            self.req_count = 0
+            self.window_start = now
+
+        elif self.req_count >= self.limit_req_hour:
+            wait_seconds = int(3600 - elapsed)
+            logger("WAIT", f"Request limit of {self.limit_req_hour}/hour reached, pausing for {wait_seconds}s (~{round(wait_seconds / 60, 1)} min remaining)...", level="print")
+            time.sleep(wait_seconds)
+            self.req_count = 0
+            self.window_start = datetime.now()
+
+        self.req_count += 1
+
+    def make_request(self, *args, **kwargs):
+        if self.limit_req_hour:
+            self.check_rate_limit()
+        return utils.make_request(*args, **kwargs)
+
+    # ==============================
+
     def save_dataset(self, url, file_name, chunk_size=64*1024, log_indent=4):
         logger("...", f"Attempting to download resource '{file_name}' from '{url}'...", indent=log_indent)
 
@@ -207,7 +249,7 @@ class OpenDataCrawler():
             "Connection": "keep-alive"
         }
 
-        response, self.user_agent, error_tag, e = utils.make_request(url, self.user_agent, headers=headers, max_sec=self.max_sec, stream=True, return_tag=True)
+        response, self.user_agent, error_tag, e = self.make_request(url, self.user_agent, headers=headers, max_sec=self.max_sec, stream=True, return_tag=True)
         if error_tag:
             return None, error_tag, e
 
@@ -289,6 +331,58 @@ class OpenDataCrawler():
         except Exception as e:
             logger("ERROR", f"Failed to save metadata file '{meta_path}'", [e, traceback.format_exc()], indent=log_indent)
 
+    def handle_parse_resource(self, resource_meta, base_name, metadata_file_name, reparse_data=None, log_indent=4):
+        resource_crawler_info = utils.init_metadata(package=False)
+
+        print(resource_meta)
+        print(base_name)
+        print(metadata_file_name)
+        print(reparse_data)
+        print("====")
+        if reparse_data:
+            logger("...", f"Re-parsing resource '{base_name}' from package '{metadata_file_name}'...", indent=log_indent)
+            resource = resource_meta
+            meta_media_type = reparse_data.get("metaMediaType")
+        else:
+            logger("...", f"Parsing resource '{base_name}' from package '{metadata_file_name}'...", indent=log_indent)
+            resource, meta_media_type = self.dms_instance.parse_resource(resource_meta, base_name)
+
+        if reparse_data:
+            meta_media_type = reparse_data.get("metaMediaType") or meta_media_type
+
+        if not resource or not resource.get("downloadURL"):
+            logger("ERROR", f"Missing or invalid download URL for resource '{base_name}'", indent=log_indent)
+            return resource, resource_crawler_info
+
+        response, self.user_agent, error_tag, e = self.make_request(resource["downloadURL"], self.user_agent, return_tag=True, max_sec=self.max_sec, stream=True)
+        if not response:
+            if error_tag:
+                if error_tag != "resource_temporarily_unavailable":
+                    resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag))
+                    logger("WARNING", f"Non-retryable error accessing resource '{base_name}' for parsing", e, indent=log_indent)
+                    resource_crawler_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
+                else:
+                    resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag, {"<metaMediaType>": meta_media_type}))
+                    logger("WARNING", f"Retryable error accessing resource '{base_name}' for parsing", e, indent=log_indent)
+            else:
+                logger("ERROR", f"Error accessing resource '{base_name}'", e, indent=log_indent)
+
+            return resource, resource_crawler_info
+
+        media_type, file_name, tag_val = utils.resolve_mediatype_conflict(meta_media_type, response, base_name)
+        resource["mediaType"] = media_type
+        resource["fileName"] = file_name
+        if tag_val:
+            logger("WARNING", f"Detected a media type mismatch for '{resource['downloadURL']}'", indent=log_indent)
+            resource_crawler_info["fileMetadataChanges"].update(utils.add_tag_explanations("mimetype_mismatch", tag_val)            )
+
+        if reparse_data:
+            logger("OK", f"Successfully re-parsed resource '{resource['fileName']}' from package '{metadata_file_name}'", indent=log_indent)
+        else:
+            logger("OK", f"Successfully parsed resource '{resource['fileName']}' from package '{metadata_file_name}'", indent=log_indent)
+
+        return resource, resource_crawler_info
+        
     def retry_temporarily_unavailable_resources(self, package, log_indent=2):
         missing_resources = [
             file_name for file_name, _ in package["crawlerInfo"]["resourcesInfo"].items()
@@ -303,11 +397,10 @@ class OpenDataCrawler():
             tag_values = tag_info.get("values", {})
 
             if resource_meta and tag_values:
-                new_resource, new_info = self.parse_resource(resource_meta, old_file_name, package["fileName"], reparse_data=tag_values)
+                new_resource, new_info = self.handle_parse_resource(resource_meta, old_file_name, package["fileName"], reparse_data=tag_values)
                 new_file_name = new_resource["fileName"]
 
                 if new_file_name != old_file_name:
-                    logger("FIX", f"Resource name changed from '{old_file_name}' to '{new_file_name}'", indent=log_indent)
                     package["resources"].pop(old_file_name, None)
                     package["crawlerInfo"]["resourcesInfo"].pop(old_file_name, None)
 
@@ -318,10 +411,7 @@ class OpenDataCrawler():
 
         if missing_resources:
             logger("...", f"Re-parsing {len(missing_resources)} temporarily unavailable resources...", indent=log_indent)
-            self.run_threaded_function(
-                items=missing_resources, func=reparse_resource,
-                max_workers=self.max_resource_threads, thread_name_prefix=threading.current_thread().name
-            )
+            self.run_threaded_function(items=missing_resources, func=reparse_resource, max_workers=self.max_resource_threads, thread_name_prefix=threading.current_thread().name)
 
         return package
 
@@ -333,14 +423,14 @@ class OpenDataCrawler():
             idx, resource = item
             base_name = utils.generate_short_filename(f"{metadata['fileName']}_{idx}")
             resource["fileName"] = base_name
+
             metadata["resources"][base_name] = resource
             metadata["crawlerInfo"]["resourcesInfo"][base_name] = utils.init_metadata(package=False, crawled=False)
 
-            parsed_resource, parsed_info = self.parse_resource(resource, base_name, metadata["fileName"], reparse_data=None)
+            parsed_resource, parsed_info = self.handle_parse_resource(resource, base_name, metadata["fileName"])
             new_file_name = parsed_resource["fileName"]
 
             if new_file_name != base_name:
-                logger("FIX", f"Resource name changed from '{base_name}' to '{new_file_name}'", indent=log_indent)
                 metadata["resources"].pop(base_name, None)
                 metadata["crawlerInfo"]["resourcesInfo"].pop(base_name, None)
 
@@ -553,6 +643,6 @@ class OpenDataCrawler():
         package = self.dms_instance.get_package(pkg_id, metadata_file_name)
         return package
     
-    def parse_resource(self, resource_meta, base_name, metadata_file_name, reparse_data):
-        resource, resource_crawler_info = self.dms_instance.parse_resource(resource_meta, base_name, metadata_file_name, reparse_data)
-        return resource, resource_crawler_info
+    #def parse_resource(self, resource_meta, base_name, metadata_file_name, reparse_data):
+    #    resource, resource_crawler_info = self.dms_instance.parse_resource(resource_meta, base_name, metadata_file_name, reparse_data)
+    #    return resource, resource_crawler_info

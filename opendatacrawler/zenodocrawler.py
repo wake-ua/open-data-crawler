@@ -12,14 +12,17 @@ class ZenodoCrawler():
     def __init__(self, odcrawler):
         self.odcrawler = odcrawler
 
+        # deberia ser segundos, no horas para seguir la logica jeje
+        self.odcrawler.init_rate_limit(limit_req_sec=5000/60/60)
+
         self.token = utils.AUTH_TOKENS.get("zenodo")
-        self.ns = {
-            "oai": "http://www.openarchives.org/OAI/2.0/",
-            "rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
-            "dct": "http://purl.org/dc/terms/",
-            "dcat": "http://www.w3.org/ns/dcat#",
-            "foaf": "http://xmlns.com/foaf/0.1/",
-        }
+        #self.ns = {
+        #    "oai": "http://www.openarchives.org/OAI/2.0/",
+        #    "rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+        #    "dct": "http://purl.org/dc/terms/",
+        #    "dcat": "http://www.w3.org/ns/dcat#",
+        #    "foaf": "http://xmlns.com/foaf/0.1/",
+        #}
 
     def get_state_file(self, url, path=utils.ZENODO_STATE_FILE):
         if os.path.exists(path):
@@ -30,7 +33,7 @@ class ZenodoCrawler():
             last_date = date.fromisoformat(state.get("lastDate"))
             last_hour = state.get("lastHour", 0)
         else:
-            response, self.odcrawler.user_agent = utils.make_request(url, self.odcrawler.user_agent, params={"size": 1, "sort": "oldest"}, max_sec=self.odcrawler.max_sec)
+            response, self.odcrawler.user_agent = self.odcrawler.make_request(url, self.odcrawler.user_agent, params={"size": 1, "sort": "oldest"}, max_sec=self.odcrawler.max_sec)
             ids = set()
             last_date = datetime.fromisoformat(response.json()["hits"]["hits"][0]["created"].replace("Z", "+00:00")).date()
             last_hour = 0
@@ -45,7 +48,7 @@ class ZenodoCrawler():
         last_max_date = None
         try:
             while True:
-                response, self.odcrawler.user_agent = utils.make_request(url, self.odcrawler.user_agent, params={"size": 1, "sort": "newest"}, max_sec=self.odcrawler.max_sec)
+                response, self.odcrawler.user_agent = self.odcrawler.make_request(url, self.odcrawler.user_agent, params={"size": 1, "sort": "newest"}, max_sec=self.odcrawler.max_sec)
                 max_date = datetime.fromisoformat(response.json()["hits"]["hits"][0]["created"].replace("Z", "+00:00")).date()
 
                 if last_max_date == max_date:
@@ -70,7 +73,7 @@ class ZenodoCrawler():
                                     "q": f"created:[{hour_start} TO {hour_end}]"
                                 }
 
-                                response, self.odcrawler.user_agent, tag, e = utils.make_request(url, self.odcrawler.user_agent, params=params, max_sec=self.odcrawler.max_sec, return_tag=True)
+                                response, self.odcrawler.user_agent, tag, e = self.odcrawler.make_request(url, self.odcrawler.user_agent, params=params, max_sec=self.odcrawler.max_sec, return_tag=True)
                                 if not response:
                                     if tag == "resource_temporarily_unavailable":
                                         page_size = max(page_size // 2, 10)
@@ -140,16 +143,13 @@ class ZenodoCrawler():
             resource["name"] = resource_meta.get("key", None)
 
             resource["downloadURL"] = utils.fix_url(resource_meta.get("links", {}).get("self", None))
-            if not resource["downloadURL"]:
-                print(resource_meta)
-                return None, None
 
             meta_media_type = resource_meta.get("key", None)
             if meta_media_type:
                 ext = meta_media_type.split(".")[-1].lower() if "." in meta_media_type else None
                 meta_media_type = utils.EXT_TO_MIME.get(ext)
 
-        response, self.odcrawler.user_agent, error_tag, e = utils.make_request(resource["downloadURL"], self.odcrawler.user_agent, return_tag=True, max_sec=self.odcrawler.max_sec, stream=True)
+        response, self.odcrawler.user_agent, error_tag, e = self.odcrawler.make_request(resource["downloadURL"], self.odcrawler.user_agent, return_tag=True, max_sec=self.odcrawler.max_sec, stream=True)
         if not response:
             if error_tag:
                 if error_tag != "resource_temporarily_unavailable":
@@ -195,7 +195,7 @@ class ZenodoCrawler():
         metadata["fileName"] = metadata_file_name
         metadata["img"] = "https://zenodo.org/static/images/invenio-rdm.svg"
 
-        response, self.odcrawler.user_agent, error_tag, e = utils.make_request(url, self.odcrawler.user_agent, headers=headers, return_tag=True)
+        response, self.odcrawler.user_agent, error_tag, e = self.odcrawler.make_request(url, self.odcrawler.user_agent, headers=headers, return_tag=True)
         if not response:
             if error_tag:
                 if error_tag != "resource_temporarily_unavailable":

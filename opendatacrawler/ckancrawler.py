@@ -20,7 +20,7 @@ class CkanCrawler():
         }
 
         try:
-            response, self.odcrawler.user_agent = utils.make_request(url, self.odcrawler.user_agent, headers=headers, max_sec=self.odcrawler.max_sec)
+            response, self.odcrawler.user_agent = self.odcrawler.make_request(url, self.odcrawler.user_agent, headers=headers, max_sec=self.odcrawler.max_sec)
             if not response:
                 logger("ERROR", f"Error fetching package list from '{self.odcrawler.domain}': no working User-Agent found")
                 return ids
@@ -37,54 +37,18 @@ class CkanCrawler():
 
         return ids
 
-    def parse_resource(self, resource_meta, base_name, metadata_file_name, reparse_data=None):
-        resource_crawler_info = utils.init_metadata(package=False)
+    def parse_resource(self, resource_meta, base_name):
+        resource = {}
+        resource["fileName"] = base_name
 
-        if reparse_data:
-            logger("...", f"Re-parsing resource '{base_name}' from package '{metadata_file_name}'...", indent=4)
-            resource = resource_meta
-            meta_media_type = reparse_data.get("metaMediaType")
-        else:
-            logger("...", f"Parsing resource '{base_name}' from package '{metadata_file_name}'...", indent=4)
-            resource = {}
-            resource["fileName"] = base_name
+        resource["name"] = resource_meta.get("name")
+        resource["description"] = resource_meta.get("description")
 
-            resource["name"] = resource_meta.get("name")
-            resource["description"] = resource_meta.get("description")
+        resource["downloadURL"] = utils.fix_url(resource_meta.get("download_url") or resource_meta.get("url") or resource_meta.get("original_url"))
 
-            resource["downloadURL"] = utils.fix_url(resource_meta.get("download_url") or resource_meta.get("url") or resource_meta.get("original_url"))
+        meta_media_type = resource_meta.get("mimetype") or resource_meta.get("format")
 
-            meta_media_type = resource_meta.get("mimetype") or resource_meta.get("format") or ""
-
-        response, self.odcrawler.user_agent, error_tag, e = utils.make_request(resource["downloadURL"], self.odcrawler.user_agent, return_tag=True, max_sec=self.odcrawler.max_sec)
-        if not response:
-            if error_tag:
-                if error_tag != "resource_temporarily_unavailable":
-                    resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag))
-                    logger("WARNING", f"Non-retryable error accessing resource '{base_name}' for parsing", e, indent=4)
-                    resource_crawler_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
-                else:
-                    resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag, {"<metaMediaType>": meta_media_type}))
-                    logger("WARNING", f"Retryable error accessing resource '{base_name}' for parsing", e, indent=4)
-            else:
-                logger("ERROR", f"Error accessing resource '{base_name}'", e, indent=4)
-            
-            return resource, resource_crawler_info
-
-        media_type, file_name, tag_val = utils.resolve_mediatype_conflict(meta_media_type, response, base_name)
-        resource["mediaType"] = media_type
-        resource["fileName"] = file_name
-
-        if tag_val:
-            logger("WARNING", f"Detected a media type mismatch for file '{resource['downloadURL']}' '{base_name}'", indent=4)
-            resource_crawler_info["fileMetadataChanges"].update(utils.add_tag_explanations("mimetype_mismatch", tag_val))
-
-        if reparse_data:
-            logger("OK", f"Successfully re-parsed resource '{resource["fileName"]}' from package '{metadata_file_name}'", indent=4)
-        else:
-            logger("OK", f"Successfully parsed resource '{resource["fileName"]}' from package '{metadata_file_name}'", indent=4)
-
-        return resource, resource_crawler_info
+        return resource, meta_media_type
 
     def get_package(self, package_id, metadata_file_name):
         url = utils.fix_url(f"{self.odcrawler.domain}/api/3/action/package_show?id={package_id}")
@@ -100,7 +64,7 @@ class CkanCrawler():
         metadata["fileName"] = metadata_file_name
         metadata["img"] = "https://www.ckan.org/img/ckan-logo-256.png"
 
-        response, self.odcrawler.user_agent, error_tag, e = utils.make_request(url, self.odcrawler.user_agent, headers=headers, return_tag=True)
+        response, self.odcrawler.user_agent, error_tag, e = self.odcrawler.make_request(url, self.odcrawler.user_agent, headers=headers, return_tag=True)
         if not response:
             if error_tag:
                 if error_tag != "resource_temporarily_unavailable":
