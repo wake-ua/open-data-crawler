@@ -9,7 +9,7 @@ class DatosGobEsCrawler():
     def __init__(self, odcrawler):
         self.odcrawler = odcrawler
         
-        self.odcrawler.init_rate_limit(limit_req_hour=5*60*60)
+        self.odcrawler.init_rate_limit(limit_req_per_sec=5000 / 3600)
 
     def get_package_list(self):
         ids = []
@@ -44,57 +44,17 @@ class DatosGobEsCrawler():
 
         return ids
 
-    def parse_resource(self, resource_meta, base_name, metadata_file_name, reparse_data=None):
-        resource_crawler_info = utils.init_metadata(package=False)
+    def parse_resource(self, resource_meta, base_name):
+        resource = {}
+        resource["fileName"] = base_name
 
-        if reparse_data:
-            logger("...", f"Re-parsing resource '{base_name}' from package '{metadata_file_name}'...", indent=4)
-            resource = resource_meta
-            meta_media_type = resource_meta.get("format", {}).get("value")
-        else:
-            logger("...", f"Parsing resource '{base_name}' from package '{metadata_file_name}'...", indent=4)
-            resource = {}
-            resource["fileName"] = base_name
+        resource["name"] = utils.extract_multilang_field(resource_meta.get("title", []), "_lang", "_value")
+        resource["downloadURL"] = utils.fix_url(resource_meta.get("accessURL") or resource_meta.get("downloadURL"))
 
-            resource["name"] = utils.extract_multilang_field(resource_meta.get("title", []), "_lang", "_value")
+        meta_media_type = resource_meta.get("format", {}).get("value")
 
-            resource["downloadURL"] = utils.fix_url(resource_meta.get("accessURL") or resource_meta.get("downloadURL"))
+        return resource, meta_media_type
 
-            meta_media_type = resource_meta.get("key", None)
-            if meta_media_type:
-                ext = meta_media_type.split(".")[-1].lower() if "." in meta_media_type else None
-                meta_media_type = utils.EXT_TO_MIME.get(ext)
-
-        response, self.odcrawler.user_agent, error_tag, e = self.odcrawler.make_request(resource["downloadURL"], self.odcrawler.user_agent, return_tag=True, max_sec=self.odcrawler.max_sec, stream=True)
-        if not response:
-            if error_tag:
-                if error_tag != "resource_temporarily_unavailable":
-                    resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag))
-                    logger("WARNING", f"Non-retryable error accessing resource '{base_name}' for parsing", e, indent=4)
-                    resource_crawler_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
-                else:
-                    resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag, {"<metaMediaType>": meta_media_type}))
-                    logger("WARNING", f"Retryable error accessing resource '{base_name}' for parsing", e, indent=4)
-            else:
-                logger("ERROR", f"Error accessing resource '{base_name}'", e, indent=4)
-            
-            return resource, resource_crawler_info
-
-        media_type, file_name, tag_val = utils.resolve_mediatype_conflict(meta_media_type, response, base_name)
-        resource["mediaType"] = media_type
-        resource["fileName"] = file_name
-
-        if tag_val:
-            logger("WARNING", f"Detected a media type mismatch for file '{resource['downloadURL']}' '{base_name}'", indent=4)
-            resource_crawler_info["fileMetadataChanges"].update(utils.add_tag_explanations("mimetype_mismatch", tag_val))
-
-        if reparse_data:
-            logger("OK", f"Successfully re-parsed resource '{resource["fileName"]}' from package '{metadata_file_name}'", indent=4)
-        else:
-            logger("OK", f"Successfully parsed resource '{resource["fileName"]}' from package '{metadata_file_name}'", indent=4)
-
-        return resource, resource_crawler_info
-    
     def get_package(self, package_id, metadata_file_name):
         url = utils.fix_url(f"{self.odcrawler.domain}/apidata/catalog/dataset/{package_id}")
         headers = {

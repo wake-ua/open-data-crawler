@@ -198,44 +198,36 @@ class OpenDataCrawler():
 
     # ==============================
 
-    def init_rate_limit(self, limit_req_hour=None):
-        self.limit_req_hour = limit_req_hour
-        if limit_req_hour:
-            logger("WARNING", f"Parallel processing for domain '{self.domain}' disabled due to API rate limits", level="print")
+    def init_rate_limit(self, limit_req_per_sec=None):
+        self.limit_req_per_sec = limit_req_per_sec
+        if limit_req_per_sec:
+            logger("WARNING", f"Parallel processing for domain '{self.domain}' disabled due to API rate limits ({self.limit_req_per_sec:.3f} req/s ~ {self.limit_req_per_sec * 3600:.0f} req/h)", level="print")
             logger(None, "=" * 80, level="print")
-            self.max_threads = 1
-            self.max_resource_threads = 1
 
+            self.req_interval = 1.0 / limit_req_per_sec
+            self.last_request_time = None
             self.req_count = 1
-            self.window_start = datetime.now()
-
-
         else:
+            self.req_interval = None
+            self.last_request_time = None
             self.req_count = None
-            self.window_start = None
 
     def check_rate_limit(self):
-        if not self.limit_req_hour:
+        if not self.limit_req_per_sec:
             return
 
         now = datetime.now()
-        elapsed = (now - self.window_start).total_seconds()
+        if self.last_request_time is not None:
+            elapsed = (now - self.last_request_time).total_seconds()
+            if elapsed < self.req_interval:
+                sleep_time = self.req_interval - elapsed
+                time.sleep(sleep_time)
 
-        if elapsed >= 3600:
-            self.req_count = 0
-            self.window_start = now
-
-        elif self.req_count >= self.limit_req_hour:
-            wait_seconds = int(3600 - elapsed)
-            logger("WAIT", f"Request limit of {self.limit_req_hour}/hour reached, pausing for {wait_seconds}s (~{round(wait_seconds / 60, 1)} min remaining)...", level="print")
-            time.sleep(wait_seconds)
-            self.req_count = 0
-            self.window_start = datetime.now()
-
+        self.last_request_time = datetime.now()
         self.req_count += 1
 
     def make_request(self, *args, **kwargs):
-        if self.limit_req_hour:
+        if self.limit_req_per_sec:
             self.check_rate_limit()
         return utils.make_request(*args, **kwargs)
 
@@ -334,11 +326,6 @@ class OpenDataCrawler():
     def handle_parse_resource(self, resource_meta, base_name, metadata_file_name, reparse_data=None, log_indent=4):
         resource_crawler_info = utils.init_metadata(package=False)
 
-        print(resource_meta)
-        print(base_name)
-        print(metadata_file_name)
-        print(reparse_data)
-        print("====")
         if reparse_data:
             logger("...", f"Re-parsing resource '{base_name}' from package '{metadata_file_name}'...", indent=log_indent)
             resource = resource_meta
