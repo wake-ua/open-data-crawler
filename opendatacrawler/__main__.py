@@ -62,7 +62,7 @@ def main():
 
             logger(None, "=" * 80, level="print")
 
-            resume_data, downloaded_before_res, failed_before_res, failed_before_pkgs  = utils.recover_resume(save_path=crawler.save_path, accepted_types=d_types)
+            resume_data, downloaded_before_res, failed_before_res, unavailable_permanent_before_res, failed_before_pkgs = utils.recover_resume(save_path=crawler.save_path, accepted_types=d_types)
             has_logs = None
             if reset_domain:
                 log_path = os.path.join(os.getcwd(), "logs", utils.clean_url(url))
@@ -85,7 +85,7 @@ def main():
             crawler.reset_domain(reset_domain_input, resume_data, has_logs)
 
             if reset_domain_input:
-                resume_data, downloaded_before_res, failed_before_res, failed_before_pkgs  = utils.recover_resume(save_path=crawler.save_path, accepted_types=d_types)
+                resume_data, downloaded_before_res, failed_before_res, unavailable_permanent_before_res, failed_before_pkgs = utils.recover_resume(save_path=crawler.save_path, accepted_types=d_types)
                 logger(None, "=" * 80, level="print")
 
             if resume_data:
@@ -113,14 +113,14 @@ def main():
 
                 if new_packages:
                     logger("...", f"Processing {len(new_packages)} new packages...", level="print")
-                    crawler.process_packages_batch(new_packages, len(packages) - len(new_packages) - len(failed_packages), "Processing new packages...", "green", downloaded_before_res, failed_before_res)
+                    crawler.process_packages_batch(new_packages, len(packages) - len(new_packages) - len(failed_packages), "Processing new packages...", "green", downloaded_before_res, failed_before_res, unavailable_permanent_before_res)
 
                 if failed_packages:
                     logger("...", f"Reprocessing {len(failed_packages)} previously failed packages...", level="print")
-                    crawler.process_packages_batch(failed_packages, len(packages) - len(failed_packages), "Reprocessing failed packages...", "yellow", downloaded_before_res, failed_before_res)
+                    crawler.process_packages_batch(failed_packages, len(packages) - len(failed_packages), "Reprocessing failed packages...", "yellow", downloaded_before_res, failed_before_res, unavailable_permanent_before_res)
                 
-                resume_data, downloaded_after_res, failed_after_res, _ = utils.recover_resume(save_path=crawler.save_path, accepted_types=d_types)
-                crawler.log_run_summary(downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, resume_data)
+                resume_data, downloaded_after_res, failed_after_res, unavailable_permanent_after_res, _ = utils.recover_resume(save_path=crawler.save_path, accepted_types=d_types)
+                crawler.log_run_summary(downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, unavailable_permanent_before_res, unavailable_permanent_after_res, resume_data)
             else:
                 if not id_dataset and not avoid_data and not max_packages and not categories and not d_types:
                     logger("OK", f"No packages left to process for '{crawler.dms}', everything is up-to-date", level="print")

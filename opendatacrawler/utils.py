@@ -223,6 +223,7 @@ def recover_resume(save_path, accepted_types=None):
     packages_status = {}
     total_failed = []
     total_successful = []
+    total_unavailable_permanent = []
     failed_packages = set()
 
     for fname in os.listdir(save_path):
@@ -235,16 +236,20 @@ def recover_resume(save_path, accepted_types=None):
                 meta = json.load(f)
 
             identifier = meta.get("identifier")
-
             failed = []
             success = []
+            unavailable_permanent = []
+
             for file_name, _ in meta.get("resources", {}).items():
                 ext = file_name.split(".")[-1].lower() if "." in file_name else None
                 if accepted_types and (ext not in accepted_types and ext):
                     continue
 
                 if is_completed(meta, file_name):
-                    success.append(file_name)
+                    if is_completed(meta, file_name, complete=False, unavailable_permanent=True):
+                        unavailable_permanent.append(file_name)
+                    else:
+                        success.append(file_name)
                 else:
                     failed.append(file_name)
 
@@ -253,16 +258,22 @@ def recover_resume(save_path, accepted_types=None):
 
             total_failed.extend(failed)
             total_successful.extend(success)
+            total_unavailable_permanent.extend(unavailable_permanent)
+
             packages_status[identifier] = {
                 "failed_resources": failed,
-                "successful_resources": success
+                "successful_resources": success,
+                "unavailable_permanent": unavailable_permanent
             }
         except Exception as e:
             logger("ERROR", f"Could not read {meta_path}", e)
 
-    return packages_status, total_successful, total_failed, failed_packages
+    return packages_status, total_successful, total_failed, total_unavailable_permanent, failed_packages
 
-def is_completed(package, file_name, complete=True, unavailable=False):
+PERMANENT_UNAVAILABLE_TAGS = {"resource_removed", "unresolvable_domain", "method_not_allowed", "missing_resource", "forbidden_resource", "ssl_error", "invalid_request"}
+
+def is_completed(package, file_name, complete=True, unavailable=False, unavailable_permanent=False):
+    """Check if a resource is completed, temporarily unavailable, or permanently unavailable."""
     if file_name:
         try:
             info = package["crawlerInfo"]["resourcesInfo"].get(file_name, {})
@@ -271,8 +282,13 @@ def is_completed(package, file_name, complete=True, unavailable=False):
 
             if complete and file_status.get("fileCompleted"):
                 return True
+
             if unavailable and "resource_temporarily_unavailable" in file_info:
                 return True
+
+            if unavailable_permanent:
+                if any(tag in file_info for tag in PERMANENT_UNAVAILABLE_TAGS):
+                    return True
 
             return False
         except Exception as e:

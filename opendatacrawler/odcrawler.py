@@ -142,15 +142,18 @@ class OpenDataCrawler():
         log_manager.move_to_domain(self.clean_domain, move_file=True)
         log_manager.clean_unused_logs()
 
-    def log_run_summary(self, downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, resume_data):
+    def log_run_summary(self, downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, unavailable_permanent_before, unavailable_permanent_after, resume_data):
         new_downloads = len(downloaded_after_res) - len(downloaded_before_res)
         new_failures = max(0, len(failed_after_res) - len(failed_before_res))
         recovered = len(set(failed_before_res) - set(failed_after_res))
-
+        new_unavailable = max(0, len(unavailable_permanent_after) - len(unavailable_permanent_before))
+        total_success = len(downloaded_after_res)
+        total_failed = len(failed_after_res)
+        total_unavailable = len(unavailable_permanent_after)
         logger("OK", f"{new_downloads} new resources downloaded in this run "
-                     f"({new_failures} new failures, {recovered} recovered from previous failures): "
-                     f"{len(downloaded_after_res)} successfully downloaded resources in total across {len(resume_data)} packages "
-                     f"({len(failed_after_res)} failed resources in total)", level="print")
+                    f"({new_failures} new failures, {recovered} recovered, {new_unavailable} marked as permanently unavailable): "
+                    f"{total_success} successful, {total_failed} failed, {total_unavailable} permanently unavailable in total "
+                    f"across {len(resume_data)} packages", level="print")
 
     def run_threaded_function(self, items, func, max_workers=1, thread_name_prefix=None, use_tqdm=False, tqdm_initial=0, tqdm_desc="", tqdm_colour=None):
         results = []
@@ -177,7 +180,7 @@ class OpenDataCrawler():
                     raise
         return results
 
-    def process_packages_batch(self, packages, tqdm_initial, tqdm_desc, tqdm_colour, downloaded_before_res, failed_before_res):
+    def process_packages_batch(self, packages, tqdm_initial, tqdm_desc, tqdm_colour, downloaded_before_res, failed_before_res, unavailable_permanent_before_res):
         try:
             self.run_threaded_function(
                 items=packages, func=lambda pkg_id: self.process_package(pkg_id),
@@ -191,9 +194,9 @@ class OpenDataCrawler():
             else:
                 logger("WARNING", "Interrupt received, terminating all threads immediately", level="print")
             logger(None, "=" * 80, level="print")
-
-            resume_data, downloaded_after_res, failed_after_res, _ = utils.recover_resume(save_path=self.save_path, accepted_types=self.data_types)
-            self.log_run_summary(downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, resume_data)
+            
+            resume_data, downloaded_after_res, failed_after_res, unavailable_permanent_after_res, _ = utils.recover_resume(save_path=self.save_path, accepted_types=self.data_types)
+            self.log_run_summary(downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, unavailable_permanent_before_res, unavailable_permanent_after_res, resume_data)
             os._exit(1)
 
     # ==============================
@@ -201,12 +204,18 @@ class OpenDataCrawler():
     def init_rate_limit(self, limit_req_per_sec=None):
         self.limit_req_per_sec = limit_req_per_sec
         if limit_req_per_sec:
-            logger("WARNING", f"Parallel processing for domain '{self.domain}' disabled due to API rate limits ({self.limit_req_per_sec:.3f} req/s ~ {self.limit_req_per_sec * 3600:.0f} req/hour)", level="print")
-            logger(None, "=" * 80, level="print")
-
             self.req_interval = 1.0 / limit_req_per_sec
             self.last_request_time = None
             self.req_count = 1
+
+            if limit_req_per_sec < 10:
+                self.max_threads = 1
+                self.max_resource_threads = 1
+                logger("WARNING", f"Parallel execution disabled for domain '{self.domain}' due to API rate limits ({self.limit_req_per_sec:.3f} req/s ~ {self.limit_req_per_sec * 3600:.0f} req/hour)", level="print")
+            else:
+                logger("INFO", f"Rate limiting active for domain '{self.domain}' due to API rate limits ({self.limit_req_per_sec:.3f} req/s ~ {self.limit_req_per_sec * 3600:.0f} req/hour), parallel execution allowed", level="print")
+
+            logger(None, "=" * 80, level="print")
         else:
             self.req_interval = None
             self.last_request_time = None
