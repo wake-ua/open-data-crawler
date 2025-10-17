@@ -24,8 +24,11 @@ from opendatacrawler.setup_logger import log_manager
 logger = log_manager.log
 
 ENCODING_CANDIDATES = ["utf-8", "iso-8859-1", "windows-1252", "windows-1250", "cp850"]
-
 NOT_ALLOWED_DELIMITERS = [":", " ",'"', "'", "_", "(", ")", "<", ">", "[", "]", "{", "}", "-", ".", "+", "*", "=", "/", "\\", "�", "@"]
+QUOTE_CHAR = '"'
+
+
+PERMANENT_UNAVAILABLE_TAGS = {"resource_removed", "unresolvable_domain", "method_not_allowed", "missing_resource", "forbidden_resource", "ssl_error", "invalid_request"}
 
 RAW_SIGNATURES = [
     (b"\x37\x7A\xBC\xAF\x27\x1C", "application/x-7z-compressed"),
@@ -270,10 +273,7 @@ def recover_resume(save_path, accepted_types=None):
 
     return packages_status, total_successful, total_failed, total_unavailable_permanent, failed_packages
 
-PERMANENT_UNAVAILABLE_TAGS = {"resource_removed", "unresolvable_domain", "method_not_allowed", "missing_resource", "forbidden_resource", "ssl_error", "invalid_request"}
-
 def is_completed(package, file_name, complete=True, unavailable=False, unavailable_permanent=False):
-    """Check if a resource is completed, temporarily unavailable, or permanently unavailable."""
     if file_name:
         try:
             info = package["crawlerInfo"]["resourcesInfo"].get(file_name, {})
@@ -383,96 +383,6 @@ def fix_line(line):
     gc.collect()
     return line, None
 
-def are_quotes_balanced(line):
-    i = 0
-    in_quotes = False
-    while i < len(line):
-        if line[i] == '"':
-            if i + 1 < len(line) and line[i + 1] == '"':
-                i += 2  # comilla escapada
-            else:
-                in_quotes = not in_quotes
-                i += 1
-        else:
-            i += 1
-    return not in_quotes
-
-def fix_bad_inner_quotes(line):
-    fixed = []
-    in_quotes = False
-    i = 0
-    while i < len(line):
-        char = line[i]
-        if char == '"':
-            if in_quotes:
-                if i + 1 < len(line) and line[i + 1] == '"':
-                    if i + 2 < len(line) and line[i + 2] != '"':
-                        fixed.append('"')
-                        in_quotes = False
-                        i += 1
-                    else:
-                        fixed.append('"')
-                        i += 2
-                else:
-                    fixed.append('"')
-                    in_quotes = False
-                    i += 1
-            else:
-                fixed.append('"')
-                in_quotes = True
-                i += 1
-        else:
-            fixed.append(char)
-            i += 1
-    return ''.join(fixed)
-
-def check_unbalanced_quotes(path, encoding, max_row_lines=50):
-    reconstructed_lines = 0
-
-    try:
-        with open(path, "r", encoding=encoding) as f, tempfile.NamedTemporaryFile(mode="w", encoding=encoding, delete=False) as temp_out:
-            partial_row = []
-            current_line = 0
-            start_line = None
-
-            for line in f:
-                current_line += 1
-                line = line.strip()
-
-                if not partial_row:
-                    start_line = current_line
-
-                partial_row.append(line)
-
-                if len(partial_row) > max_row_lines:
-                    logger("WARNING", f"Exceeded {max_row_lines} lines while reconstructing quotes (lines {start_line}-{current_line}) in file '{path}'", indent=4)
-                    logger("FIX", f"Forcing partial reconstruction despite unbalanced quotes (file '{path}')", indent=4)
-                    raw_block = "\n".join(partial_row)
-                    cleaned_block = fix_bad_inner_quotes(raw_block)
-                    temp_out.write(cleaned_block + "\n")
-                    partial_row = []
-                    continue
-
-                joined_line = "\n".join(partial_row)
-                cleaned_line = fix_bad_inner_quotes(joined_line)
-
-                if are_quotes_balanced(cleaned_line):
-                    if len(partial_row) > 1:
-                        reconstructed_lines += 1
-                    temp_out.write(cleaned_line + "\n")
-                    partial_row = []
-
-            if partial_row:
-                logger("WARNING", f"File ended with unfinished multiline block in '{path}', forcing final reconstruction", indent=4)
-                final_line = fix_bad_inner_quotes("\n".join(partial_row))
-                temp_out.write(final_line + "\n")
-
-            return temp_out.name, reconstructed_lines
-
-    except Exception as e:
-        logger("ERROR", f"Error reconstructing quotes in file '{path}'", e, indent=4)
-        return None, 0
-
 def check_file_empty_or_strip(path, whitespace=b" \t\r\n"):
     try:
         with open(path, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
@@ -503,30 +413,6 @@ def check_file_empty_or_strip(path, whitespace=b" \t\r\n"):
         logger("ERROR", f"Error stripping whitespace from file '{path}'", e, indent=4)
         return None, None
 
-def strip_outer_quotes(path, encoding):
-    was_stripped = False
-    try:
-        with open(path, "r", encoding=encoding) as f, tempfile.NamedTemporaryFile(mode="w", encoding=encoding, delete=False) as temp_out:
-            for line in f:
-                original = line.strip()
-
-                start_quotes = len(re.match(r'^"+', original).group(0)) if re.match(r'^"+', original) else 0
-                end_quotes = len(re.search(r'"+$', original).group(0)) if re.search(r'"+$', original) else 0
-
-                if start_quotes >= 2 and end_quotes >= 2:
-                    inner = original[start_quotes:-end_quotes]
-                    line = inner.strip()
-                    was_stripped = True
-                else:
-                    line = original
-
-                temp_out.write(line + "\n")
-
-            return temp_out.name, was_stripped
-    except Exception as e:
-        logger("ERROR", f"Error during outer quote stripping for file '{path}'", e, indent=4)
-        return None, False
-
 def check_single_line(path, encoding):
     try:
         with open(path, "r", encoding=encoding) as f:
@@ -540,50 +426,178 @@ def check_single_line(path, encoding):
         logger("ERROR", f"Error checking if file '{path}' is one-line", e, indent=4)
         return False
 
-def process_fix_tabular(dataset_path, encoding):
-    tags = []
-    temp_paths = []
+def process_field(field):
+    if field.startswith(QUOTE_CHAR) and not field.endswith(QUOTE_CHAR):
+        field += QUOTE_CHAR
+    elif field.endswith(QUOTE_CHAR) and not field.startswith(QUOTE_CHAR):
+        field = QUOTE_CHAR + field
 
-    process_fix_path = dataset_path
-    was_modified = False
+    inner = field[1:-1] if field.startswith(QUOTE_CHAR) and field.endswith(QUOTE_CHAR) and len(field) >= 2 else field
+    inner = inner.replace("\r", " ").replace("\n", " ")
 
-    logger("...", f"Starting tabular cleaning for '{dataset_path}' (encoding: {encoding})", indent=4)
-    logger("...", f"Checking for unnecessary outer quotes in '{dataset_path}'...", indent=4)
-    temp_path, was_stripped = strip_outer_quotes(process_fix_path, encoding)
-    if temp_path:
-        process_fix_path = temp_path
-        temp_paths.append(temp_path)
-    if was_stripped:
-        was_modified = True
-        logger("WARNING", f"File '{dataset_path}' appears to have unnecessary outer quotes", indent=4)
-        logger("FIX", f"Removed unnecessary outer quotes in file '{dataset_path}'", indent=4)
-        tags.append(("stripped_outer_quotes", {}))
+    res, i = [], 0
+    while i < len(inner):
+        ch = inner[i]
+        if ch == QUOTE_CHAR:
+            res.append(QUOTE_CHAR * 2)
+            i += 2 if i + 1 < len(inner) and inner[i + 1] == QUOTE_CHAR else 1
+        else:
+            res.append(ch)
+            i += 1
+    return f'{QUOTE_CHAR}{"".join(res)}{QUOTE_CHAR}'
 
-    logger("...", f"Checking for broken multiline values in '{dataset_path}'...", indent=4)
-    temp_path, reconstructed_lines = check_unbalanced_quotes(process_fix_path, encoding)
-    if temp_path:
-        process_fix_path = temp_path
-        temp_paths.append(temp_path)
+def fix_csv_line(line):
+    delimiter = detect_delimiter(line)
+    if not delimiter:
+        return line
+
+    fields, field, in_quotes = [], "", False
+    for ch in line:
+        if ch == QUOTE_CHAR:
+            in_quotes = not in_quotes
+        elif ch == delimiter and not in_quotes:
+            fields.append(field.strip())
+            field = ""
+            continue
+        field += ch
+    fields.append(field.strip())
+
+    return delimiter.join(process_field(f) for f in fields)
+
+def remove_outer_quotes(text):
+    cleaned = []
+    for raw in text.splitlines():
+        if detect_delimiter(raw) is not None:
+            cleaned.append(raw)
+            continue
+
+        s = raw.rstrip("\r")
+        lead, trail, unwraps = len(s) - len(s.lstrip(QUOTE_CHAR)), len(s) - len(s.rstrip(QUOTE_CHAR)), 0
+        while unwraps < min(lead, trail) and len(s) >= 2:
+            s = s[1:-1]
+            unwraps += 1
+            if detect_delimiter(s) is not None:
+                raw = s
+                break
+        cleaned.append(raw)
+    return "\n".join(cleaned)
+
+def count_inner_double_quotes(text):
+    in_quotes = False
+    count = 0
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch == QUOTE_CHAR:
+            if in_quotes and i + 1 < n and text[i + 1] == QUOTE_CHAR:
+                count += 1
+                i += 2
+                continue
+            in_quotes = not in_quotes
+        i += 1
+    return count
+
+def fix_tabular_data(path, encoding):
+    reconstructed_lines = 0
+    outer_quotes_removed = False
+    inner_quotes_fixed = 0
+    file_changed = False
+
+    with open(path, "r", encoding=encoding) as f, tempfile.NamedTemporaryFile(mode="w", encoding=encoding, delete=False) as temp_out:
+        buf = []
+        in_quotes = False
+        pending_multiline = False
+
+        while True:
+            raw_line = f.readline()
+            if not raw_line:
+                break
+            line = raw_line.rstrip("\r\n")
+
+            i, n = 0, len(line)
+            while i < n:
+                ch = line[i]
+                if ch == QUOTE_CHAR:
+                    if in_quotes and i + 1 < n and line[i + 1] == QUOTE_CHAR:
+                        buf.append(QUOTE_CHAR * 2)
+                        i += 2
+                        continue
+                    in_quotes = not in_quotes
+                    buf.append(ch)
+                else:
+                    buf.append(ch)
+                i += 1
+
+            if in_quotes:
+                pending_multiline = True
+                buf.append(" ")
+                continue
+
+            record = "".join(buf)
+            cleaned = remove_outer_quotes(record)
+            if cleaned != record:
+                outer_quotes_removed = True
+                file_changed = True
+
+            before_inner = count_inner_double_quotes(record)
+            before_quotes = record.count(QUOTE_CHAR)
+
+            fixed = fix_csv_line(cleaned)
+
+            after_inner = count_inner_double_quotes(fixed)
+            after_quotes = fixed.count(QUOTE_CHAR)
+
+            if after_inner > before_inner:
+                inner_quotes_fixed += 1
+                file_changed = True
+
+            if after_quotes > before_quotes and not (inner_quotes_fixed or outer_quotes_removed or reconstructed_lines):
+                file_changed = True
+
+            temp_out.write(fixed + "\n")
+
+            if pending_multiline:
+                reconstructed_lines += 1
+                file_changed = True
+                pending_multiline = False
+
+            buf = []
+
+        if buf:
+            record = "".join(buf)
+            cleaned = remove_outer_quotes(record)
+            if cleaned != record:
+                outer_quotes_removed = True
+                file_changed = True
+
+            before_inner = count_inner_double_quotes(record)
+            before_quotes = record.count(QUOTE_CHAR)
+
+            fixed = fix_csv_line(cleaned)
+            after_inner = count_inner_double_quotes(fixed)
+            after_quotes = fixed.count(QUOTE_CHAR)
+
+            if after_inner > before_inner:
+                inner_quotes_fixed += 1
+                file_changed = True
+
+            if after_quotes > before_quotes and not (inner_quotes_fixed or outer_quotes_removed or reconstructed_lines):
+                file_changed = True
+
+            temp_out.write(fixed + "\n")
+
     if reconstructed_lines > 0:
-        was_modified = True
-        logger("WARNING", f"File '{dataset_path}' appears to contain broken multiline values", indent=4)
-        logger("FIX", f"Reconstructed {reconstructed_lines} multiline rows in file '{dataset_path}'", indent=4)
-        tags.append(("reconstructed_lines", {"<reconstructed_lines>": reconstructed_lines}))
+        file_changed = True
 
-    logger("...", f"Checking if file '{dataset_path}' contains only one line...", indent=4)
-    if check_single_line(process_fix_path, encoding):
-        logger("WARNING", f"File '{dataset_path}' appears to contain only one line", indent=4)
-        tags.append(("one_line", {}))
+    if not file_changed:
+        try:
+            os.remove(temp_out.name)
+        except Exception:
+            pass
+        return None, 0, False, 0
 
-    if temp_paths:
-        delete_tempfiles(temp_paths, process_fix_path)
-
-    if was_modified:
-        logger("OK", f"Finished tabular cleaning for '{dataset_path}'", indent=4)
-
-    del temp_path, temp_paths
-    gc.collect()
-    return process_fix_path if was_modified else None, tags
+    return temp_out.name, reconstructed_lines, outer_quotes_removed, inner_quotes_fixed
 
 # == Encoding functions ==
 
@@ -812,45 +826,48 @@ def detect_best_encoding(path, encodings=ENCODING_CANDIDATES, num_bytes=64*1024)
 
 # == Delimiter detection functions ==
 
-def count_unquoted_delimiters(line, delim):
-    if not are_quotes_balanced(line):
-        return 0
-
-    count = 0
-    in_quotes = False
-    i = 0
-    while i < len(line):
-        if line[i] == '"':
-            if i + 1 < len(line) and line[i + 1] == '"':
+def detect_delimiter(text, return_count=False):
+    counts, in_quotes, i, n = {}, False, 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == QUOTE_CHAR:
+            if in_quotes and i + 1 < n and text[i + 1] == QUOTE_CHAR:
                 i += 2
-            else:
-                in_quotes = not in_quotes
-                i += 1
-        elif line[i] == delim and not in_quotes:
-            count += 1
+                continue
+            in_quotes = not in_quotes
             i += 1
-        else:
-            i += 1
-    return count
+            continue
 
-def detect_delimiter(path, encoding, max_lines=50, max_cv=0.6):
+        if not in_quotes and (
+            not ch.isalnum()
+            and (not ch.isspace() or ch == "\t")
+            and ch not in NOT_ALLOWED_DELIMITERS
+        ):
+            counts[ch] = counts.get(ch, 0) + 1
+        i += 1
+
+    if not counts:
+        return (None, 0) if return_count else None
+
+    best = max(counts, key=counts.get)
+    if return_count:
+        return best, counts[best]
+    else:
+        return best
+
+def detect_delimiter_consistent(path, encoding, max_lines=50, max_cv=0.6):
     lines = []
-
     with open(path, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
         line_bytes = b""
-
         for byte in iter(lambda: mm.read(1), b""):
             line_bytes += byte
             if byte == b"\n":
                 line = safe_decode(line_bytes, encoding).strip()
                 if line:
                     lines.append(line)
-
                 line_bytes = b""
-
                 if len(lines) >= max_lines:
                     break
-
         if line_bytes and len(lines) < max_lines:
             line = safe_decode(line_bytes, encoding).strip()
             if line:
@@ -859,24 +876,33 @@ def detect_delimiter(path, encoding, max_lines=50, max_cv=0.6):
     if not lines:
         return None, None
 
-    delimiter_candidates = []
-    all_chars = set(c for line in lines for c in line if not c.isalnum() and c not in NOT_ALLOWED_DELIMITERS)
+    delimiter_data = []
+    for idx, line in enumerate(lines):
+        delim, count = detect_delimiter(line, return_count=True)
+        if delim:
+            delimiter_data.append((idx, delim, count))
 
-    for delim in all_chars:
-        counts = [count_unquoted_delimiters(line, delim) for line in lines]
+    if not delimiter_data:
+        return None, None
 
-        nonzero_counts = [c for c in counts if c > 0]
-        if not nonzero_counts:
+    delim_groups = {}
+    for idx, delim, count in delimiter_data:
+        delim_groups.setdefault(delim, []).append((idx, count))
+
+    candidates = []
+    for delim, values in delim_groups.items():
+        counts = [c for _, c in values]
+        nonzero = [c for c in counts if c > 0]
+        if not nonzero:
             continue
 
-        freq_counter = Counter(nonzero_counts)
+        freq_counter = Counter(nonzero)
         most_common_val, freq = freq_counter.most_common(1)[0]
+        first_idx = next(idx for idx, c in values if c == most_common_val)
 
-        first_idx = counts.index(most_common_val)
-
-        if len(nonzero_counts) > 1:
-            mean = statistics.mean(nonzero_counts)
-            stdev = statistics.stdev(nonzero_counts)
+        if len(nonzero) > 1:
+            mean = statistics.mean(nonzero)
+            stdev = statistics.stdev(nonzero)
             cv = stdev / mean if mean != 0 else float("inf")
         else:
             cv = 0
@@ -884,7 +910,7 @@ def detect_delimiter(path, encoding, max_lines=50, max_cv=0.6):
         if cv > max_cv:
             continue
 
-        delimiter_candidates.append({
+        candidates.append({
             "delim": delim,
             "freq": freq,
             "cv": cv,
@@ -892,12 +918,11 @@ def detect_delimiter(path, encoding, max_lines=50, max_cv=0.6):
             "most_common_val": most_common_val,
         })
 
-    if not delimiter_candidates:
+    if not candidates:
         return None, None
 
-    delimiter_candidates.sort(key=lambda x: (-x["freq"], x["cv"], x["first_idx"]))
-    best = delimiter_candidates[0]
-
+    candidates.sort(key=lambda x: (-x["freq"], x["cv"], x["first_idx"]))
+    best = candidates[0]
     return best["delim"], best["first_idx"]
 
 # == MIME type functions ==
@@ -1011,12 +1036,6 @@ def get_extension_mime(mime_type):
     except Exception as e:
         logger("ERROR", f"Failed to get extension for MIME type: '{mime_type}'", e)
         return None
-
-def detect_mime_by_signature(raw):
-    for sig, mime in RAW_SIGNATURES:
-        if raw.strip().startswith(sig):
-            return mime
-    return None
 
 # == Data extraction functions ==
 

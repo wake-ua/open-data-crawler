@@ -45,19 +45,34 @@
             "reason": "Added a Byte Order Mark (BOM) to the file to match the detected encoding and ensure correct decoding"
         }
     },
-    "reconstructed_lines": {
-        "tag_placeholders": ["<reconstructed_lines>"],
+    "reconstructed_rows": {
+        "tag_placeholders": ["<reconstructed_rows>"],
         "tag_explanation": {
-            "reason": "Reconstructed <reconstructed_lines> broken lines caused by embedded newlines inside quoted fields in structured or tabular content",
+            "reason": "Reconstructed <reconstructed_rows> broken rows caused by embedded newrows inside quoted fields to ensure valid tabular formatting",
             "values": {
-                "reconstructed_lines": "<reconstructed_lines>"
+                "reconstructed_rows": "<reconstructed_rows>"
             }
+        }
+    },
+    "fixed_inner_quotes": {
+        "tag_placeholders": ["<fixed_inner_quotes>"],
+        "tag_explanation": {
+            "reason": "Fixed <fixed_inner_quotes> broken rows caused by unbalanced or malformed inner quotes inside quoted fields to ensure valid tabular formatting",
+            "values": {
+                "fixed_inner_quotes": "<fixed_inner_quotes>"
+            }
+        }
+    },
+    "standardized_field_quotes": {
+        "tag_placeholders": [],
+        "tag_explanation": {
+            "reason": "Standardized the quoting of all fields in the tabular file to ensure consistent and compliant tabular structure"
         }
     },
     "stripped_outer_quotes": {
         "tag_placeholders": [],
         "tag_explanation": {
-            "reason": "Removed unnecessary outer quotes that wrapped the entire line in every row of the file"
+            "reason": "Removed unnecessary outer quotes that wrapped the entire line in every row of the tabular file"
         }
     },
     "stripped_data": {

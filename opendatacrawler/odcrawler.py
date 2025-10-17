@@ -273,7 +273,7 @@ class OpenDataCrawler():
                         if self.partial:
                             lines_downloaded += chunk.count(b"\n")
                             if lines_downloaded >= line_limit:
-                                logger("WARNING", f"Partial content downloaded (~{line_limit} lines) for '{file_name}'", indent=log_indent)
+                                logger("WARNING", f"Partial content downloaded (~{line_limit} rows) for '{file_name}'", indent=log_indent)
                                 break
             except (requests.exceptions.ChunkedEncodingError, requests.exceptions.ConnectionError) as e:
                 logger("WARNING", f"Chunked connection error while saving '{file_name}'", e, indent=log_indent)
@@ -539,64 +539,71 @@ class OpenDataCrawler():
             logger("ERROR", f"Dataset file '{dataset_path}' does not exist", indent=log_indent)
             return False
 
-        try:
-            if utils.MIME_TYPE_MAP.get(resource.get("mediaType"), {}).get("compressible", False):
-                temp_path, tag = utils.check_file_empty_or_strip(dataset_path)
-
-                if temp_path:
-                    shutil.move(temp_path, dataset_path)
-                    logger("FIX", f"File '{dataset_path}' content stripped and overwritten", indent=log_indent)
-                    package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations("stripped_data"))
-
-                if tag:
-                    logger("WARNING", f"File '{dataset_path}' has no data or no valid content", indent=log_indent)
-                    package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["fileInfo"].update(utils.add_tag_explanations(tag))
-                    return False
-            
-                del temp_path, tag
-                gc.collect()
-        except Exception as e:
-            logger("ERROR", f"File '{dataset_path}'", [e, traceback.format_exc()], indent=log_indent)
-            return False
-
-        try:
-            encoding, temp_path, raw_flags = utils.detect_best_encoding(dataset_path)
-            if encoding:
-                resource["encoding"] = encoding
-            else:
-                logger("ERROR", f"No matching encoding found for: {dataset_path}", indent=log_indent)
+        if utils.MIME_TYPE_MAP.get(resource.get("mediaType"), {}).get("compressible", False):
+            temp_path, tag = utils.check_file_empty_or_strip(dataset_path)
 
             if temp_path:
                 shutil.move(temp_path, dataset_path)
-                logger("FIX", f"Overwrote cleaned content into '{dataset_path}'", indent=log_indent)
-            if raw_flags:
-                package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations(raw_flags, raw_flags))
+                logger("FIX", f"File '{dataset_path}' content stripped and overwritten", indent=log_indent)
+                package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations("stripped_data"))
 
-            del encoding, temp_path, raw_flags
-            gc.collect()
-        except Exception as e:
-            logger("ERROR", f"Error while detecting encoding for: {dataset_path}", [e, traceback.format_exc()], indent=log_indent)
-            return False
+            if tag:
+                logger("WARNING", f"File '{dataset_path}' has no data or no valid content", indent=log_indent)
+                package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["fileInfo"].update(utils.add_tag_explanations(tag))
+                return False
         
-        if os.path.getsize(dataset_path) > 0 and dataset_path.endswith((".csv", ".tsv")):
+            del temp_path, tag
+            gc.collect()
+
             try:
-                temp_path, tag = utils.process_fix_tabular(dataset_path, resource["encoding"])
+                encoding, temp_path, raw_flags = utils.detect_best_encoding(dataset_path)
+                if encoding:
+                    resource["encoding"] = encoding
+                else:
+                    logger("ERROR", f"No matching encoding found for: {dataset_path}", indent=log_indent)
 
                 if temp_path:
                     shutil.move(temp_path, dataset_path)
-                    logger("FIX", f"Cleaned and saved fixed tabular file to '{dataset_path}'", indent=log_indent)
-                if tag:
-                    for tag_key, tag_data in tag:
-                        package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations(tag_key, tag_data))
-                
-                del temp_path, tag
+                    logger("FIX", f"Overwrote cleaned content into '{dataset_path}'", indent=log_indent)
+                if raw_flags:
+                    package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations(raw_flags, raw_flags))
+
+                del encoding, temp_path, raw_flags
+                gc.collect()
+            except Exception as e:
+                logger("ERROR", f"Error while detecting encoding for: {dataset_path}", [e, traceback.format_exc()], indent=log_indent)
+                return False
+
+        if os.path.getsize(dataset_path) > 0 and dataset_path.endswith((".csv", ".tsv")):
+            try:
+                temp_path, reconstructed_rows, outer_quotes_removed, inner_quotes_fixed = utils.fix_tabular_data(dataset_path, resource["encoding"])
+                if temp_path:
+                    shutil.move(temp_path, dataset_path)
+                    logger("FIX", f"Cleaned and standardized the tabular file '{dataset_path}'", indent=log_indent)
+                    package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations("standardized_field_quotes"))
+
+                    if reconstructed_rows:
+                        logger("FIX", f"Reconstructed {reconstructed_rows} multiline rows in tabular file '{dataset_path}' by merging quoted fields split across rows", indent=log_indent)
+                        package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations("reconstructed_rows", {"<reconstructed_rows>": reconstructed_rows}))
+                    if outer_quotes_removed:
+                        logger("FIX", "Removed unnecessary outer quotes wrapping entire rows in tabular file '{dataset_path}'", indent=log_indent)
+                        package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations("stripped_outer_quotes"))
+                    if inner_quotes_fixed:
+                        logger("FIX", f"Fixed {inner_quotes_fixed} rows with malformed inner quotes in tabular file '{dataset_path}'", indent=log_indent + 2)
+                        package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations("fixed_inner_quotes", {"<fixed_inner_quotes>": inner_quotes_fixed}))
+
+                if utils.check_single_line(dataset_path, resource["encoding"]):
+                    logger("WARNING", f"Tabular file '{dataset_path}' appears to contain only one line", indent=4)
+                    package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations("one_line"))
+        
+                del temp_path, reconstructed_rows, outer_quotes_removed, inner_quotes_fixed
                 gc.collect()
             except Exception as e:
                 logger("ERROR", f"Failed to clean tabular file '{dataset_path}'", [e, traceback.format_exc()], indent=log_indent)
                 return False
 
             try:
-                delimiter, start_row = utils.detect_delimiter(dataset_path, resource["encoding"])
+                delimiter, start_row = utils.detect_delimiter_consistent(dataset_path, resource["encoding"])
                 if delimiter:
                     resource["delimiter"] = delimiter
 
