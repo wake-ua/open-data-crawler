@@ -446,21 +446,45 @@ def process_field(field):
             i += 1
     return f'{QUOTE_CHAR}{"".join(res)}{QUOTE_CHAR}'
 
+def quotes_balanced(line):
+    in_quotes = False
+    i, n = 0, len(line)
+    while i < n:
+        ch = line[i]
+        if ch == QUOTE_CHAR:
+            if in_quotes and i + 1 < n and line[i + 1] == QUOTE_CHAR:
+                i += 2
+                continue
+            in_quotes = not in_quotes
+        i += 1
+    return not in_quotes
+
 def fix_csv_line(line):
     delimiter = detect_delimiter(line)
     if not delimiter:
         return line
 
-    fields, field, in_quotes = [], "", False
-    for ch in line:
-        if ch == QUOTE_CHAR:
-            in_quotes = not in_quotes
-        elif ch == delimiter and not in_quotes:
-            fields.append(field.strip())
-            field = ""
-            continue
-        field += ch
-    fields.append(field.strip())
+    if quotes_balanced(line):
+        fields, field, in_quotes = [], "", False
+        i, n = 0, len(line)
+        while i < n:
+            ch = line[i]
+            if ch == QUOTE_CHAR:
+                if in_quotes and i + 1 < n and line[i + 1] == QUOTE_CHAR:
+                    field += QUOTE_CHAR * 2
+                    i += 2
+                    continue
+                in_quotes = not in_quotes
+                field += ch
+            elif ch == delimiter and not in_quotes:
+                fields.append(field.strip())
+                field = ""
+            else:
+                field += ch
+            i += 1
+        fields.append(field.strip())
+    else:
+        fields = [part.strip() for part in line.split(delimiter)]
 
     return delimiter.join(process_field(f) for f in fields)
 
@@ -498,6 +522,13 @@ def count_inner_double_quotes(text):
         i += 1
     return count
 
+def fix_csv_line_force_split(line):
+    delimiter = detect_delimiter(line)
+    if not delimiter:
+        return process_field(line)
+    fields = [part.strip() for part in line.split(delimiter)]
+    return delimiter.join(process_field(f) for f in fields)
+
 def fix_tabular_data(path, encoding):
     reconstructed_lines = 0
     outer_quotes_removed = False
@@ -506,35 +537,39 @@ def fix_tabular_data(path, encoding):
 
     with open(path, "r", encoding=encoding) as f, tempfile.NamedTemporaryFile(mode="w", encoding=encoding, delete=False) as temp_out:
         buf = []
-        in_quotes = False
-        pending_multiline = False
+        first_line_of_block = None
 
-        while True:
-            raw_line = f.readline()
-            if not raw_line:
-                break
+        for raw_line in f:
             line = raw_line.rstrip("\r\n")
+            if first_line_of_block is None:
+                first_line_of_block = line
 
-            i, n = 0, len(line)
-            while i < n:
-                ch = line[i]
-                if ch == QUOTE_CHAR:
-                    if in_quotes and i + 1 < n and line[i + 1] == QUOTE_CHAR:
-                        buf.append(QUOTE_CHAR * 2)
-                        i += 2
-                        continue
-                    in_quotes = not in_quotes
-                    buf.append(ch)
+            buf.append(line)
+            current = "\n".join(buf)
+
+            if quotes_balanced(current):
+                record = current
+                if "\n" in record:
+                    reconstructed_lines += 1
+                    file_changed = True
+                buf = []
+                first_line_of_block = None
+            else:
+                if first_line_of_block.lstrip().startswith(QUOTE_CHAR):
+                    continue
                 else:
-                    buf.append(ch)
-                i += 1
+                    record = current + QUOTE_CHAR
+                    reconstructed_lines += 1
+                    file_changed = True
 
-            if in_quotes:
-                pending_multiline = True
-                buf.append(" ")
-                continue
+                    cleaned = remove_outer_quotes(record)
+                    fixed = fix_csv_line_force_split(cleaned)
+                    temp_out.write(fixed + "\n")
 
-            record = "".join(buf)
+                    buf = []
+                    first_line_of_block = None
+                    continue
+
             cleaned = remove_outer_quotes(record)
             if cleaned != record:
                 outer_quotes_removed = True
@@ -542,48 +577,30 @@ def fix_tabular_data(path, encoding):
 
             before_inner = count_inner_double_quotes(record)
             before_quotes = record.count(QUOTE_CHAR)
-
             fixed = fix_csv_line(cleaned)
-
             after_inner = count_inner_double_quotes(fixed)
             after_quotes = fixed.count(QUOTE_CHAR)
 
             if after_inner > before_inner:
                 inner_quotes_fixed += 1
                 file_changed = True
-
             if after_quotes > before_quotes and not (inner_quotes_fixed or outer_quotes_removed or reconstructed_lines):
                 file_changed = True
 
             temp_out.write(fixed + "\n")
 
-            if pending_multiline:
+        if buf:
+            record = "\n".join(buf)
+            if not quotes_balanced(record):
+                record += QUOTE_CHAR
                 reconstructed_lines += 1
                 file_changed = True
-                pending_multiline = False
 
-            buf = []
-
-        if buf:
-            record = "".join(buf)
             cleaned = remove_outer_quotes(record)
-            if cleaned != record:
-                outer_quotes_removed = True
-                file_changed = True
-
-            before_inner = count_inner_double_quotes(record)
-            before_quotes = record.count(QUOTE_CHAR)
-
-            fixed = fix_csv_line(cleaned)
-            after_inner = count_inner_double_quotes(fixed)
-            after_quotes = fixed.count(QUOTE_CHAR)
-
-            if after_inner > before_inner:
-                inner_quotes_fixed += 1
-                file_changed = True
-
-            if after_quotes > before_quotes and not (inner_quotes_fixed or outer_quotes_removed or reconstructed_lines):
-                file_changed = True
+            if first_line_of_block and not first_line_of_block.lstrip().startswith(QUOTE_CHAR):
+                fixed = fix_csv_line_force_split(cleaned)
+            else:
+                fixed = fix_csv_line(cleaned)
 
             temp_out.write(fixed + "\n")
 
