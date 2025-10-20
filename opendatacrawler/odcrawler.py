@@ -21,7 +21,7 @@ from opendatacrawler.setup_logger import log_manager
 logger = log_manager.log
 
 class OpenDataCrawler():
-    def __init__(self, domain, path=None, data_types=None, categories=None, partial=False, avoid_data=None, max_sec=None, max_threads=None, max_resource_threads=None):
+    def __init__(self, domain, path=None, data_types=None, categories=None, partial=False, avoid_data=None, max_sec=None, max_threads=None, max_resource_threads=None, num_resources=None):
         self.domain = utils.normalize_domain(domain).rstrip("/")
         self.dms = None
         self.dms_instance = None
@@ -39,10 +39,11 @@ class OpenDataCrawler():
         self.categories = categories
         self.partial = partial
         self.avoid_data = avoid_data
+        self.num_resources = num_resources
 
         self.user_agent = None
         self.limit_req_per_sec=None
-        
+
         logger("...", f"Detecting DMS for domain '{self.domain}'...", level="print")
         self.detect_dms()
         self.init_rate_limit()
@@ -492,6 +493,14 @@ class OpenDataCrawler():
                     continue
 
                 resources_to_process.append((file_name, resource))
+
+            if resources_to_process and self.num_resources:
+                if self.num_resources == 1:
+                    logger("INFO", f"Processing only the first resource from package '{pkg_id}' (out of {len(resources_to_process)} valid and {len(package.get("resources", {}))} total available resources)", indent=log_indent)
+                else:
+                    logger("INFO", f"Processing only the first {self.num_resources} resources from package '{pkg_id}' (out of {len(resources_to_process)} valid and {len(package.get("resources", {}))} total available resources)", indent=log_indent)
+
+                resources_to_process = resources_to_process[:self.num_resources]
 
             self.run_threaded_function(
                 items=resources_to_process, func=lambda item: self.process_resource(item[1], package, metadata_path),

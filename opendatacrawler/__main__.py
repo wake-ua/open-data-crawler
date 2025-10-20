@@ -34,6 +34,8 @@ def main():
                         help="Maximum number of threads to use per package for processing resources (default: 4)")
     parser.add_argument("-rd", "--reset-domain", required=False, action=argparse.BooleanOptionalAction,
                         help="Delete all data and logs for the specified domain before crawling")
+    parser.add_argument("-nr", type=int, required=False,
+                    help="Number of resources per package to download (default: all)")
 
     args = vars(parser.parse_args())
 
@@ -49,12 +51,16 @@ def main():
     max_threads = args["max_threads"] if args["max_threads"] else min(32, (os.cpu_count() or 1) * 5)
     max_resource_threads = args["max_resource_threads"] if args.get("max_resource_threads") else 4
     reset_domain = args.get("reset_domain")
+    num_resources = args.get("nr")
+    if num_resources == 0:
+        avoid_data = True
+        num_resources = None
 
     utils.print_intro()
     crawler = None
     try:
         if utils.is_url(url):
-            crawler = OpenDataCrawler(url, path=d_path, data_types=d_types, categories=categories, partial=partial, avoid_data=avoid_data, max_sec=max_sec, max_threads=max_threads, max_resource_threads=max_resource_threads)
+            crawler = OpenDataCrawler(url, path=d_path, data_types=d_types, categories=categories, partial=partial, avoid_data=avoid_data, max_sec=max_sec, max_threads=max_threads, max_resource_threads=max_resource_threads, num_resources=num_resources)
 
             if not crawler.dms:
                 log_manager.move_to_domain("_unknownDomain", move_file=True)

@@ -49,7 +49,7 @@ class DatosMadridEsCrawler():
 
         resource["fileName"] = base_name
 
-        resource["name"] = utils.get_xml_text(resource_meta.find("dct:title", self.ns))
+        resource["name"] = utils.normalize_no_html_text(utils.get_xml_text(resource_meta.find("dct:title", self.ns)))
 
         download_el = resource_meta.find("dcat:accessURL", self.ns)
         download_url = None
@@ -88,8 +88,8 @@ class DatosMadridEsCrawler():
 
         metadata["accessURL"] = utils.fix_url(f"{self.odcrawler.domain}/egob/catalogo/{package_id}")
 
-        metadata["title"] = utils.get_xml_text(data.find("dct:title", self.ns))
-        metadata["description"] = utils.get_xml_text(data.find("dct:description", self.ns))
+        metadata["title"] =  utils.normalize_no_html_text(utils.get_xml_text(data.find("dct:title", self.ns)))
+        metadata["description"] =  utils.normalize_no_html_text(utils.get_xml_text(data.find("dct:description", self.ns)))
 
         distributions = data.findall(".//dcat:distribution/dcat:Distribution", self.ns)
         if not isinstance(distributions, list):

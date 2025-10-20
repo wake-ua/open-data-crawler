@@ -20,13 +20,14 @@ from collections import Counter
 from ftfy.badness import is_bad
 from ftfy import fix_text
 from w3lib.url import url_query_cleaner
+from bs4 import BeautifulSoup
 from url_normalize import url_normalize
 import requests
 from opendatacrawler.setup_logger import log_manager
 logger = log_manager.log
 
 ENCODING_CANDIDATES = ["utf-8", "iso-8859-1", "windows-1252", "windows-1250", "cp850"]
-NOT_ALLOWED_DELIMITERS = [":", " ",'"', "'", "_", "(", ")", "<", ">", "[", "]", "{", "}", "-", ".", "+", "*", "=", "/", "\\", "�", "@", "”", "#"]
+NOT_ALLOWED_DELIMITERS = [":", " ",'"', "'", "_", "(", ")", "<", ">", "[", "]", "{", "}", "-", ".", "+", "*", "=", "/", "\\", "�", "@", "”", "#", "“"]
 QUOTE_CHAR = '"'
 
 PERMANENT_UNAVAILABLE_TAGS = {"resource_removed", "unresolvable_domain", "method_not_allowed", "missing_resource", "forbidden_resource", "ssl_error", "invalid_request"}
@@ -1130,6 +1131,15 @@ def extract_first_nonempty_value(field):
     elif isinstance(field, str):
         return field.strip()
     return ""
+
+def normalize_no_html_text(text):
+    if not text or not isinstance(text, str):
+        return text
+
+    text = BeautifulSoup(text, "html.parser").get_text()
+    text = " ".join(text.split())
+
+    return text.strip()
 
 # == crawlerChangesInfo functions ==
 
