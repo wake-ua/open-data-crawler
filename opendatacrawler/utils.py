@@ -623,7 +623,7 @@ def fix_tabular_data(path, encoding):
             os.remove(temp_out.name)
         except Exception:
             pass
-        return None, 0, False, 0
+        return None, 0, False, 0, delimiter
 
     return temp_out.name, reconstructed_lines, outer_quotes_removed, inner_quotes_fixed, delimiter
 
