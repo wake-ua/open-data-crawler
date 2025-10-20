@@ -16,6 +16,7 @@ from opendatacrawler.datosgobescrawler import DatosGobEsCrawler
 from opendatacrawler.ckancrawler import CkanCrawler
 from opendatacrawler.zenodocrawler import ZenodoCrawler
 from opendatacrawler.gbifcrawler import GbifCrawler
+from opendatacrawler.datosmadrides import DatosMadridEsCrawler
 from opendatacrawler.setup_logger import log_manager
 logger = log_manager.log
 
@@ -40,7 +41,8 @@ class OpenDataCrawler():
         self.avoid_data = avoid_data
 
         self.user_agent = None
-
+        limit_req_per_sec=None
+        
         logger("...", f"Detecting DMS for domain '{self.domain}'...", level="print")
         self.detect_dms()
         self.init_rate_limit()
@@ -58,7 +60,8 @@ class OpenDataCrawler():
             "Zenodo": "/oai2d?verb=Identify",
             "GBIF" : "/v1/dataset/search?limit=1&offset=0",
             "OpenDataSoft": "/api/v2/catalog",
-            "INE": "/wstempus/js/ES/OPERACIONES_DISPONIBLES"
+            "INE": "/wstempus/js/ES/OPERACIONES_DISPONIBLES",
+            "datosMadridEs": "/portal/site/egob"
         }
 
         base_url = self.domain.rstrip("/")
@@ -81,7 +84,7 @@ class OpenDataCrawler():
                     continue
 
                 response.raise_for_status()
-                if "text/html" not in response.headers.get("Content-Type", ""):
+                if dms_name == "datosMadridEs" or "text/html" not in response.headers.get("Content-Type", ""):
                     self.dms = dms_name
                     logger("OK", f"DMS detected: '{dms_name}'", level="print")
 
@@ -103,7 +106,8 @@ class OpenDataCrawler():
             "GBIF" : GbifCrawler,
             #"OpenDataSoft": OpenDataSoftCrawler,
             #"INE": INECrawler,
-            #"dataEuropa": DataEuropaCrawler
+            #"dataEuropa": DataEuropaCrawler,
+            "datosMadridEs": DatosMadridEsCrawler
         }
 
         if self.dms:
@@ -418,7 +422,6 @@ class OpenDataCrawler():
         def parse_resource_func(item):
             idx, resource = item
             base_name = utils.generate_short_filename(f"{metadata['fileName']}_{idx}")
-            resource["fileName"] = base_name
 
             metadata["resources"][base_name] = resource
             metadata["crawlerInfo"]["resourcesInfo"][base_name] = utils.init_metadata(package=False, crawled=False)

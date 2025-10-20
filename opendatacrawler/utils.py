@@ -5,6 +5,8 @@ import hashlib
 import chardet
 import olefile
 import re
+import xml.etree.ElementTree as ET
+from io import BytesIO
 import configparser
 import gc
 import time
@@ -26,7 +28,6 @@ logger = log_manager.log
 ENCODING_CANDIDATES = ["utf-8", "iso-8859-1", "windows-1252", "windows-1250", "cp850"]
 NOT_ALLOWED_DELIMITERS = [":", " ",'"', "'", "_", "(", ")", "<", ">", "[", "]", "{", "}", "-", ".", "+", "*", "=", "/", "\\", "�", "@"]
 QUOTE_CHAR = '"'
-
 
 PERMANENT_UNAVAILABLE_TAGS = {"resource_removed", "unresolvable_domain", "method_not_allowed", "missing_resource", "forbidden_resource", "ssl_error", "invalid_request"}
 
@@ -217,6 +218,23 @@ def get_https_error_tag(status_code):
         elif status_code in [500, 502, 503, 504]:
             return "resource_temporarily_unavailable"
     return None
+
+def extract_namespaces(xml_data):
+    ns = {}
+    for event, elem in ET.iterparse(BytesIO(xml_data), events=("start-ns",)):
+        prefix, uri = elem
+        ns[prefix or "default"] = uri
+    return ns
+
+def get_xml_text(element):
+    if element is not None and element.text:
+        return element.text.strip()
+    return None
+
+def get_xml_attr(element, ns, attr_name):
+    if element is None:
+        return None
+    return element.attrib.get(f"{{{ns}}}{attr_name}")
 
 # ==============================
 # Resume / recovery functions
