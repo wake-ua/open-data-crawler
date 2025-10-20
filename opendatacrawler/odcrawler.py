@@ -41,7 +41,7 @@ class OpenDataCrawler():
         self.avoid_data = avoid_data
 
         self.user_agent = None
-        limit_req_per_sec=None
+        self.limit_req_per_sec=None
         
         logger("...", f"Detecting DMS for domain '{self.domain}'...", level="print")
         self.detect_dms()
@@ -579,21 +579,32 @@ class OpenDataCrawler():
 
         if os.path.getsize(dataset_path) > 0 and dataset_path.endswith((".csv", ".tsv")):
             try:
-                temp_path, reconstructed_rows, outer_quotes_removed, inner_quotes_fixed = utils.fix_tabular_data(dataset_path, resource["encoding"])
-                if temp_path:
+                max_fix_attempts = 2
+                delimiter_fix = None
+                for attempt in range(max_fix_attempts):
+                    temp_path, reconstructed_rows, outer_quotes_removed, inner_quotes_fixed, delimiter_fix = utils.fix_tabular_data(dataset_path, resource["encoding"])
+                    if not temp_path:
+                        break
+
                     shutil.move(temp_path, dataset_path)
-                    logger("FIX", f"Cleaned and standardized the tabular file '{dataset_path}'", indent=log_indent)
-                    package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations("standardized_field_quotes"))
+                    if attempt == 0:
+                        logger("FIX", f"Cleaned and standardized the tabular file '{dataset_path}'", indent=log_indent)
+                        package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations("standardized_field_quotes"))
 
                     if reconstructed_rows:
                         logger("FIX", f"Reconstructed {reconstructed_rows} multiline rows in tabular file '{dataset_path}' by merging quoted fields split across rows", indent=log_indent)
                         package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations("reconstructed_rows", {"<reconstructed_rows>": reconstructed_rows}))
                     if outer_quotes_removed:
-                        logger("FIX", "Removed unnecessary outer quotes wrapping entire rows in tabular file '{dataset_path}'", indent=log_indent)
+                        logger("FIX", f"Removed unnecessary outer quotes wrapping entire rows in tabular file '{dataset_path}'", indent=log_indent)
                         package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations("stripped_outer_quotes"))
                     if inner_quotes_fixed:
                         logger("FIX", f"Fixed {inner_quotes_fixed} rows with malformed inner quotes in tabular file '{dataset_path}'", indent=log_indent + 2)
                         package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations("fixed_inner_quotes", {"<fixed_inner_quotes>": inner_quotes_fixed}))
+                    
+                    if delimiter_fix is None and (reconstructed_rows or outer_quotes_removed or inner_quotes_fixed):
+                        continue
+                    else:
+                        break
 
                 if utils.check_single_line(dataset_path, resource["encoding"]):
                     logger("WARNING", f"Tabular file '{dataset_path}' appears to contain only one line", indent=4)
@@ -608,6 +619,9 @@ class OpenDataCrawler():
             try:
                 delimiter, start_row = utils.detect_delimiter_consistent(dataset_path, resource["encoding"])
                 if delimiter:
+                    if delimiter_fix != delimiter:
+                        logger("ERROR", f"Delimiter mismatch in '{dataset_path}', expected '{delimiter_fix}', detected '{delimiter} in tabular file '{dataset_path}'", indent=log_indent)
+
                     resource["delimiter"] = delimiter
 
                     if start_row:
