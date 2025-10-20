@@ -68,6 +68,12 @@
             "reason": "The resource was permanently removed from the server and is no longer available (HTTP 410 - Gone)"
         }
     },
+    "unauthorized_access": {
+        "tag_placeholders": [],
+        "tag_explanation": {
+            "reason": "The download request was rejected because authentication is required or provided credentials are invalid (HTTP 401 - Unauthorized)"
+        }
+    },
     "resource_temporarily_unavailable": {
         "tag_placeholders": ["<metaMediaType>"],
         "tag_explanation": {

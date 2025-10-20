@@ -210,6 +210,8 @@ def get_https_error_tag(status_code):
     if status_code:
         if status_code == 400:
             return "invalid_request"
+        elif status_code == 401:
+            return "unauthorized_access"
         elif status_code == 404:
             return "missing_resource"
         elif status_code == 405:

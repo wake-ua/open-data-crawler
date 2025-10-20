@@ -496,9 +496,9 @@ class OpenDataCrawler():
 
             if resources_to_process and self.num_resources:
                 if self.num_resources == 1:
-                    logger("INFO", f"Processing only the first resource from package '{pkg_id}' (out of {len(resources_to_process)} valid and {len(package.get("resources", {}))} total available resources)", indent=log_indent)
+                    logger("INFO", f"Processing only the first resource from package '{pkg_id}' (out of {len(resources_to_process)} resources matching the provided configuration, from {len(package.get("resources", {}))} total available)", indent=log_indent)
                 else:
-                    logger("INFO", f"Processing only the first {self.num_resources} resources from package '{pkg_id}' (out of {len(resources_to_process)} valid and {len(package.get("resources", {}))} total available resources)", indent=log_indent)
+                    logger("INFO", f"Processing only the first {self.num_resources} resources from package '{pkg_id}' (out of {len(resources_to_process)} resources matching the provided configuration, from {len(package.get("resources", {}))} total available)", indent=log_indent)
 
                 resources_to_process = resources_to_process[:self.num_resources]
 
