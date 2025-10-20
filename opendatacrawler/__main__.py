@@ -35,8 +35,10 @@ def main():
     parser.add_argument("-rd", "--reset-domain", required=False, action=argparse.BooleanOptionalAction,
                         help="Delete all data and logs for the specified domain before crawling")
     parser.add_argument("-nr", type=int, required=False,
-                    help="Number of resources per package to download (default: all)")
-
+                        help="Number of resources per package to download (default: all)")
+    parser.add_argument("-replace", required=False, action=argparse.BooleanOptionalAction,
+                        help="Force re-download of datasets specified with --id_dataset (delete old metadata and data first)")
+    
     args = vars(parser.parse_args())
 
     url = args["domain"]
@@ -52,6 +54,7 @@ def main():
     max_resource_threads = args["max_resource_threads"] if args.get("max_resource_threads") else 4
     reset_domain = args.get("reset_domain")
     num_resources = args.get("nr")
+    replace = args.get("replace")
     if num_resources == 0:
         avoid_data = True
         num_resources = None
@@ -101,6 +104,9 @@ def main():
                 logger(None, "=" * 80, level="print")
 
             logger("...", f"Obtaining packages from '{crawler.domain}'...", level="print")
+            if replace and id_dataset:
+                crawler.force_replace_package(id_dataset)
+
             packages = id_dataset if id_dataset else crawler.get_package_list()
             logger(None, "=" * 80, level="print")
 

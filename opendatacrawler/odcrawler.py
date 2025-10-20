@@ -147,6 +147,49 @@ class OpenDataCrawler():
         log_manager.move_to_domain(self.clean_domain, move_file=True)
         log_manager.clean_unused_logs()
 
+    def force_replace_package(self, dataset_ids):
+        if not dataset_ids:
+            return
+
+        for pkg_id in dataset_ids:
+            meta_name = f"meta_{utils.generate_short_filename(f'{self.domain}_{pkg_id}')}.json"
+            meta_path = os.path.join(self.save_path, meta_name)
+
+            if not os.path.exists(meta_path):
+                logger("SKIP", f"No metadata found for package with ID '{pkg_id}', skipping replacement", level="print")
+                continue
+
+            logger("...", f"Forcing replacement of package with ID '{pkg_id}' (removing related files and metadata)...", level="print")
+
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+            except Exception as e:
+                logger("ERROR", f"Failed to read metadata for package with ID '{pkg_id}'", e)
+                continue
+
+            removed_resources = 0
+            for file_name, resource in meta.get("resources", {}).items():
+                if not resource.get("path"):
+                    continue
+
+                res_path = os.path.join(self.save_path, file_name)
+                if os.path.exists(res_path):
+                    try:
+                        os.remove(res_path)
+                        removed_resources += 1
+                        logger("DEL", f"Deleted resource '{res_path}' from package '{pkg_id}'", level="print")
+                    except Exception as e:
+                        logger("ERROR", f"Failed to delete resource '{res_path}' from package '{pkg_id}'", e)
+
+            try:
+                os.remove(meta_path)
+                logger("DEL", f"Deleted metadata file '{meta_path}' for package '{pkg_id}'", level="print")
+            except Exception as e:
+                logger("ERROR", f"Failed to delete metadata for package '{pkg_id}' ('{meta_path}')", e, level="print")
+
+            logger("OK", f"Package '{pkg_id}' fully cleared ({removed_resources} resources removed)", level="print")
+
     def log_run_summary(self, downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, unavailable_permanent_before, unavailable_permanent_after, resume_data):
         new_downloads = len(downloaded_after_res) - len(downloaded_before_res)
         new_failures = max(0, len(failed_after_res) - len(failed_before_res))
@@ -592,6 +635,7 @@ class OpenDataCrawler():
                 delimiter_fix = None
                 for attempt in range(max_fix_attempts):
                     temp_path, reconstructed_rows, outer_quotes_removed, inner_quotes_fixed, delimiter_fix = utils.fix_tabular_data(dataset_path, resource["encoding"])
+
                     if not temp_path:
                         break
 

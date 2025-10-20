@@ -27,7 +27,7 @@ from opendatacrawler.setup_logger import log_manager
 logger = log_manager.log
 
 ENCODING_CANDIDATES = ["utf-8", "iso-8859-1", "windows-1252", "windows-1250", "cp850"]
-NOT_ALLOWED_DELIMITERS = [":", " ",'"', "'", "_", "(", ")", "<", ">", "[", "]", "{", "}", "-", ".", "+", "*", "=", "/", "\\", "�", "@", "”", "#", "“"]
+NOT_ALLOWED_DELIMITERS = [":", " ",'"', "'", "_", "(", ")", "<", ">", "[", "]", "{", "}", "-", ".", "+", "*", "=", "/", "\\", "�", "@", "”", "#", "“", "¿", "?"]
 QUOTE_CHAR = '"'
 
 PERMANENT_UNAVAILABLE_TAGS = {"resource_removed", "unresolvable_domain", "method_not_allowed", "missing_resource", "forbidden_resource", "ssl_error", "invalid_request"}
@@ -465,7 +465,7 @@ def process_field(field):
         else:
             res.append(ch)
             i += 1
-    return f'{QUOTE_CHAR}{"".join(res)}{QUOTE_CHAR}'
+    return f"{QUOTE_CHAR}{''.join(res)}{QUOTE_CHAR}"
 
 def quotes_balanced(line):
     in_quotes = False
@@ -554,11 +554,12 @@ def fix_tabular_data(path, encoding):
     inner_quotes_fixed = 0
     file_changed = False
 
-    delimiter, _ = detect_delimiter_consistent(path, encoding, max_lines=50)
+    delimiter, _ = detect_delimiter_consistent(path, encoding)
 
     with open(path, "r", encoding=encoding) as f, tempfile.NamedTemporaryFile(mode="w", encoding=encoding, delete=False) as temp_out:
         buf = []
         in_quotes = False
+
         for raw_line in f:
             line = raw_line.rstrip("\r\n")
             i = 0
@@ -949,7 +950,7 @@ def detect_delimiter_consistent(path, encoding, max_lines=100, max_cv=0.6):
     if not candidates:
         return None, None
 
-    candidates.sort(key=lambda x: (-x["freq"], x["cv"], x["first_idx"]))
+    candidates.sort(key=lambda x: (-x["freq"], -x["most_common_val"], x["cv"], x["first_idx"]))
     best = candidates[0]
     return best["delim"], best["first_idx"]
 
