@@ -42,11 +42,10 @@ class OpenDataCrawler():
         self.num_resources = num_resources
 
         self.user_agent = None
-        self.limit_req_per_sec=None
 
         logger("...", f"Detecting DMS for domain '{self.domain}'...", level="print")
-        self.detect_dms()
         self.init_rate_limit()
+        self.detect_dms()
 
     # ==============================
     
@@ -75,7 +74,7 @@ class OpenDataCrawler():
             logger("...", f"Checking DMS '{dms_name}' at '{full_url}'...", level="print")
 
             try:
-                response, self.user_agent = utils.make_request(full_url, self.user_agent, headers=headers, max_sec=120)
+                response, self.user_agent = self.make_request(full_url, self.user_agent, headers=headers, max_sec=120)
                 if not response:
                     logger("NET", f"No response from endpoint '{full_url}' while checking DMS '{dms_name}'")
                     continue
@@ -242,49 +241,67 @@ class OpenDataCrawler():
             else:
                 logger("WARNING", "Interrupt received, terminating all threads immediately", level="print")
             logger(None, "=" * 80, level="print")
-            
+
             resume_data, downloaded_after_res, failed_after_res, unavailable_permanent_after_res, _ = utils.recover_resume(save_path=self.save_path, accepted_types=self.data_types)
             self.log_run_summary(downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, unavailable_permanent_before_res, unavailable_permanent_after_res, resume_data)
             os._exit(1)
 
     # ==============================
 
-    def init_rate_limit(self, limit_req_per_sec=None):
-        self.limit_req_per_sec = limit_req_per_sec
-        if limit_req_per_sec:
-            self.req_interval = 1.0 / limit_req_per_sec
-            self.last_request_time = None
-            self.req_count = 1
-
-            if limit_req_per_sec < 10:
-                self.max_threads = 1
-                self.max_resource_threads = 1
-                logger("WARNING", f"Parallel execution disabled for domain '{self.domain}' due to API rate limits ({self.limit_req_per_sec:.3f} req/s ~ {self.limit_req_per_sec * 3600:.0f} req/hour)", level="print")
-            else:
-                logger("INFO", f"Rate limiting active for domain '{self.domain}' due to API rate limits ({self.limit_req_per_sec:.3f} req/s ~ {self.limit_req_per_sec * 3600:.0f} req/hour), parallel execution allowed", level="print")
-
-            logger(None, "=" * 80, level="print")
-        else:
-            self.req_interval = None
-            self.last_request_time = None
-            self.req_count = None
-
-    def check_rate_limit(self):
-        if not self.limit_req_per_sec:
+    def init_rate_limit(self, reqs_per_sec=None, safety_factor=0.995):
+        if not reqs_per_sec:
+            self.rate_limit = None
             return
 
-        now = datetime.now()
-        if self.last_request_time is not None:
-            elapsed = (now - self.last_request_time).total_seconds()
-            if elapsed < self.req_interval:
-                sleep_time = self.req_interval - elapsed
-                time.sleep(sleep_time)
+        self.rate_limit = reqs_per_sec * safety_factor
+        self.req_interval = 1.0 / self.rate_limit
+        self.max_pending_reqs = 1
+        self.pending_reqs = self.max_pending_reqs
 
-        self.last_request_time = datetime.now()
-        self.req_count += 1
+        now = time.time()
+        self.last_update = now
+        self.start_time = now
+        self.last_halfhour_log = now
+
+        self.lock = threading.Lock()
+        self.req_total = 0
+
+        logger(None, "=" * 80, level="print")
+        logger("INFO", f"Rate limiting active for domain '{self.domain}' due to API limits ({reqs_per_sec:.3f} req/s ~ {(reqs_per_sec * 3600):.0f} req/h)", level="print")
+
+    def check_rate_limit(self):
+        if not self.rate_limit:
+            return
+
+        with self.lock:
+            now = time.time()
+            elapsed = now - self.last_update
+
+            self.pending_reqs = min(self.max_pending_reqs, self.pending_reqs + (elapsed * self.rate_limit))
+            self.last_update += elapsed
+
+            if self.pending_reqs < 1:
+                wait_time = (1 - self.pending_reqs) / self.rate_limit
+                time.sleep(wait_time)
+                now = time.time()
+                elapsed = now - self.last_update
+                self.pending_reqs = min(self.max_pending_reqs, self.pending_reqs + (elapsed * self.rate_limit))
+                self.last_update += elapsed
+
+            self.pending_reqs -= 1
+            self.req_total += 1
+
+            if self.req_total % 10000 == 0:
+                self.last_update = time.time()
+
+            elapsed_s = now - self.start_time
+            real_rps = self.req_total / elapsed_s
+            if now - self.last_halfhour_log >= 1800:
+                logger("STATS", f"[30 min] {self.req_total} requests in {(elapsed_s/60):.1f} min ({(elapsed_s/3600):.2f} h), {real_rps:.3f} req/s (limit {self.rate_limit:.3f}): {"OK" if real_rps <= self.rate_limit else "EXCEEDED RATE LIMIT"}")
+                self.last_halfhour_log = now
 
     def make_request(self, *args, **kwargs):
-        if self.limit_req_per_sec:
+        if self.rate_limit:
             self.check_rate_limit()
         return utils.make_request(*args, **kwargs)
 

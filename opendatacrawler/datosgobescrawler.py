@@ -9,7 +9,7 @@ class DatosGobEsCrawler():
     def __init__(self, odcrawler):
         self.odcrawler = odcrawler
         
-        self.odcrawler.init_rate_limit(limit_req_per_sec=5)
+        self.odcrawler.init_rate_limit(reqs_per_sec=5)
 
     def get_package_list(self):
         ids = []

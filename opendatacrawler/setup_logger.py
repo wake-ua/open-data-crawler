@@ -17,6 +17,7 @@ SPECIAL_TAGS_ICONS = {
     "SAVE": "💾",
     "FIX": "🛠️",
     "DEL": "🗑️",
+    "STATS": "📊",
     "MNKY": "🐒",
 }
 
