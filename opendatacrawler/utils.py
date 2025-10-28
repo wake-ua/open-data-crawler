@@ -7,6 +7,7 @@ import olefile
 import re
 import xml.etree.ElementTree as ET
 from io import BytesIO
+import random
 import configparser
 import gc
 import time
@@ -121,7 +122,7 @@ def normalize_domain(domain):
 def get_user_agent_list(current_agent):
     return [current_agent] + [ua for ua in USER_AGENTS if ua != current_agent] if current_agent else USER_AGENTS
 
-def make_request(url, current_agent, headers=None, params=None, max_sec=None, stream=False, sleep_time=3, return_tag=False):
+def make_request(url, current_agent, headers=None, params=None, max_sec=None, stream=False, sleep_time=3, return_tag=False, rate_controller=None):
     headers = headers.copy() if headers else {}
 
     all_forbidden = True
@@ -129,6 +130,9 @@ def make_request(url, current_agent, headers=None, params=None, max_sec=None, st
         headers["User-Agent"] = user_agent
         while True:
             try:
+                if rate_controller is not None:
+                    rate_controller.check_rate_limit()
+
                 response = requests.get(url, headers=headers, params=params, verify=False, timeout=max_sec, stream=stream)
 
                 if response.status_code == 403:

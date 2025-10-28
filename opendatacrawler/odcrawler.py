@@ -4,6 +4,7 @@ import shutil
 import requests
 import humanize
 import gc
+import random
 import threading
 from datetime import datetime, timedelta
 import time
@@ -248,26 +249,23 @@ class OpenDataCrawler():
 
     # ==============================
 
-    def init_rate_limit(self, reqs_per_sec=None, safety_factor=0.995):
+    def init_rate_limit(self, reqs_per_sec=None, safety_factor=0.75):
         if not reqs_per_sec:
             self.rate_limit = None
             return
 
         self.rate_limit = reqs_per_sec * safety_factor
-        self.req_interval = 1.0 / self.rate_limit
         self.max_pending_reqs = 1
         self.pending_reqs = self.max_pending_reqs
 
         now = time.time()
         self.last_update = now
-        self.start_time = now
-        self.last_halfhour_log = now
 
-        self.lock = threading.Lock()
         self.req_total = 0
+        self.lock = threading.Lock()
 
         logger(None, "=" * 80, level="print")
-        logger("INFO", f"Rate limiting active for domain '{self.domain}' due to API limits ({reqs_per_sec:.3f} req/s ~ {(reqs_per_sec * 3600):.0f} req/h)", level="print")
+        logger("INFO", f"Rate limiting active for domain '{self.domain}' ({reqs_per_sec:.3f} req/s ~ {(reqs_per_sec * 3600):.0f} req/h, of which {self.rate_limit:.3f} req/s ~ {(self.rate_limit * 3600):.0f} req/h effective)", level="print")
 
     def check_rate_limit(self):
         if not self.rate_limit:
@@ -278,33 +276,24 @@ class OpenDataCrawler():
             elapsed = now - self.last_update
 
             self.pending_reqs = min(self.max_pending_reqs, self.pending_reqs + (elapsed * self.rate_limit))
-            self.last_update += elapsed
+            self.last_update = now
 
             if self.pending_reqs < 1:
                 wait_time = (1 - self.pending_reqs) / self.rate_limit
+                wait_time += random.uniform(0, 0.2 / self.rate_limit)
                 time.sleep(wait_time)
                 now = time.time()
-                elapsed = now - self.last_update
-                self.pending_reqs = min(self.max_pending_reqs, self.pending_reqs + (elapsed * self.rate_limit))
-                self.last_update += elapsed
+                self.pending_reqs = 1
+                self.last_update = now
 
             self.pending_reqs -= 1
             self.req_total += 1
 
-            if self.req_total % 10000 == 0:
-                self.last_update = time.time()
-
-            elapsed_s = now - self.start_time
-            real_rps = self.req_total / elapsed_s
-            if now - self.last_halfhour_log >= 1800:
-                logger("STATS", f"[30 min] {self.req_total} requests in {(elapsed_s/60):.1f} min ({(elapsed_s/3600):.2f} h), {real_rps:.3f} req/s (limit {self.rate_limit:.3f}): {"OK" if real_rps <= self.rate_limit else "EXCEEDED RATE LIMIT"}")
-                self.last_halfhour_log = now
-
     def make_request(self, *args, **kwargs):
         if self.rate_limit:
-            self.check_rate_limit()
+            return utils.make_request(*args, **kwargs, rate_controller=self)
         return utils.make_request(*args, **kwargs)
-
+        
     # ==============================
 
     def save_dataset(self, url, file_name, chunk_size=64*1024, log_indent=4):
