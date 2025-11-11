@@ -249,7 +249,7 @@ class OpenDataCrawler():
 
     # ==============================
 
-    def init_rate_limit(self, reqs_per_sec=None, safety_factor=0.75):
+    def init_rate_limit(self, reqs_per_sec=None, safety_factor=0.85):
         if not reqs_per_sec:
             self.rate_limit = None
             return
