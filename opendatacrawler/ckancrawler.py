@@ -41,10 +41,28 @@ class CkanCrawler():
         resource = {}
         resource["fileName"] = base_name
 
+        resource["id"] = resource_meta.get("id")
         resource["name"] = resource_meta.get("name")
+
         resource["description"] = resource_meta.get("description")
 
         resource["downloadURL"] = utils.fix_url(resource_meta.get("download_url") or resource_meta.get("url") or resource_meta.get("original_url"))
+
+        if resource["id"]:
+            url = utils.fix_url(f"{self.odcrawler.domain}/api/3/action/datastore_search?resource_id={resource["id"]}")
+            response, self.odcrawler.user_agent = self.odcrawler.make_request(url, self.odcrawler.user_agent)
+            if response:
+                schema_data = response.json()["result"]
+                if schema_data:
+                    resource["schema_og"] = {"fields": []}
+                    for field in schema_data.get("fields", []):
+                        resource["schema_og"]["fields"].append({
+                            "name": field.get("id"),
+                            "description": field.get("info", {}).get("notes", ""),
+                            "type": field.get("type")
+                        })
+
+                    resource["rawDataSchema"] = {k: v for k, v in schema_data.items() if k != "records"}
 
         meta_media_type = resource_meta.get("mimetype") or resource_meta.get("format")
 
@@ -163,4 +181,6 @@ class CkanCrawler():
             logger("WORK", f"Processing {len(distributions)} resources from package '{package_id}' ('{metadata_file_name}')...", indent=2)
             self.odcrawler.init_and_parse_resources(metadata, distributions)
 
+        metadata["rawData"] = data
+        
         return metadata
