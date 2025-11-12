@@ -10,8 +10,6 @@ class CkanCrawler():
     def __init__(self, odcrawler):
         self.odcrawler = odcrawler
 
-        self.odcrawler.init_rate_limit(reqs_per_sec= 5000/3600)
-
     def get_package_list(self):
         ids = []
         url = f"{self.odcrawler.domain}/api/3/action/package_list"
