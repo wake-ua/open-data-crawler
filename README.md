@@ -10,8 +10,11 @@
 <br/>
 
 <div align="center">
+  <!--
   <a href="https://github.com/aberenguerpas/opendatacrawler">
-    <!-- <img src="images/logo.png" alt="OpenDataCrawler Logo" width="200" height="200"> -->
+    <img src="images/logo.png" alt="OpenDataCrawler Logo" width="200" height="200">
+  </a>
+  -->
 <pre>
 ****************************************************************************************************
    ___                         ___         _             ___                         _             
@@ -22,7 +25,7 @@
        |_|                                                                              - v2.3.0   
 ****************************************************************************************************
 </pre>
-  </a>
+  
   <p align="center">
     A flexible tool to crawl and normalize data from open data portals into your projects.
     <br/>
