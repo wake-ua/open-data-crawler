@@ -11,9 +11,18 @@
 
 <div align="center">
   <a href="https://github.com/aberenguerpas/opendatacrawler">
-    <img src="images/logo.png" alt="OpenDataCrawler Logo" width="200" height="200">
+    <!-- <img src="images/logo.png" alt="OpenDataCrawler Logo" width="200" height="200"> -->
+<pre>
+****************************************************************************************************
+   ___                         ___         _             ___                         _             
+  /___\ _ __    ___  _ __     /   \  __ _ | |_   __ _   / __\ _ __   __ _ __      __| |  ___  _ __ 
+ //  //| '_ \  / _ \| '_ \   / /\ / / _` || __| / _` | / /   | '__| / _` |\ \ /\ / /| | / _ \| '__|
+/ \_// | |_) ||  __/| | | | / /_// | (_| || |_ | (_| |/ /___ | |   | (_| | \ V  V / | ||  __/| |   
+\___/  | .__/  \___||_| |_|/___,'   \__,_| \__| \__,_|\____/ |_|    \__,_|  \_/\_/  |_| \___||_|   
+       |_|                                                                              - v2.3.0   
+****************************************************************************************************
+</pre>
   </a>
-
   <p align="center">
     A flexible tool to crawl and normalize data from open data portals into your projects.
     <br/>
