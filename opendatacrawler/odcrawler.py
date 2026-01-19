@@ -18,6 +18,8 @@ from opendatacrawler.ckancrawler import CkanCrawler
 from opendatacrawler.zenodocrawler import ZenodoCrawler
 from opendatacrawler.gbifcrawler import GbifCrawler
 from opendatacrawler.datosmadrides import DatosMadridEsCrawler
+from opendatacrawler.dataeuropaeucrawler import DataEuropaEuCrawler
+
 from opendatacrawler.setup_logger import log_manager
 logger = log_manager.log
 
@@ -52,7 +54,7 @@ class OpenDataCrawler():
     
     def detect_dms(self):
         dms_endpoints = {
-            #"dataEuropa": "/api/hub/repo/",
+            "dataEuropaEu": "/api/hub/repo/catalogues",
             #"Socrata": "/api/catalog/v1",
             #"datosGobEs": "/apidata/catalog/dataset?_sort=title&_pageSize=1",
             "CKAN": "/api/3/action/package_list",
@@ -83,9 +85,9 @@ class OpenDataCrawler():
                 if response.status_code != 200:
                     logger("NET", f"Non-successful response (HTTP {response.status_code}) from '{full_url}' while checking DMS '{dms_name}'")
                     continue
-
+                
                 response.raise_for_status()
-                if dms_name == "datosMadridEs" or "text/html" not in response.headers.get("Content-Type", ""):
+                if dms_name == "datosMadridEs" or "text/html" not in response.headers.get("Content-Type", "").lower():
                     self.dms = dms_name
                     logger("OK", f"DMS detected: '{dms_name}'", level="print")
 
@@ -107,7 +109,7 @@ class OpenDataCrawler():
             "GBIF" : GbifCrawler,
             #"OpenDataSoft": OpenDataSoftCrawler,
             #"INE": INECrawler,
-            #"dataEuropa": DataEuropaCrawler,
+            "dataEuropaEu": DataEuropaEuCrawler,
             "datosMadridEs": DatosMadridEsCrawler
         }
 
@@ -419,7 +421,8 @@ class OpenDataCrawler():
 
             return resource, resource_crawler_info
 
-        media_type, file_name, tag_val = utils.resolve_mediatype_conflict(meta_media_type, response, base_name)
+        media_type, file_name, tag_val = utils.resolve_mediatype_conflict(meta_media_type, response, resource["downloadURL"], base_name)
+
         resource["mediaType"] = media_type
         resource["fileName"] = file_name
         if tag_val:
@@ -466,6 +469,8 @@ class OpenDataCrawler():
         return package
 
     def init_and_parse_resources(self, metadata, distributions, log_indent=2):
+        logger("WORK", f"Processing {len(distributions)} resources from package '{metadata['identifier']}' ('{metadata['fileName']}')...", indent=log_indent)
+
         metadata["resources"] = {}
         metadata["crawlerInfo"]["resourcesInfo"] = {}
 
@@ -649,6 +654,8 @@ class OpenDataCrawler():
                     if attempt == 0:
                         logger("FIX", f"Cleaned and standardized the tabular file '{dataset_path}'", indent=log_indent)
                         package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations("standardized_field_quotes"))
+                    else:
+                        logger("FIX", f"  attempt != 0 eee 2 vulta '{dataset_path}'", indent=log_indent + 2)
 
                     if reconstructed_rows:
                         logger("FIX", f"Reconstructed {reconstructed_rows} multiline rows in tabular file '{dataset_path}' by merging quoted fields split across rows", indent=log_indent)
@@ -661,6 +668,9 @@ class OpenDataCrawler():
                         package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations("fixed_inner_quotes", {"<fixed_inner_quotes>": inner_quotes_fixed}))
                     
                     if delimiter_fix is None and (reconstructed_rows or outer_quotes_removed or inner_quotes_fixed):
+                        logger("FIX", f"eee 2 vulta '{dataset_path}'", indent=log_indent + 2)
+                        if attempt != 0:
+                            logger("FIX", f"CUIDAO, Seee 2 vulta '{dataset_path}'", indent=log_indent + 2)
                         continue
                     else:
                         break

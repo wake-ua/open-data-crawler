@@ -125,7 +125,6 @@ class DatosGobEsCrawler():
         metadata["geo"] = utils.extract_mapped_field(data.get("spatial"), utils.DATOSGOBESCRAWLER_SPATIAL_MAP)
 
         if distributions:
-            logger("WORK", f"Processing {len(distributions)} resources from package '{package_id}' ('{metadata_file_name}')...", indent=2)
             self.odcrawler.init_and_parse_resources(metadata, distributions)
 
         return metadata

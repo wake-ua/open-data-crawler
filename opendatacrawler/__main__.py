@@ -2,6 +2,7 @@ import argparse
 import os
 import sys
 import urllib3
+import traceback
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from opendatacrawler import utils
 from opendatacrawler.odcrawler import OpenDataCrawler

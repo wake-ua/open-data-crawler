@@ -84,6 +84,7 @@ Open Data Crawler is a tool designed to extract datasets, and optionally their m
 - [x] [Zenodo](https://zenodo.org/) * (request limit ≈ 1.39 req/sec ~ 5000 req/hour)
 - [x] [GBIF](https://www.gbif.org/es/)
 - [x] [datos.madrid.es](https://datos.madrid.es)
+- [x] [data.europa.eu](https://data.europa.eu)
 - [ ] Socrata *
 - [ ] [Eurostat](https://ec.europa.eu/eurostat) *
 - [ ] [World Bank Data Catalog](https://datacatalogapi.worldbank.org/) *
@@ -104,7 +105,14 @@ To set up the project locally, follow these steps:
 
 ### Requirements
 * Python 3.9+ installed  
-* Socrata portals require an App Token to avoid throttling limits. You can obtain an API key [here](https://support.socrata.com/hc/en-us/articles/210138558-Generating-an-App-Token) and set it in `config.ini`
+* Some portals (e.g. Socrata, Zenodo) require an API token to authenticate requests or to avoid throttling limits.
+  * Example for Socrata data portals:
+  * 1. Obtain an API key [here](https://support.socrata.com/hc/en-us/articles/210138558-Generating-an-App-Token).  
+  * 2. Set the token under the corresponding section name in your `config.ini` file:
+     ```ini
+     [Socrata]
+     token = <yourSocrataToken>
+     ```
 
 ### Installation
 
@@ -179,10 +187,17 @@ And don't forget to give the project a star! Thanks for your support! 🌟
   ```python
   class ExampleCrawler:
       def __init__(self, domain, data_types, user_agent):
-          self.domain = domain.rstrip("/")
-          self.data_types = data_types
-          self.user_agent = user_agent
+        self.odcrawler = odcrawler
+
+        # Optional: limit requests per second (useful if the portal enforces rate limits)
+        # self.odcrawler.init_rate_limit(reqs_per_sec=<RequestPerSecondLimit>)
+
+
+        # Optional: authentication token if the portal requires it
+        # self.token = utils.AUTH_TOKENS.get(<PortalName>)
   ```
+  > Note: If the portal requires authentication, make sure to define its token in the `config.ini` file (see [Requirements](#requirements))
+
 3. Implement the required methods:
   - **`get_package_list(self)`**:  
     Returns the list of dataset or package identifiers from the portal's API. Each identifier represents a dataset entry (i.e., a collection of one or more downloadable resources), which will be fetched individually in the next step.
@@ -190,20 +205,13 @@ And don't forget to give the project a star! Thanks for your support! 🌟
   - **`parse_resource(self, data, base_name)`**:  
     Normalizes a single resource object (distribution, file, link...) from the dataset into the project's internal resource schema.
 
-    This should always include extracting the `downloadURL`, determining MIME type, and generating a normalized filename using:  
-    ```python
-    utils.generate_short_filename(base_name, ext=utils.get_extension_mime(resource["mediaType"]))
-    ```
-
   - **`get_package(self, dataset_id, metadata_file_name)`**:  
     Retrieves and normalizes the full metadata of a package of datasets given its identifier (including its associated resources using `parse_resource()`).
     
     To keep consistency across crawlers, it's recommended to structure the resource list as follows:  
     ```python
-    resource_list = []
-    for idx, res in enumerate(resources):
-        resource_list.append(self.parse_resource(res, f"{metadata['fileName']}_{idx}"))
-    metadata["resources"] = resource_list
+    if distributions:
+        self.odcrawler.init_and_parse_resources(metadata, distributions)
     ```
 
 4. Use helper functions (`utils.py`) and built-in logging:

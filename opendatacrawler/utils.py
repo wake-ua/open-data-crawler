@@ -960,9 +960,9 @@ def detect_delimiter_consistent(path, encoding, max_lines=100, max_cv=0.6):
 
 # == MIME type functions ==
 
-def resolve_mediatype_conflict(meta_mimetype_og, response, base_name):
+def resolve_mediatype_conflict(meta_mimetype_og, response, download_url, base_name):
     meta_mimetype, _ = get_mime_and_ext(meta_mimetype_og)
-    detected_mime, detected_ext = get_resource_ext_info(response)
+    detected_mime, detected_ext = get_resource_ext_info(response, download_url)
     meta_ext = get_extension_mime(meta_mimetype) if meta_mimetype else None
 
     tag_val = final_ext = final_mime = None
@@ -1003,7 +1003,7 @@ def get_mime_and_ext(pos_mime_value):
 
     return None, None
 
-def get_resource_ext_info(response):
+def get_resource_ext_info(response, download_url):
     if not response:
         return None, None
 
@@ -1026,6 +1026,12 @@ def get_resource_ext_info(response):
         if not ext:
             logger("WARNING", f"No file extension found for MIME type: '{mime_type}'")
 
+    if download_url:
+        filename = download_url.split("?")[0].split("#")[0].rsplit("/", 1)[-1]
+        if "." in filename:
+            ext = filename.split(".")[-1].lower()
+            mime_type = EXT_TO_MIME.get(ext)
+            return mime_type, ext
     return mime_type, ext
 
 def get_ole_extension(path):

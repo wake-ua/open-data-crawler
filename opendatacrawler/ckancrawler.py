@@ -178,7 +178,6 @@ class CkanCrawler():
                 metadata["geo"] = geo
 
         if distributions:
-            logger("WORK", f"Processing {len(distributions)} resources from package '{package_id}' ('{metadata_file_name}')...", indent=2)
             self.odcrawler.init_and_parse_resources(metadata, distributions)
 
         metadata["rawData"] = data
