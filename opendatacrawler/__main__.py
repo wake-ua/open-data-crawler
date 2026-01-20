@@ -107,9 +107,12 @@ def main():
 
             for country in countries_to_process:
                 logger(None, "=" * 80, level="print")
+                if not utils.get_country_label(country):
+                    logger("WARNING", f"Unknown country code '{country}', skipping.", level="print")
+                    continue
 
                 if country:
-                    logger("INFO", f"Processing country: '{country}'", level="print")
+                    logger("INFO", f"Processing data from '{utils.get_country_label(country)}' [{country}]", level="print")
 
                 crawler.set_country_context(country)
                 resume_data, downloaded_before_res, failed_before_res, unavailable_before_res, failed_before_pkgs = utils.recover_resume(save_path=crawler.save_path, accepted_types=d_types)

@@ -5,6 +5,7 @@ import hashlib
 import chardet
 import olefile
 import re
+import pycountry
 import xml.etree.ElementTree as ET
 from io import BytesIO
 import random
@@ -1153,6 +1154,10 @@ def normalize_no_html_text(text):
     text = " ".join(text.split())
 
     return text.strip()
+
+def get_country_label(code):
+    country = pycountry.countries.get(alpha_2=code.upper())
+    return country.name if country else None
 
 # == crawlerChangesInfo functions ==
 

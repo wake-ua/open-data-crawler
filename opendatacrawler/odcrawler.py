@@ -141,7 +141,7 @@ class OpenDataCrawler():
 
     def get_print_domain(self):
         if self.current_country:
-            return f"{self.domain} [{self.current_country}]"
+            return f"{self.domain} | {utils.get_country_label(self.current_country)} [{self.current_country}]"
         return self.domain
 
     # ==============================
