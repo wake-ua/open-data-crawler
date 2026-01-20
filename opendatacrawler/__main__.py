@@ -79,7 +79,8 @@ def main():
             reset_domain_input = False
             has_logs = False
             if reset_domain:
-                has_data = os.path.exists(crawler.base_domain_path)
+                has_data = (os.path.isdir(crawler.base_domain_path) and len(os.listdir(crawler.base_domain_path)) > 0)
+
                 log_path = os.path.join(os.getcwd(), "logs", utils.clean_url(url))
                 has_logs = os.path.isdir(log_path) and any(f.endswith(".log") for f in os.listdir(log_path))
 
