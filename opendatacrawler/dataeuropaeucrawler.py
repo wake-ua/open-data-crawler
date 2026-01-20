@@ -11,8 +11,7 @@ logger = log_manager.log
 class DataEuropaEuCrawler():
     def __init__(self, odcrawler):
         self.odcrawler = odcrawler
-        self.countries = ["es"]
-
+        
     def get_package_list(self, limit=1000):
         ids = []
         url = f"{self.odcrawler.domain}/api/hub/search"
@@ -24,10 +23,23 @@ class DataEuropaEuCrawler():
 
         params = {
             "q": "",
-            "filter": "dataset",
-            "countryData": "true",
-            "includes": "id",
-            "facets": {"country": self.countries},
+            "filters": "catalogue,dataset,resource",
+            "resource": "editorial-content",
+            "facets": json.dumps({
+                "country": [self.odcrawler.current_country] if self.odcrawler.current_country else [],
+                "catalog": [],
+                "format": [],
+                "scoring": [],
+                "license": [],
+                "categories": [],
+                "publisher": [],
+                "subject": [],
+                "keywords": [],
+                "is_hvd": [],
+                "hvdCategory": [],
+                "superCatalog": [],
+                "mostLiked": []
+            }),
             "limit": limit,
             "scroll": "true"
         }
@@ -35,7 +47,7 @@ class DataEuropaEuCrawler():
         try:
             response, self.odcrawler.user_agent = self.odcrawler.make_request(f"{url}/search", self.odcrawler.user_agent, headers=headers, params=params)
             if not response:
-                logger("ERROR", f"Error fetching package list from '{self.odcrawler.domain}': no working User-Agent found")
+                logger("ERROR", f"Error fetching package list from '{self.odcrawler.get_print_domain()}': no working User-Agent found")
                 return ids
 
             response.raise_for_status()
@@ -45,7 +57,7 @@ class DataEuropaEuCrawler():
 
             scroll_id = data.get("scrollId")
             if not scroll_id:
-                logger("ERROR", f"Error fetching package list from '{self.odcrawler.domain}': no 'scroll_id'")
+                logger("ERROR", f"Error fetching package list from '{self.odcrawler.get_print_domain()}': no 'scroll_id'")
                 return ids
 
             while True:
@@ -63,12 +75,12 @@ class DataEuropaEuCrawler():
                 ids.extend(item["id"] for item in batch)
                 scroll_id = data.get("scrollId")
 
-            logger("OK", f"Retrieved {len(ids)} packages from '{self.odcrawler.domain}'", level="print")
+            logger("OK", f"Retrieved {len(ids)} packages from '{self.odcrawler.get_print_domain()}'", level="print")
 
         except requests.RequestException as e:
-            logger("ERROR", f"Error fetching package list from '{self.odcrawler.domain}'", e)
+            logger("ERROR", f"Error fetching package list from '{self.odcrawler.get_print_domain()}'", e)
         except Exception as e:
-            logger("ERROR", f"Unexpected error parsing response from '{self.odcrawler.domain}'", e)
+            logger("ERROR", f"Unexpected error parsing response from '{self.odcrawler.get_print_domain()}'", e)
 
         return ids
     

@@ -39,7 +39,9 @@ def main():
                         help="Number of resources per package to download (default: all)")
     parser.add_argument("-replace", required=False, action=argparse.BooleanOptionalAction,
                         help="Force re-download of datasets specified with --id_dataset (delete old metadata and data first)")
-    
+    parser.add_argument("-country", "--countries", nargs="+", required=False, 
+                        help="Filter datasets by country code (e.g. -country es gr fr)")
+
     args = vars(parser.parse_args())
 
     url = args["domain"]
@@ -56,6 +58,8 @@ def main():
     reset_domain = args.get("reset_domain")
     num_resources = args.get("nr")
     replace = args.get("replace")
+    countries = [c.lower() for c in args["countries"]] if args["countries"] else []
+
     if num_resources == 0:
         avoid_data = True
         num_resources = None
@@ -64,7 +68,7 @@ def main():
     crawler = None
     try:
         if utils.is_url(url):
-            crawler = OpenDataCrawler(url, path=d_path, data_types=d_types, categories=categories, partial=partial, avoid_data=avoid_data, max_sec=max_sec, max_threads=max_threads, max_resource_threads=max_resource_threads, num_resources=num_resources)
+            crawler = OpenDataCrawler(url, path=d_path, data_types=d_types, categories=categories, partial=partial, avoid_data=avoid_data, max_sec=max_sec, max_threads=max_threads, max_resource_threads=max_resource_threads, num_resources=num_resources, countries=countries)
 
             if not crawler.dms:
                 log_manager.move_to_domain("_unknownDomain", move_file=True)
@@ -72,73 +76,84 @@ def main():
 
             logger(None, "=" * 80, level="print")
 
-            resume_data, downloaded_before_res, failed_before_res, unavailable_permanent_before_res, failed_before_pkgs = utils.recover_resume(save_path=crawler.save_path, accepted_types=d_types)
-            has_logs = None
+            reset_domain_input = False
+            has_logs = False
             if reset_domain:
+                has_data = os.path.exists(crawler.base_domain_path)
                 log_path = os.path.join(os.getcwd(), "logs", utils.clean_url(url))
                 has_logs = os.path.isdir(log_path) and any(f.endswith(".log") for f in os.listdir(log_path))
 
-                if resume_data:
-                    logger("WARNING", f"Are you absolutely sure you want to delete all data ({len(resume_data)} packages and {len(downloaded_before_res)} resources) and logs for domain '{url}' ({crawler.dms})? This action cannot be undone. [Y/N]:", level="print")
-                    reset_domain_input = input().strip().lower() in {"y", "yes"}
-                elif has_logs:
-                    logger("WARNING", f"No resume data found, but there are logs for domain '{crawler.domain}' ({crawler.dms}). Do you want to delete them? This action cannot be undone. [Y/N]:", level="print")
-                    reset_domain_input = input().strip().lower() in {"y", "yes"}
+                if has_data or has_logs:
+                    if has_data:
+                        if countries:
+                            logger("WARNING", f"Are you absolutely sure you want to delete ALL data and logs for domain '{crawler.domain}' ({crawler.dms})? This affects ALL countries. [Y/N]:", level="print")
+                        else:
+                            logger("WARNING", f"Are you absolutely sure you want to delete ALL data and logs for domain '{crawler.domain}' ({crawler.dms})? [Y/N]:", level="print")
+
+                        reset_domain_input = input().strip().lower() in {"y", "yes"}
+                    elif has_logs:
+                        logger("WARNING", f"No resume data found, but logs exist for domain '{crawler.domain}'. Do you want to delete them? [Y/N]:", level="print")
+                        reset_domain_input = input().strip().lower() in {"y", "yes"}
+
+                    if not reset_domain_input:
+                        logger("WARNING", f"Reset for domain '{crawler.domain}' was cancelled by user", level="print")
                 else:
                     reset_domain_input = True
 
-                if not reset_domain_input:
-                    logger("WARNING", f"Reset for domain '{crawler.domain}' was cancelled by user", level="print")
-            else:
-                reset_domain_input = False
-
-            crawler.reset_domain(reset_domain_input, resume_data, has_logs)
-
             if reset_domain_input:
-                resume_data, downloaded_before_res, failed_before_res, unavailable_permanent_before_res, failed_before_pkgs = utils.recover_resume(save_path=crawler.save_path, accepted_types=d_types)
+                crawler.reset_domain(reset_domain_input, has_data, has_logs)
+
+            countries_to_process = countries if countries else [None]
+
+            for country in countries_to_process:
                 logger(None, "=" * 80, level="print")
 
-            if resume_data:
-                logger("OK", f"Loaded resume with {len(resume_data)} packages and {len(downloaded_before_res)} downloaded resources", level="print")
-                if failed_before_pkgs:
-                    logger("...", f"Reattempting {len(failed_before_pkgs)} packages with {len(failed_before_res)} failed resources of accepted types ({", ".join(f".{ext}" for ext in d_types)})...", level="print")
-                logger(None, "=" * 80, level="print")
+                if country:
+                    logger("INFO", f"Processing country: '{country}'", level="print")
 
-            logger("...", f"Obtaining packages from '{crawler.domain}'...", level="print")
-            if replace and id_dataset:
-                crawler.force_replace_package(id_dataset)
+                crawler.set_country_context(country)
+                resume_data, downloaded_before_res, failed_before_res, unavailable_before_res, failed_before_pkgs = utils.recover_resume(save_path=crawler.save_path, accepted_types=d_types)
 
-            packages = id_dataset if id_dataset else crawler.get_package_list()
-            logger(None, "=" * 80, level="print")
+                if resume_data:
+                    logger("OK", f"Loaded resume with {len(resume_data)} packages and {len(downloaded_before_res)} downloaded resources", level="print")
+                    if failed_before_pkgs:
+                        logger("...", f"Reattempting {len(failed_before_pkgs)} packages with {len(failed_before_res)} failed resources of accepted types ({", ".join(f".{ext}" for ext in d_types)})...", level="print")
+                    logger(None, "=" * 80, level="print")
 
-            new_packages = [pkg for pkg in packages if pkg not in resume_data]
-            failed_packages = [pkg for pkg in packages if pkg in failed_before_pkgs]
+                logger("...", f"Obtaining packages from '{crawler.get_print_domain()}'...", level="print")
+                if replace and id_dataset:
+                    crawler.force_replace_package(id_dataset)
 
-            if max_packages:
-                new_packages = new_packages[:max_packages]
+                packages = id_dataset if id_dataset else crawler.get_package_list()
 
-            if new_packages or failed_packages:
-                total_to_process = len(new_packages) + len(failed_packages)
-                if failed_packages:
-                    logger("...", f"Queued {total_to_process} packages ({len(new_packages)} new packages and {len(failed_packages)} previously failed packages) for processing...", level="print")
+                new_packages = [pkg for pkg in packages if pkg not in resume_data]
+                failed_packages = [pkg for pkg in packages if pkg in failed_before_pkgs]
+
+                if max_packages:
+                    new_packages = new_packages[:max_packages]
+
+                if new_packages or failed_packages:
+                    total_to_process = len(new_packages) + len(failed_packages)
+                    if failed_packages:
+                        logger("...", f"Queued {total_to_process} packages ({len(new_packages)} new packages and {len(failed_packages)} previously failed packages) for processing...", level="print")
+                    else:
+                        logger("...", f"Queued {total_to_process} packages for processing...", level="print")
+
+                    if new_packages:
+                        logger("...", f"Processing {len(new_packages)} new packages...", level="print")
+                        crawler.process_packages_batch(new_packages, len(packages) - len(new_packages) - len(failed_packages), "Processing new packages...", "green", downloaded_before_res, failed_before_res, unavailable_before_res)
+
+                    if failed_packages:
+                        logger("...", f"Reprocessing {len(failed_packages)} previously failed packages...", level="print")
+                        crawler.process_packages_batch(failed_packages, len(packages) - len(failed_packages), "Reprocessing failed packages...", "yellow", downloaded_before_res, failed_before_res, unavailable_before_res)
+                    
+                    resume_data, downloaded_after_res, failed_after_res, unavailable_permanent_after_res, _ = utils.recover_resume(save_path=crawler.save_path, accepted_types=d_types)
+                    crawler.log_run_summary(downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, unavailable_before_res, unavailable_permanent_after_res, resume_data)
                 else:
-                    logger("...", f"Queued {total_to_process} packages for processing...", level="print")
-
-                if new_packages:
-                    logger("...", f"Processing {len(new_packages)} new packages...", level="print")
-                    crawler.process_packages_batch(new_packages, len(packages) - len(new_packages) - len(failed_packages), "Processing new packages...", "green", downloaded_before_res, failed_before_res, unavailable_permanent_before_res)
-
-                if failed_packages:
-                    logger("...", f"Reprocessing {len(failed_packages)} previously failed packages...", level="print")
-                    crawler.process_packages_batch(failed_packages, len(packages) - len(failed_packages), "Reprocessing failed packages...", "yellow", downloaded_before_res, failed_before_res, unavailable_permanent_before_res)
-                
-                resume_data, downloaded_after_res, failed_after_res, unavailable_permanent_after_res, _ = utils.recover_resume(save_path=crawler.save_path, accepted_types=d_types)
-                crawler.log_run_summary(downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, unavailable_permanent_before_res, unavailable_permanent_after_res, resume_data)
-            else:
-                if not id_dataset and not avoid_data and not max_packages and not categories and not d_types:
-                    logger("OK", f"No packages left to process for '{crawler.dms}', everything is up-to-date", level="print")
-                else:
-                    logger("OK", f"No packages left to process for '{crawler.dms}', everything is up-to-date with the configuration provided", level="print")
+                    if not id_dataset and not avoid_data and not max_packages and not categories and not d_types:
+                        logger("OK", f"No packages left to process for '{crawler.dms}', everything is up-to-date", level="print")
+                    else:
+                        logger("OK", f"No packages left to process for '{crawler.dms}', everything is up-to-date with the configuration provided", level="print")
         else:
             logger("ERROR", "Incorrect domain form. Must have the form 'https://domain.example' or 'http://domain.example'", level="print")
     except Exception as e:

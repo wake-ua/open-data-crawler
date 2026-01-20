@@ -24,7 +24,7 @@ from opendatacrawler.setup_logger import log_manager
 logger = log_manager.log
 
 class OpenDataCrawler():
-    def __init__(self, domain, path=None, data_types=None, categories=None, partial=False, avoid_data=None, max_sec=None, max_threads=None, max_resource_threads=None, num_resources=None):
+    def __init__(self, domain, path=None, data_types=None, categories=None, partial=False, avoid_data=None, max_sec=None, max_threads=None, max_resource_threads=None, num_resources=None, countries=None):
         self.domain = utils.normalize_domain(domain).rstrip("/")
         self.dms = None
         self.dms_instance = None
@@ -36,7 +36,8 @@ class OpenDataCrawler():
         utils.create_folder(base_path)
 
         self.clean_domain = utils.clean_url(self.domain)
-        self.save_path = os.path.join(base_path, self.clean_domain)
+        self.base_domain_path = os.path.join(base_path, self.clean_domain)
+        self.save_path = self.base_domain_path
 
         self.data_types = data_types
         self.categories = categories
@@ -44,9 +45,12 @@ class OpenDataCrawler():
         self.avoid_data = avoid_data
         self.num_resources = num_resources
 
+        self.countries = countries
+        self.current_country = None
+
         self.user_agent = None
 
-        logger("...", f"Detecting DMS for domain '{self.domain}'...", level="print")
+        logger("...", f"Detecting DMS for domain '{self.get_print_domain()}'...", level="print")
         self.init_rate_limit()
         self.detect_dms()
 
@@ -121,7 +125,24 @@ class OpenDataCrawler():
                 except Exception:
                     logger("ERROR", f"Error instantiating DMS class for '{self.dms}'", f"\n{traceback.format_exc()}")
         else:
-            logger("ERROR", f"No accessible or supported DMS detected at '{self.domain}'", level="print")
+            logger("ERROR", f"No accessible or supported DMS detected at '{self.get_print_domain()}'", level="print")
+
+    # ==============================
+
+    def set_country_context(self, country):
+        self.current_country = country
+
+        if country:
+            self.save_path = os.path.join(self.base_domain_path, country)
+        else:
+            self.save_path = self.base_domain_path
+
+        utils.create_folder(self.save_path)
+
+    def get_print_domain(self):
+        if self.current_country:
+            return f"{self.domain} [{self.current_country}]"
+        return self.domain
 
     # ==============================
 
@@ -267,7 +288,7 @@ class OpenDataCrawler():
         self.lock = threading.Lock()
 
         logger(None, "=" * 80, level="print")
-        logger("INFO", f"Rate limiting active for domain '{self.domain}' ({reqs_per_sec:.3f} req/s ~ {(reqs_per_sec * 3600):.0f} req/h, of which {self.rate_limit:.3f} req/s ~ {(self.rate_limit * 3600):.0f} req/h effective)", level="print")
+        logger("INFO", f"Rate limiting active for domain '{self.get_print_domain()}' ({reqs_per_sec:.3f} req/s ~ {(reqs_per_sec * 3600):.0f} req/h, of which {self.rate_limit:.3f} req/s ~ {(self.rate_limit * 3600):.0f} req/h effective)", level="print")
 
     def check_rate_limit(self):
         if not self.rate_limit:

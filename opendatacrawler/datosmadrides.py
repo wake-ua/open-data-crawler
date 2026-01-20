@@ -35,12 +35,12 @@ class DatosMadridEsCrawler():
                 if id_el is not None and id_el.text:
                     ids.append(id_el.text.strip().removeprefix(f"{self.odcrawler.domain}/egob/catalogo/").lstrip("/"))
 
-            logger("OK", f"Retrieved {len(ids)} packages from '{self.odcrawler.domain}'", level="print")
+            logger("OK", f"Retrieved {len(ids)} packages from '{self.odcrawler.get_print_domain()}'", level="print")
 
         except requests.RequestException as e:
-            logger("ERROR", f"Error fetching package list from '{self.odcrawler.domain}'", e)
+            logger("ERROR", f"Error fetching package list from '{self.odcrawler.get_print_domain()}'", e)
         except Exception as e:
-            logger("ERROR", f"Unexpected error parsing response from '{self.odcrawler.domain}'", e)
+            logger("ERROR", f"Unexpected error parsing response from '{self.odcrawler.get_print_domain()}'", e)
 
         return ids
 

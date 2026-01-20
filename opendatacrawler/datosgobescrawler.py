@@ -28,19 +28,19 @@ class DatosGobEsCrawler():
         try:
             response, self.odcrawler.user_agent = self.odcrawler.make_request(url, self.odcrawler.user_agent, headers=headers, params=params)
             if not response:
-                logger("ERROR", f"Error fetching package list from '{self.odcrawler.domain}': no working User-Agent found")
+                logger("ERROR", f"Error fetching package list from '{self.odcrawler.get_print_domain()}': no working User-Agent found")
                 return ids
 
             response.raise_for_status()
             for result in response.json().get("results", {}).get("bindings", []):
                 ids.append(result.get("dataset", {}).get("value").split("/")[-1])
 
-            logger("OK", f"Retrieved {len(ids)} packages from '{self.odcrawler.domain}'", level="print")
+            logger("OK", f"Retrieved {len(ids)} packages from '{self.odcrawler.get_print_domain()}'", level="print")
 
         except requests.RequestException as e:
-            logger("ERROR", f"Error fetching package list from '{self.odcrawler.domain}'", e)
+            logger("ERROR", f"Error fetching package list from '{self.odcrawler.get_print_domain()}'", e)
         except Exception as e:
-            logger("ERROR", f"Unexpected error parsing response from '{self.odcrawler.domain}'", e)
+            logger("ERROR", f"Unexpected error parsing response from '{self.odcrawler.get_print_domain()}'", e)
 
         return ids
 

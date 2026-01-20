@@ -117,12 +117,12 @@ class ZenodoCrawler():
                         last_date += timedelta(days=1)
                         last_hour = 0
 
-            logger("OK", f"Retrieved {len(ids)} packages from '{self.odcrawler.domain}'", level="print")
+            logger("OK", f"Retrieved {len(ids)} packages from '{self.odcrawler.get_print_domain()}'", level="print")
 
         except requests.RequestException as e:
-            logger("ERROR", f"Error fetching package list from '{self.odcrawler.domain}'", e)
+            logger("ERROR", f"Error fetching package list from '{self.odcrawler.get_print_domain()}'", e)
         except Exception as e:
-            logger("ERROR", f"Unexpected error parsing response from '{self.odcrawler.domain}'", e)
+            logger("ERROR", f"Unexpected error parsing response from '{self.odcrawler.get_print_domain()}'", e)
 
         return list(ids)
 

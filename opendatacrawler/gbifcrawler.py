@@ -14,7 +14,7 @@ class GbifCrawler():
         url = f"{self.odcrawler.domain}/v1/dataset/search?limit=1&offset=0"
         response, self.odcrawler.user_agent = self.odcrawler.make_request(url, self.odcrawler.user_agent, max_sec=self.odcrawler.max_sec)
         if not response:
-            logger("ERROR", f"Error fetching package list from '{self.odcrawler.domain}'")
+            logger("ERROR", f"Error fetching package list from '{self.odcrawler.get_print_domain()}'")
             return []
         
         limit = 100
@@ -40,7 +40,7 @@ class GbifCrawler():
 
         ids = [pkg_id for sublist in ids_list for pkg_id in sublist]
 
-        logger("OK", f"Retrieved {len(ids)} packages from '{self.odcrawler.domain}'", level="print")
+        logger("OK", f"Retrieved {len(ids)} packages from '{self.odcrawler.get_print_domain()}'", level="print")
         return ids
 
     def parse_resource(self, resource_meta, base_name):
