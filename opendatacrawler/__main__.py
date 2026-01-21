@@ -78,6 +78,7 @@ def main():
 
             reset_domain_input = False
             has_logs = False
+            has_data = False
             if reset_domain:
                 has_data = (os.path.isdir(crawler.base_domain_path) and len(os.listdir(crawler.base_domain_path)) > 0)
 
@@ -101,11 +102,9 @@ def main():
                 else:
                     reset_domain_input = True
 
-            if reset_domain_input:
-                crawler.reset_domain(reset_domain_input, has_data, has_logs)
+            crawler.reset_domain(reset_domain_input, has_data, has_logs)
 
             countries_to_process = countries if countries else [None]
-
             for country in countries_to_process:
                 logger(None, "=" * 80, level="print")
                 if not utils.get_country_label(country):

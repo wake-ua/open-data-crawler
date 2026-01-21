@@ -223,13 +223,13 @@ def get_https_error_tag(status_code):
             return "method_not_allowed"
         elif status_code == 410:
             return "resource_removed"
-        elif status_code in [500, 502, 503, 504]:
+        elif status_code in [408, 429, 499, 500, 502, 503, 504, 522]:
             return "resource_temporarily_unavailable"
     return None
 
 def extract_namespaces(xml_data):
     ns = {}
-    for event, elem in ET.iterparse(BytesIO(xml_data), events=("start-ns",)):
+    for _, elem in ET.iterparse(BytesIO(xml_data), events=("start-ns",)):
         prefix, uri = elem
         ns[prefix or "default"] = uri
     return ns
@@ -296,6 +296,15 @@ def recover_resume(save_path, accepted_types=None):
             }
         except Exception as e:
             logger("ERROR", f"Could not read {meta_path}", e)
+
+            identifier = fname.replace("meta_", "").replace(".json", "")
+            failed_packages.add(identifier)
+
+            packages_status[identifier] = {
+                "failed_resources": [],
+                "successful_resources": [],
+                "unavailable_permanent": []
+            }
 
     return packages_status, total_successful, total_failed, total_unavailable_permanent, failed_packages
 

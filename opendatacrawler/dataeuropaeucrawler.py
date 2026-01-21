@@ -23,7 +23,7 @@ class DataEuropaEuCrawler():
 
         params = {
             "q": "",
-            "filters": "catalogue,dataset,resource",
+            "filters": "dataset,resource",
             "resource": "editorial-content",
             "facets": json.dumps({
                 "country": [self.odcrawler.current_country] if self.odcrawler.current_country else [],
