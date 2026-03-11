@@ -19,6 +19,7 @@ from opendatacrawler.zenodocrawler import ZenodoCrawler
 from opendatacrawler.gbifcrawler import GbifCrawler
 from opendatacrawler.datosmadrides import DatosMadridEsCrawler
 from opendatacrawler.dataeuropaeucrawler import DataEuropaEuCrawler
+from urllib.parse import urlparse
 
 from opendatacrawler.setup_logger import log_manager
 logger = log_manager.log
@@ -49,6 +50,11 @@ class OpenDataCrawler():
         self.current_country = None
 
         self.user_agent = None
+
+        self.ckan_api_key = utils.AUTH_TOKENS.get("ckan")
+        self.domain_netloc = urlparse(self.domain).netloc
+        self.ckan_action_requires_post = False
+        self.ckan_auth_mode = None 
 
         logger("...", f"Detecting DMS for domain '{self.get_print_domain()}'...", level="print")
         self.init_rate_limit()
@@ -103,6 +109,9 @@ class OpenDataCrawler():
                 logger("NET", f"Failed to reach '{full_url}'", [e, traceback.format_exc()])
                 continue
 
+        if self.dms == "CKAN":
+            self.ckan_action_requires_post = self.detect_ckan_requires_post()
+
         dms_classes = {
             "CKAN": CkanCrawler,
             #"Socrata": SocrataCrawler,
@@ -128,7 +137,23 @@ class OpenDataCrawler():
             logger("ERROR", f"No accessible or supported DMS detected at '{self.get_print_domain()}'", level="print")
 
     # ==============================
-
+    def detect_ckan_requires_post(self) -> bool:
+        probe_url = utils.fix_url(f"{self.domain}/api/3/action/package_show")
+        try:
+            r, self.user_agent = self.make_request(
+                probe_url,
+                self.user_agent,
+                headers={"Accept": "application/json"},
+                params={"id": "non-existent"},
+                max_sec=30,
+            )
+            if r is None:
+                return False
+            txt = (r.text or "")
+            return ("Please use POST method" in txt) or ("Invalid request" in txt)
+        except Exception:
+            return False
+        
     def set_country_context(self, country):
         self.current_country = country
 
@@ -251,22 +276,29 @@ class OpenDataCrawler():
                     raise
         return results
 
-    def process_packages_batch(self, packages, tqdm_initial, tqdm_desc, tqdm_colour, downloaded_before_res, failed_before_res, unavailable_permanent_before_res):
+    def process_packages_batch(self, packages, phase, tqdm_initial, tqdm_desc, tqdm_colour, downloaded_before_res, failed_before_res, unavailable_permanent_before_res, max_workers=None):
         try:
-            self.run_threaded_function(
-                items=packages, func=lambda pkg_id: self.process_package(pkg_id),
-                max_workers=self.max_threads, thread_name_prefix="t",
-                use_tqdm=True, tqdm_desc=tqdm_desc, tqdm_colour=tqdm_colour, tqdm_initial=tqdm_initial
-            )
+            if phase == "metadata":
+                func = lambda pkg_id: self.process_package_metadata(pkg_id)
+            else:
+                func = lambda pkg_id: self.process_package(pkg_id)
+
+            workers = max_workers if max_workers is not None else self.max_threads
+
+            self.run_threaded_function(items=packages, func=func, max_workers=workers, thread_name_prefix="t", use_tqdm=True, tqdm_desc=tqdm_desc, tqdm_colour=tqdm_colour, tqdm_initial=tqdm_initial)
+
         except KeyboardInterrupt:
             logger(None, "=" * 80, level="print")
+
             if self.max_threads == 1:
                 logger("WARNING", "Interrupt received, terminating execution", level="print")
             else:
                 logger("WARNING", "Interrupt received, terminating all threads immediately", level="print")
+
             logger(None, "=" * 80, level="print")
 
             resume_data, downloaded_after_res, failed_after_res, unavailable_permanent_after_res, _ = utils.recover_resume(save_path=self.save_path, accepted_types=self.data_types)
+
             self.log_run_summary(downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, unavailable_permanent_before_res, unavailable_permanent_after_res, resume_data)
             os._exit(1)
 
@@ -312,10 +344,80 @@ class OpenDataCrawler():
             self.pending_reqs -= 1
             self.req_total += 1
 
-    def make_request(self, *args, **kwargs):
+    def make_action_request(
+        self,
+        action: str,
+        *,
+        params: dict | None = None,
+        headers: dict | None = None,
+        return_tag: bool = False,
+        current_agent: str | None = None,
+        max_sec: int | None = None,
+    ):
+        url = utils.fix_url(f"{self.domain}/api/3/action/{action}")
+
+        hdrs = dict(headers) if headers else {}
+        hdrs.setdefault("Accept", "application/json")
+        hdrs.setdefault("Connection", "keep-alive")
+
+        if self.ckan_api_key and urlparse(url).netloc == self.domain_netloc:
+            hdrs.setdefault("X-CKAN-API-Key", self.ckan_api_key)
+            hdrs.setdefault("Authorization", self.ckan_api_key)
+
+        agent = current_agent if current_agent is not None else self.user_agent
+        timeout = max_sec if max_sec is not None else self.max_sec
+        payload = params or {}
+
+        if self.ckan_action_requires_post:
+            if self.rate_limit:
+                return utils.make_request_post(
+                    url,
+                    agent,
+                    headers=hdrs,
+                    json_body=payload,
+                    max_sec=timeout,
+                    return_tag=return_tag,
+                    rate_controller=self,
+                )
+            return utils.make_request_post(
+                url,
+                agent,
+                headers=hdrs,
+                json_body=payload,
+                max_sec=timeout,
+                return_tag=return_tag,
+            )
+
         if self.rate_limit:
-            return utils.make_request(*args, **kwargs, rate_controller=self)
-        return utils.make_request(*args, **kwargs)
+            return utils.make_request(
+                url,
+                agent,
+                headers=hdrs,
+                params=payload,
+                max_sec=timeout,
+                return_tag=return_tag,
+                rate_controller=self,
+            )
+        return utils.make_request(
+            url,
+            agent,
+            headers=hdrs,
+            params=payload,
+            max_sec=timeout,
+            return_tag=return_tag,
+        )
+
+    def make_request(self, url, current_agent, headers=None, **kwargs):
+        headers = dict(headers) if headers else {}
+
+        if self.ckan_api_key and urlparse(url).netloc == self.domain_netloc:
+            headers.setdefault("Authorization", self.ckan_api_key)
+            headers.setdefault("X-CKAN-API-Key", self.ckan_api_key)
+
+        if self.rate_limit:
+            return utils.make_request(url, current_agent, headers=headers, **kwargs, rate_controller=self)
+
+        return utils.make_request(url, current_agent, headers=headers, **kwargs)
         
     # ==============================
 
@@ -518,6 +620,56 @@ class OpenDataCrawler():
             max_workers=self.max_resource_threads, thread_name_prefix=threading.current_thread().name
         )
 
+
+    def process_package_metadata(self, pkg_id, log_indent=1):
+        metadata_file_name = f"meta_{utils.generate_short_filename(f'{self.domain}_{pkg_id}')}.json"
+        metadata_path = os.path.join(self.save_path, metadata_file_name)
+
+        try:
+            logger("META", f"Processing metadata for package '{pkg_id}' ('{metadata_file_name}')...", indent=log_indent-1)
+
+            if os.path.exists(metadata_path):
+                logger("SKIP", f"Metadata already exists for '{metadata_file_name}', skipping metadata phase", indent=log_indent)
+                return
+
+            package = self.get_package(pkg_id, metadata_file_name)
+            if not package:
+                return
+
+            if not package.get("resources"):
+                logger("WARNING", f"No distributions found in package '{pkg_id}'", indent=log_indent)
+                package["crawlerInfo"]["packageInfo"].update(utils.add_tag_explanations("missing_distributions"))
+                package["crawlerInfo"]["packageStatus"]["packageCompleted"] = datetime.now().isoformat()
+                self.save_metadata(package)
+                return
+
+            if self.categories:
+                mapped_theme = utils.extract_mapped_field(
+                    package.get("theme"),
+                    utils.DATOSGOBESCRAWLER_THEME_MAP
+                )
+                if not (mapped_theme and any(cat in mapped_theme for cat in self.categories)):
+                    logger(
+                        "SKIP",
+                        f"Package '{pkg_id}' does not match categories, skipping",
+                        indent=log_indent
+                    )
+                    self.save_metadata(package)
+                    return
+
+            self.save_metadata(package)
+
+            del package
+            gc.collect()
+
+        except Exception as e:
+            logger(
+                "ERROR",
+                f"Error processing metadata for package '{pkg_id}' ('{metadata_file_name}')",
+                [e, traceback.format_exc()],
+                indent=log_indent
+            )
+
     def process_package(self, pkg_id, log_indent=1):
         metadata_file_name = f"meta_{utils.generate_short_filename(f'{self.domain}_{pkg_id}')}.json"
         try:
@@ -525,12 +677,13 @@ class OpenDataCrawler():
             logger("WORK", f"Processing package '{pkg_id}' ('{metadata_file_name}')...", indent=log_indent-1)
 
             if not os.path.exists(metadata_path):
-                package = self.get_package(pkg_id, metadata_file_name)
-            else:
-                logger("WARNING", f"Metadata file already exists for package '{metadata_path}', loading and updating it if needed", indent=log_indent)
-                with open(metadata_path, "r", encoding="utf-8") as f:
-                    package = json.load(f)
-                package = self.retry_temporarily_unavailable_resources(package)
+                logger("SKIP", f"Metadata file '{metadata_file_name}' not found, skipping resource phase", indent=log_indent)
+                return
+
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                package = json.load(f)
+
+            package = self.retry_temporarily_unavailable_resources(package)
 
             if not package:
                 return
@@ -752,7 +905,3 @@ class OpenDataCrawler():
     def get_package(self, pkg_id, metadata_file_name):
         package = self.dms_instance.get_package(pkg_id, metadata_file_name)
         return package
-    
-    #def parse_resource(self, resource_meta, base_name, metadata_file_name, reparse_data):
-    #    resource, resource_crawler_info = self.dms_instance.parse_resource(resource_meta, base_name, metadata_file_name, reparse_data)
-    #    return resource, resource_crawler_info

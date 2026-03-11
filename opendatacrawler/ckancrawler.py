@@ -6,35 +6,105 @@ from datetime import datetime
 from opendatacrawler.setup_logger import log_manager
 logger = log_manager.log
 
-class CkanCrawler():
+import requests
+from opendatacrawler.setup_logger import log_manager
+logger = log_manager.log
+
+class CkanCrawler:
     def __init__(self, odcrawler):
         self.odcrawler = odcrawler
 
     def get_package_list(self):
-        ids = []
-        url = f"{self.odcrawler.domain}/api/3/action/package_list"
+        token = getattr(self.odcrawler, "ckan_api_key", None) or getattr(self.odcrawler, "token", None)
 
         headers = {
             "Accept": "application/json",
-            "Connection": "keep-alive"
+            "Connection": "keep-alive",
         }
 
-        try:
-            response, self.odcrawler.user_agent = self.odcrawler.make_request(url, self.odcrawler.user_agent, headers=headers, max_sec=self.odcrawler.max_sec)
-            if not response:
-                logger("ERROR", f"Error fetching package list from '{self.odcrawler.get_print_domain()}': no working User-Agent found")
+        if not token:
+            try:
+                resp, self.odcrawler.user_agent, err_tag, err = self.odcrawler.make_action_request(
+                    "package_list",
+                    params={},
+                    headers=headers,
+                    return_tag=True,
+                    current_agent=self.odcrawler.user_agent,
+                    max_sec=self.odcrawler.max_sec,
+                )
+                if not resp:
+                    logger("ERROR", f"Error fetching package_list from '{self.odcrawler.get_print_domain()}'", err)
+                    return []
+
+                payload = resp.json()
+                if not payload.get("success", False):
+                    logger("ERROR", f"CKAN package_list returned success=false: {payload.get('error')}")
+                    return []
+
+                ids = payload.get("result") or []
+                if not isinstance(ids, list):
+                    ids = []
+
+                logger("OK", f"Retrieved {len(ids)} packages from '{self.odcrawler.get_print_domain()}'", level="print")
                 return ids
 
-            response.raise_for_status()
-            ids = response.json().get("result", [])
+            except requests.RequestException as e:
+                logger("ERROR", f"Error fetching package_list from '{self.odcrawler.get_print_domain()}'", e)
+                return []
+            except Exception as e:
+                logger("ERROR", f"Unexpected error parsing package_list from '{self.odcrawler.get_print_domain()}'", e)
+                return []
 
-            logger("OK", f"Retrieved {len(ids)} packages from '{self.odcrawler.get_print_domain()}'", level="print")
+        ids = []
+        rows = 100
+        start = 0
 
-        except requests.RequestException as e:
-            logger("ERROR", f"Error fetching package list from '{self.odcrawler.get_print_domain()}'", e)
-        except Exception as e:
-            logger("ERROR", f"Unexpected error parsing response from '{self.odcrawler.get_print_domain()}'", e)
+        while True:
+            params = {
+                "q": "*:*",
+                "include_private": True,
+                "rows": rows,
+                "start": start,
+            }
 
+            try:
+                resp, self.odcrawler.user_agent, err_tag, err = self.odcrawler.make_action_request(
+                    "package_search",
+                    params=params,
+                    headers=headers,
+                    return_tag=True,
+                    current_agent=self.odcrawler.user_agent,
+                    max_sec=self.odcrawler.max_sec,
+                )
+
+                if not resp:
+                    logger("ERROR", f"Error fetching package_search from '{self.odcrawler.get_print_domain()}'", err)
+                    break
+
+                payload = resp.json()
+                if not payload.get("success", False):
+                    logger("ERROR", f"CKAN package_search returned success=false: {payload.get('error')}")
+                    break
+
+                result = payload.get("result") or {}
+                count = int(result.get("count") or 0)
+                results = result.get("results") or []
+
+                batch = [ds.get("name") for ds in results if isinstance(ds, dict) and ds.get("name")]
+                ids.extend(batch)
+
+                start += rows
+                if start >= count or not results:
+                    break
+
+            except requests.RequestException as e:
+                logger("ERROR", f"Error fetching package_search from '{self.odcrawler.get_print_domain()}'", e)
+                break
+            except Exception as e:
+                logger("ERROR", f"Unexpected error parsing package_search from '{self.odcrawler.get_print_domain()}'", e)
+                break
+
+        logger("OK", f"Retrieved {len(ids)} packages from '{self.odcrawler.get_print_domain()}'", level="print")
         return ids
 
     def parse_resource(self, resource_meta, base_name):
@@ -50,7 +120,13 @@ class CkanCrawler():
 
         if resource["id"]:
             url = utils.fix_url(f"{self.odcrawler.domain}/api/3/action/datastore_search?resource_id={resource["id"]}")
-            response, self.odcrawler.user_agent = self.odcrawler.make_request(url, self.odcrawler.user_agent)
+            #response, self.odcrawler.user_agent = self.odcrawler.make_request(url, self.odcrawler.user_agent)
+            response, self.odcrawler.user_agent, *_ = self.odcrawler.make_action_request(
+                "datastore_search",
+                params={"resource_id": resource["id"], "limit": 0},
+                return_tag=False,
+            )
+                        
             if response:
                 schema_data = response.json()["result"]
                 if schema_data:
@@ -82,7 +158,13 @@ class CkanCrawler():
         metadata["fileName"] = metadata_file_name
         metadata["img"] = "https://www.ckan.org/img/ckan-logo-256.png"
 
-        response, self.odcrawler.user_agent, error_tag, e = self.odcrawler.make_request(url, self.odcrawler.user_agent, headers=headers, return_tag=True)
+        response, self.odcrawler.user_agent, error_tag, e = self.odcrawler.make_action_request(
+            "package_show",
+            params={"id": package_id},
+            return_tag=True,
+        )
+
+        #response, self.odcrawler.user_agent, error_tag, e = self.odcrawler.make_request(url, self.odcrawler.user_agent, headers=headers, return_tag=True)
         if not response:
             if error_tag:
                 if error_tag != "resource_temporarily_unavailable":
@@ -97,7 +179,6 @@ class CkanCrawler():
             return None
 
         data = response.json()["result"]
-
         metadata["accessURL"] = utils.fix_url(f"{self.odcrawler.domain}/dataset/{data.get("name")}")
 
         metadata["title"] = data.get("title", {})

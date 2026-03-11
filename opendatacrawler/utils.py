@@ -174,6 +174,61 @@ def make_request(url, current_agent, headers=None, params=None, max_sec=None, st
     else:
         return None, None
 
+def make_request_post(url, current_agent, headers=None, json_body=None, max_sec=None, stream=False, sleep_time=3, return_tag=False, rate_controller=None):
+    headers = headers.copy() if headers else {}
+
+    all_forbidden = True
+    for user_agent in get_user_agent_list(current_agent):
+        headers["User-Agent"] = user_agent
+        while True:
+            try:
+                if rate_controller is not None:
+                    rate_controller.check_rate_limit()
+
+                response = requests.post(
+                    url,
+                    headers=headers,
+                    json=(json_body or {}),
+                    verify=False,
+                    timeout=max_sec,
+                    stream=stream,
+                )
+
+                if response.status_code == 403:
+                    break
+                elif response.status_code == 429:
+                    time.sleep(sleep_time)
+                    continue
+
+                all_forbidden = False
+                if return_tag:
+                    try:
+                        response.raise_for_status()
+                    except requests.exceptions.RequestException as e:
+                        tag = get_error_tag_from_exception(e)
+                        tag_explanation = CRAWLER_CHANGES_INFO.get(tag, {}).get("tag_explanation", {}).get("reason", "Unknown reason")
+                        if tag == "resource_temporarily_unavailable":
+                            return None, user_agent, tag, f"{tag_explanation} ({url}) - [{e}]"
+                        else:
+                            return None, user_agent, tag, f"{tag_explanation} ({url})"
+                    return response, user_agent, None, None
+
+                return response, user_agent
+
+            except requests.exceptions.RequestException as e:
+                tag = get_error_tag_from_exception(e)
+                tag_explanation = CRAWLER_CHANGES_INFO.get(tag, {}).get("tag_explanation", {}).get("reason", "Unknown reason")
+                if tag == "resource_temporarily_unavailable":
+                    return (None, None, tag, f"{tag_explanation} ({url}) - [{e}]") if return_tag else (None, None)
+                else:
+                    return (None, None, tag, f"{tag_explanation} ({url})") if return_tag else (None, None)
+
+    if return_tag:
+        if all_forbidden:
+            return None, None, "forbidden_resource", f"{CRAWLER_CHANGES_INFO.get('forbidden_resource', {}).get('tag_explanation', {}).get('reason', 'Unknown reason')} ({url})"
+        return None, None, None, None
+    return None, None
+
 def clean_url(u):
     u = url_normalize(u)
     u = url_query_cleaner(u, remove=True, parameterlist=["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"])
@@ -1165,10 +1220,15 @@ def normalize_no_html_text(text):
     return text.strip()
 
 def get_country_label(code):
-    country = pycountry.countries.get(alpha_2=code.upper())
-    return country.name if country else None
+    if code:
+        code = str(code).strip()
+        if not code:
+            return None
 
-# == crawlerChangesInfo functions ==
+        country = pycountry.countries.get(alpha_2=code.upper())
+        return country.name if country else None
+
+    return None
 
 def init_metadata(package=True, crawled=True):
     if package:

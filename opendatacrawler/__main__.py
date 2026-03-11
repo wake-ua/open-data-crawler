@@ -104,17 +104,25 @@ def main():
 
             crawler.reset_domain(reset_domain_input, has_data, has_logs)
 
-            countries_to_process = countries if countries else [None]
+            countries_to_process = countries or [None]
             for country in countries_to_process:
                 logger(None, "=" * 80, level="print")
-                if not utils.get_country_label(country):
-                    logger("WARNING", f"Unknown country code '{country}', skipping.", level="print")
-                    continue
 
-                if country:
-                    logger("INFO", f"Processing data from '{utils.get_country_label(country)}' [{country}]", level="print")
+                if country is None:
+                    crawler.set_country_context(None)
+                else:
+                    country = str(country).strip().lower()
+                    if not country:
+                        crawler.set_country_context(None)
+                    else:
+                        label = utils.get_country_label(country)
+                        if not label:
+                            logger("WARNING", f"Unknown country code '{country}', skipping.", level="print")
+                            continue
 
-                crawler.set_country_context(country)
+                        logger("INFO", f"Processing data from '{label}' [{country}]", level="print")
+                        crawler.set_country_context(country)
+
                 resume_data, downloaded_before_res, failed_before_res, unavailable_before_res, failed_before_pkgs = utils.recover_resume(save_path=crawler.save_path, accepted_types=d_types)
 
                 if resume_data:
@@ -128,7 +136,6 @@ def main():
                     crawler.force_replace_package(id_dataset)
 
                 packages = id_dataset if id_dataset else crawler.get_package_list()
-
                 new_packages = [pkg for pkg in packages if pkg not in resume_data]
                 failed_packages = [pkg for pkg in packages if pkg in failed_before_pkgs]
 
@@ -137,19 +144,37 @@ def main():
 
                 if new_packages or failed_packages:
                     total_to_process = len(new_packages) + len(failed_packages)
+
                     if failed_packages:
-                        logger("...", f"Queued {total_to_process} packages ({len(new_packages)} new packages and {len(failed_packages)} previously failed packages) for processing...", level="print")
+                        logger("...",f"Queued {total_to_process} packages ({len(new_packages)} new packages and {len(failed_packages)} previously failed packages)", level="print")
                     else:
-                        logger("...", f"Queued {total_to_process} packages for processing...", level="print")
+                        logger("...", f"Queued {total_to_process} packages for processing", level="print")
+
+                    # ==================================================
+
+                    original_threads = crawler.max_threads
+                    crawler.max_threads = 1
 
                     if new_packages:
-                        logger("...", f"Processing {len(new_packages)} new packages...", level="print")
-                        crawler.process_packages_batch(new_packages, len(packages) - len(new_packages) - len(failed_packages), "Processing new packages...", "green", downloaded_before_res, failed_before_res, unavailable_before_res)
+                        logger("...", f"Collecting metadata for {len(new_packages)} new packages...", level="print")
+                        crawler.process_packages_batch(new_packages, phase="metadata", tqdm_initial=0, tqdm_desc="Collecting metadata", tqdm_colour="blue", downloaded_before_res=downloaded_before_res, failed_before_res=failed_before_res, unavailable_permanent_before_res=unavailable_before_res)
 
                     if failed_packages:
-                        logger("...", f"Reprocessing {len(failed_packages)} previously failed packages...", level="print")
-                        crawler.process_packages_batch(failed_packages, len(packages) - len(failed_packages), "Reprocessing failed packages...", "yellow", downloaded_before_res, failed_before_res, unavailable_before_res)
-                    
+                        logger("...", f"Collecting metadata for {len(failed_packages)} failed packages...", level="print")
+                        crawler.process_packages_batch(failed_packages, phase="metadata", tqdm_initial=0, tqdm_desc="Collecting metadata (failed)", tqdm_colour="cyan", downloaded_before_res=downloaded_before_res, failed_before_res=failed_before_res, unavailable_permanent_before_res=unavailable_before_res )
+
+                    crawler.max_threads = original_threads
+
+                    # ==================================================
+
+                    if new_packages:
+                        logger("...", f"Processing resources for {len(new_packages)} new packages...", level="print")
+                        crawler.process_packages_batch(new_packages, phase="resources", tqdm_initial=0, tqdm_desc="Processing resources", tqdm_colour="green", downloaded_before_res=downloaded_before_res, failed_before_res=failed_before_res, unavailable_permanent_before_res=unavailable_before_res)
+
+                    if failed_packages:
+                        logger("...", f"Reprocessing resources for {len(failed_packages)} failed packages...", level="print")
+                        crawler.process_packages_batch(failed_packages, phase="resources", tqdm_initial=0, tqdm_desc="Reprocessing failed resources", tqdm_colour="yellow", downloaded_before_res=downloaded_before_res, failed_before_res=failed_before_res, unavailable_permanent_before_res=unavailable_before_res)
+
                     resume_data, downloaded_after_res, failed_after_res, unavailable_permanent_after_res, _ = utils.recover_resume(save_path=crawler.save_path, accepted_types=d_types)
                     crawler.log_run_summary(downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, unavailable_before_res, unavailable_permanent_after_res, resume_data)
                 else:
@@ -157,6 +182,7 @@ def main():
                         logger("OK", f"No packages left to process for '{crawler.dms}', everything is up-to-date", level="print")
                     else:
                         logger("OK", f"No packages left to process for '{crawler.dms}', everything is up-to-date with the configuration provided", level="print")
+
         else:
             logger("ERROR", "Incorrect domain form. Must have the form 'https://domain.example' or 'http://domain.example'", level="print")
     except Exception as e:
