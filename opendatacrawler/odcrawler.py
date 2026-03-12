@@ -715,6 +715,15 @@ class OpenDataCrawler():
         metadata["resources"] = {}
         metadata["crawlerInfo"]["resourcesInfo"] = {}
 
+        for idx, resource in enumerate(distributions):
+            base_name = utils.generate_short_filename(f"{metadata['fileName']}_{idx}")
+            metadata["resources"][base_name] = resource
+            metadata["crawlerInfo"]["resourcesInfo"][base_name] = utils.init_metadata(package=False, crawled=False)
+
+        if self.num_resources:
+            logger("INFO", f"Delaying full resource parsing for package '{metadata['identifier']}' because num_resources={self.num_resources}", indent=log_indent)
+            return
+
         def parse_resource_func(item):
             idx, resource = item
             base_name = utils.generate_short_filename(f"{metadata['fileName']}_{idx}")
@@ -728,9 +737,6 @@ class OpenDataCrawler():
         )
 
         for base_name, resource, parsed_resource, parsed_info in parsed_resources:
-            metadata["resources"][base_name] = resource
-            metadata["crawlerInfo"]["resourcesInfo"][base_name] = utils.init_metadata(package=False, crawled=False)
-
             if not parsed_resource:
                 continue
 
@@ -741,6 +747,82 @@ class OpenDataCrawler():
 
             metadata["resources"][new_file_name] = parsed_resource
             metadata["crawlerInfo"]["resourcesInfo"][new_file_name] = parsed_info
+
+    def upsert_package_resource(self, package, old_file_name, resource, resource_info):
+        new_file_name = resource.get("fileName") or old_file_name
+
+        if new_file_name != old_file_name:
+            package["resources"].pop(old_file_name, None)
+            package["crawlerInfo"]["resourcesInfo"].pop(old_file_name, None)
+
+        package["resources"][new_file_name] = resource
+        package["crawlerInfo"]["resourcesInfo"][new_file_name] = resource_info
+        return new_file_name
+
+    def infer_resource_extension(self, file_name, media_type):
+        ext = file_name.split(".")[-1].lower() if file_name and "." in file_name else None
+        if ext:
+            return ext
+
+        _, inferred_ext = utils.get_mime_and_ext(media_type)
+        return inferred_ext
+
+    def resource_matches_filters(self, file_name, resource, log_indent=1):
+        if self.avoid_data:
+            return False
+
+        media_type = resource.get("mediaType")
+        if not media_type:
+            logger("INFO", f"Resource '{file_name}' has no validated media type yet, skipping for now...", indent=log_indent)
+            return False
+
+        inferred_ext = self.infer_resource_extension(file_name, media_type)
+        if self.data_types and (not inferred_ext or inferred_ext not in self.data_types):
+            logger(
+                "SKIP",
+                f"Skipping resource '{file_name}' (media type '{media_type}' with inferred extension '{inferred_ext or 'unknown'}' not in accepted types)",
+                indent=log_indent
+            )
+            return False
+
+        return True
+
+    def resource_has_downloaded_file(self, resource):
+        path = resource.get("path")
+        if not path:
+            return False
+
+        abs_path = path if os.path.isabs(path) else os.path.join(os.getcwd(), path)
+        return os.path.exists(abs_path)
+
+    def prepare_resource_for_processing(self, package, resource_file_name, metadata_file_name):
+        resource = package["resources"].get(resource_file_name)
+        resource_info = package["crawlerInfo"]["resourcesInfo"].get(resource_file_name, utils.init_metadata(package=False, crawled=False))
+
+        if not resource:
+            return resource_file_name, None, resource_info
+
+        tag_info = resource_info.get("fileInfo", {}).get("resource_temporarily_unavailable", {})
+        tag_values = tag_info.get("values", {})
+
+        if tag_values:
+            parsed_resource, parsed_info = self.handle_parse_resource(resource, resource_file_name, metadata_file_name, reparse_data=tag_values)
+            if parsed_resource:
+                resource = parsed_resource
+                resource_info = parsed_info
+
+            resource_file_name = self.upsert_package_resource(package, resource_file_name, resource, resource_info)
+            return resource_file_name, resource, resource_info
+
+        if not resource_info.get("fileStatus", {}).get("fileCrawled"):
+            parsed_resource, parsed_info = self.handle_parse_resource(resource, resource_file_name, metadata_file_name)
+            if parsed_resource:
+                resource = parsed_resource
+                resource_info = parsed_info
+
+            resource_file_name = self.upsert_package_resource(package, resource_file_name, resource, resource_info)
+
+        return resource_file_name, resource, resource_info
 
 
     def process_package_metadata(self, pkg_id, log_indent=1):
@@ -802,7 +884,8 @@ class OpenDataCrawler():
             with open(metadata_path, "r", encoding="utf-8") as f:
                 package = json.load(f)
 
-            package = self.retry_temporarily_unavailable_resources(package)
+            if not self.num_resources:
+                package = self.retry_temporarily_unavailable_resources(package)
 
             if not package:
                 return
@@ -821,42 +904,59 @@ class OpenDataCrawler():
                     self.save_metadata(package)
                     return
 
+            if self.num_resources:
+                completed_valid_resources = 0
+                total_resources = len(package.get("resources", {}))
+
+                if self.num_resources == 1:
+                    logger("INFO", f"Processing resources until finding the first valid resource from package '{pkg_id}' (out of {total_resources} total available)", indent=log_indent)
+                else:
+                    logger("INFO", f"Processing resources until finding {self.num_resources} valid resources from package '{pkg_id}' (out of {total_resources} total available)", indent=log_indent)
+
+                ordered_resource_names = list(package["resources"].keys())
+                for resource_file_name in ordered_resource_names:
+                    resource = package["resources"].get(resource_file_name)
+
+                    if not resource:
+                        continue
+
+                    if self.resource_has_downloaded_file(resource) and self.resource_matches_filters(resource_file_name, resource, log_indent):
+                        completed_valid_resources += 1
+                        if completed_valid_resources >= self.num_resources:
+                            break
+                        continue
+
+                    resource_file_name, resource, resource_info = self.prepare_resource_for_processing(package, resource_file_name, metadata_file_name)
+                    if not resource:
+                        continue
+
+                    if not self.resource_matches_filters(resource_file_name, resource, log_indent):
+                        continue
+
+                    _, updated_resource, updated_info = self.process_resource(resource, package, metadata_path)
+                    resource_file_name = self.upsert_package_resource(package, resource_file_name, updated_resource, updated_info)
+
+                    if self.resource_has_downloaded_file(updated_resource):
+                        completed_valid_resources += 1
+                        if completed_valid_resources >= self.num_resources:
+                            break
+
+                self.save_metadata(package)
+                return
+
             resources_to_process = []
-            for file_name, resource in package["resources"].items():
+            for file_name in list(package["resources"].keys()):
+                file_name, resource, resource_info = self.prepare_resource_for_processing(package, file_name, metadata_file_name)
+                if not resource:
+                    continue
+
                 if utils.is_completed(package, file_name, unavailable=True):
                     continue
 
-                if self.avoid_data:
+                if not self.resource_matches_filters(file_name, resource, log_indent):
                     continue
-
-                media_type = resource.get("mediaType")
-                if not media_type:
-                    logger("WARNING", f"Missing media type for resource '{file_name}' in package '{metadata_file_name}', skipping...", indent=log_indent)
-                    continue
-
-                ext = file_name.split(".")[-1].lower() if "." in file_name else None
-                inferred_ext = ext
-                if not inferred_ext:
-                    _, inferred_ext = utils.get_mime_and_ext(media_type)
-
-                if self.data_types:
-                    if not inferred_ext or inferred_ext not in self.data_types:
-                        logger(
-                            "SKIP",
-                            f"Skipping resource '{file_name}' (media type '{media_type}' with inferred extension '{inferred_ext or 'unknown'}' not in accepted types)",
-                            indent=log_indent
-                        )
-                        continue
 
                 resources_to_process.append((file_name, resource))
-
-            if resources_to_process and self.num_resources:
-                if self.num_resources == 1:
-                    logger("INFO", f"Processing only the first resource from package '{pkg_id}' (out of {len(resources_to_process)} resources matching the provided configuration, from {len(package.get("resources", {}))} total available)", indent=log_indent)
-                else:
-                    logger("INFO", f"Processing only the first {self.num_resources} resources from package '{pkg_id}' (out of {len(resources_to_process)} resources matching the provided configuration, from {len(package.get("resources", {}))} total available)", indent=log_indent)
-
-                resources_to_process = resources_to_process[:self.num_resources]
 
             resource_results = self.run_threaded_function(
                 items=resources_to_process, func=lambda item: self.process_resource(item[1], package, metadata_path),
@@ -867,13 +967,7 @@ class OpenDataCrawler():
                 if resource_file_name not in package["resources"]:
                     continue
 
-                new_file_name = updated_resource.get("fileName") or resource_file_name
-                if new_file_name != resource_file_name:
-                    package["resources"].pop(resource_file_name, None)
-                    package["crawlerInfo"]["resourcesInfo"].pop(resource_file_name, None)
-
-                package["resources"][new_file_name] = updated_resource
-                package["crawlerInfo"]["resourcesInfo"][new_file_name] = resource_info
+                self.upsert_package_resource(package, resource_file_name, updated_resource, resource_info)
 
             self.save_metadata(package)
 

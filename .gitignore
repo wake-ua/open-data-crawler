@@ -134,6 +134,7 @@ data/*
 # logs
 */logs/*
 crawler.log
+opendatacrawler/config.ini
 
 # my env
 /myenv

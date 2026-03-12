@@ -173,7 +173,7 @@ def main():
                         logger("INFO", f"Processing data from '{label}' [{country}]", level="print")
                         crawler.set_country_context(country)
 
-                resume_data, downloaded_before_res, failed_before_res, unavailable_before_res, failed_before_pkgs = utils.recover_resume(
+                resume_data, downloaded_before_res, failed_before_res, unavailable_before_res, incomplete_before_pkgs = utils.recover_resume(
                     save_path=crawler.save_path,
                     accepted_types=d_types,
                     num_resources=crawler.num_resources,
@@ -181,8 +181,9 @@ def main():
 
                 if resume_data:
                     logger("OK", f"Loaded resume with {len(resume_data)} packages and {len(downloaded_before_res)} downloaded resources", level="print")
-                    if failed_before_pkgs:
-                        logger("...", f"Reattempting {len(failed_before_pkgs)} packages with {len(failed_before_res)} failed resources of accepted types ({", ".join(f".{ext}" for ext in d_types)})...", level="print")
+                    pending_before_res = sum(len(status.get("pending_resources", [])) for status in resume_data.values())
+                    if incomplete_before_pkgs:
+                        logger("...", f"Continuing {len(incomplete_before_pkgs)} incomplete packages with {len(failed_before_res)} previously failed resources of accepted types ({", ".join(f".{ext}" for ext in d_types)}) and {pending_before_res} pending resources limited by the current configuration...", level="print")
                     logger(None, "=" * 80, level="print")
 
                 logger("...", f"Obtaining packages from '{crawler.get_print_domain()}'...", level="print")
@@ -191,16 +192,16 @@ def main():
 
                 packages = id_dataset if id_dataset else crawler.get_package_list()
                 new_packages = [pkg for pkg in packages if pkg not in resume_data]
-                failed_packages = [pkg for pkg in packages if pkg in failed_before_pkgs]
+                incomplete_packages = [pkg for pkg in packages if pkg in incomplete_before_pkgs]
 
                 if max_packages:
                     new_packages = new_packages[:max_packages]
 
-                if new_packages or failed_packages:
-                    total_to_process = len(new_packages) + len(failed_packages)
+                if new_packages or incomplete_packages:
+                    total_to_process = len(new_packages) + len(incomplete_packages)
 
-                    if failed_packages:
-                        logger("...",f"Queued {total_to_process} packages ({len(new_packages)} new packages and {len(failed_packages)} previously failed packages)", level="print")
+                    if incomplete_packages:
+                        logger("...",f"Queued {total_to_process} packages ({len(new_packages)} new packages and {len(incomplete_packages)} incomplete packages)", level="print")
                     else:
                         logger("...", f"Queued {total_to_process} packages for processing", level="print")
 
@@ -214,10 +215,6 @@ def main():
                         logger("...", f"Collecting metadata for {len(new_packages)} new packages...", level="print")
                         crawler.process_packages_batch(new_packages, phase="metadata", tqdm_initial=0, tqdm_desc="Collecting metadata", tqdm_colour="blue", downloaded_before_res=downloaded_before_res, failed_before_res=failed_before_res, unavailable_permanent_before_res=unavailable_before_res)
 
-                    if failed_packages:
-                        logger("...", f"Collecting metadata for {len(failed_packages)} failed packages...", level="print")
-                        crawler.process_packages_batch(failed_packages, phase="metadata", tqdm_initial=0, tqdm_desc="Collecting metadata (failed)", tqdm_colour="cyan", downloaded_before_res=downloaded_before_res, failed_before_res=failed_before_res, unavailable_permanent_before_res=unavailable_before_res )
-
                     crawler.max_threads = original_threads
 
                     # ==================================================
@@ -226,9 +223,9 @@ def main():
                         logger("...", f"Processing resources for {len(new_packages)} new packages...", level="print")
                         crawler.process_packages_batch(new_packages, phase="resources", tqdm_initial=0, tqdm_desc="Processing resources", tqdm_colour="green", downloaded_before_res=downloaded_before_res, failed_before_res=failed_before_res, unavailable_permanent_before_res=unavailable_before_res)
 
-                    if failed_packages:
-                        logger("...", f"Reprocessing resources for {len(failed_packages)} failed packages...", level="print")
-                        crawler.process_packages_batch(failed_packages, phase="resources", tqdm_initial=0, tqdm_desc="Reprocessing failed resources", tqdm_colour="yellow", downloaded_before_res=downloaded_before_res, failed_before_res=failed_before_res, unavailable_permanent_before_res=unavailable_before_res)
+                    if incomplete_packages:
+                        logger("...", f"Continuing resources for {len(incomplete_packages)} incomplete packages...", level="print")
+                        crawler.process_packages_batch(incomplete_packages, phase="resources", tqdm_initial=0, tqdm_desc="Continuing pending resources", tqdm_colour="yellow", downloaded_before_res=downloaded_before_res, failed_before_res=failed_before_res, unavailable_permanent_before_res=unavailable_before_res)
 
                     resume_data, downloaded_after_res, failed_after_res, unavailable_permanent_after_res, _ = utils.recover_resume(
                         save_path=crawler.save_path,

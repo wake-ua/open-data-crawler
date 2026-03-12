@@ -3,6 +3,7 @@ import json
 import os
 import re
 import sys
+from typing import Any, cast
 from urllib.parse import urlparse
 
 import requests
@@ -58,7 +59,7 @@ class DatosGobEsCrawler:
             return []
 
         pending_title = {}
-        current = None
+        current: dict[str, Any] | None = None
         distributions = []
 
         def add_title(target, lang, text):
@@ -99,7 +100,8 @@ class DatosGobEsCrawler:
             if key.startswith("TITLE"):
                 lang = key.split("_", 1)[1].lower() if "_" in key else "es"
                 if current is not None and not current.get("accessURL"):
-                    target = current["title"]
+                    current_dist = cast(Any, current)
+                    target = current_dist["title"]
                 else:
                     target = pending_title
                 add_title(target, lang, raw_val)
@@ -115,11 +117,13 @@ class DatosGobEsCrawler:
                 }
                 pending_title = {}
             elif key == "MEDIA_TYPE":
-                if current and raw_val:
-                    current["format"] = {"value": raw_val}
+                if current is not None and raw_val:
+                    current_dist = cast(Any, current)
+                    current_dist["format"] = {"value": raw_val}
             elif key == "RELATION":
-                if current and raw_val:
-                    current["relation"] = raw_val
+                if current is not None and raw_val:
+                    current_dist = cast(Any, current)
+                    current_dist["relation"] = raw_val
 
         finalize(current)
         return distributions
@@ -232,18 +236,11 @@ class DatosGobEsCrawler:
             logger("ERROR", "Unexpected error parsing datos.gob.es fallback catalog CSV", e)
             rows_by_id = {}
 
-        logger(
-            "INFO",
-            f"datos.gob.es catalog CSV stats: total_rows={total_rows}, extracted_ids={extracted_ids}, "
-            f"excluded_catalog_rows={excluded_catalog_rows}, duplicate_ids={duplicate_ids}, kept_unique_ids={len(rows_by_id)}"
-        )
-        logger("INFO", f"datos.gob.es catalog CSV loaded with {len(rows_by_id)} package rows")
         self._catalog_rows_by_id = rows_by_id
         return self._catalog_rows_by_id
 
     def get_package_list(self):
         ids = list(self._load_catalog_rows().keys())
-        logger("INFO", f"datos.gob.es package_list loaded {len(ids)} package IDs directly from the local catalog CSV")
         logger("OK", f"Retrieved {len(ids)} packages from '{self.odcrawler.get_print_domain()}'", level="print")
         return ids
 
