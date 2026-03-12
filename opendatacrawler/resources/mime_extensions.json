@@ -2523,7 +2523,8 @@
   },
   "application/vnd.api+json": {
     "source": "iana",
-    "compressible": true
+    "compressible": true,
+    "extensions": ["json"]
   },
   "application/vnd.aplextor.warrp+json": {
     "source": "iana",

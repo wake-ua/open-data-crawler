@@ -133,6 +133,7 @@ dmypy.json
 data/*
 # logs
 */logs/*
+crawler.log
 
 # my env
 /myenv
@@ -140,8 +141,3 @@ data/*
 .vscode/
 
 .DS_Store
-data/zenodo.org/
-
-data/resume_zenodo.org.txt
-
-data/*

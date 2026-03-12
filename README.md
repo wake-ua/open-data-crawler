@@ -79,7 +79,7 @@ Open Data Crawler is a tool designed to extract datasets, and optionally their m
 - Filter datasets by topic or category
 
 ### Currently Supported Portals and Sites
-- [x] [datos.gob.es](https://datos.gob.es) * (request limit ≈ 5 req/sec ~ 18 000 req/hour)
+- [x] [datos.gob.es](https://datos.gob.es)
 - [x] CKAN
 - [x] [Zenodo](https://zenodo.org/) * (request limit ≈ 1.39 req/sec ~ 5000 req/hour)
 - [x] [GBIF](https://www.gbif.org/es/)
@@ -113,6 +113,13 @@ To set up the project locally, follow these steps:
      [Socrata]
      token = <yourSocrataToken>
      ```
+* Runtime defaults can also be configured in `opendatacrawler/config.ini` using sections such as `[defaults]`, `[datosgobes]` or `[zenodo]`.
+
+> [!IMPORTANT]
+> Command-line arguments take priority over `config.ini`, and `config.ini` takes priority over the built-in defaults.
+
+> [!NOTE]
+> For `datos.gob.es`, package metadata is currently resolved from the official catalog CSV rather than from the old metadata API. The crawler keeps a local cached copy in `opendatacrawler/resources/datosgobes_catalog.csv` and only refreshes it when the remote file size changes.
 
 ### Installation
 
@@ -144,6 +151,8 @@ python opendatacrawler -h
 ```
 python opendatacrawler -d https://datos.gob.es
 ```
+> [!NOTE]
+> In `datos.gob.es`, this first refreshes or reuses the local catalog index in `opendatacrawler/resources/datosgobes_catalog.csv`, and then processes packages from that local index.
 #### Download specific format data (e.g., 'xls' and 'csv'):
 ```
 python opendatacrawler -d https://datos.gob.es -t xls csv
@@ -151,6 +160,16 @@ python opendatacrawler -d https://datos.gob.es -t xls csv
 #### Download specific categories (e.g., 'tourism' and 'transport'):
 ```
 python opendatacrawler -d https://datos.gob.es -c tourism transport
+```
+#### Save original raw metadata from the portal:
+```
+python opendatacrawler -d https://datos.gob.es --save-raw-data
+```
+> [!CAUTION]
+> `--save-raw-data` stores the original portal payload inside the generated metadata files. This is useful for debugging and traceability, but it increases metadata size and write time.
+#### Disable schema extraction for CSV/TSV files:
+```
+python opendatacrawler -d https://datos.gob.es --no-extract-schema
 ```
 
 <!-- _For more examples, see the [Documentation](https://example.com)_ -->
@@ -182,7 +201,7 @@ And don't forget to give the project a star! Thanks for your support! 🌟
 5. Open a Pull Request
 
 ### Add Support for a New Portal
-1. Create a file named `<PortalName>crawler.py` inside `opendatacrawler/` folder (e.g. `examplecrawler.py`).
+1. Create a file named `<PortalName>crawler.py` inside `opendatacrawler/portals/` (e.g. `examplecrawler.py`).
 2. Create a class `<PortalName>Crawler` with this constructor:
   ```python
   class ExampleCrawler:
@@ -214,7 +233,7 @@ And don't forget to give the project a star! Thanks for your support! 🌟
         self.odcrawler.init_and_parse_resources(metadata, distributions)
     ```
 
-4. Use helper functions (`utils.py`) and built-in logging:
+4. Use helper functions from the `opendatacrawler/utils/` package and built-in logging:
   - **Network calls**: `utils.make_request(url, self.user_agent, headers=...)`  
     > Note: the function may rotate the `user_agent`. Always capture and reuse the returned value.
 
@@ -245,7 +264,7 @@ And don't forget to give the project a star! Thanks for your support! 🌟
 
 ### Define New Mapping Files
 
-You can also contribute to the project by defining your own JSON mapping files inside the `resources/` folder, following the naming pattern `<portal>_<field>_map.json` (lowercase) and then loading these mappings using `load_resource()` from `utils.py`, and assign them to a constant using the format `<PORTALNAME>CRAWLER_<FIELDNAME>_MAP` (uppercase).
+You can also contribute to the project by defining your own JSON mapping files inside the `resources/` folder, following the naming pattern `<portal>_<field>_map.json` (lowercase) and then loading these mappings using `load_resource()` from `opendatacrawler.utils`, and assign them to a constant using the format `<PORTALNAME>CRAWLER_<FIELDNAME>_MAP` (uppercase).
 
 These are used by `utils.extract_mapped_field()` to normalize raw values (e.g. URIs) into human-readable text, and to avoid unnecessary requests for known or static entities (such as publishers, themes, spatial areas, etc.).
 
@@ -262,7 +281,7 @@ In the case of needing a new field map for the field `theme` in the crawler `Exa
     }
   }
   ```
-2. Load the map using `load_resource()` in `utils.py`, providing a fallback value for unmapped entries:
+2. Load the map using `load_resource()` from `opendatacrawler.utils`, providing a fallback value for unmapped entries:
   ```python
   EXAMPLECRAWLER_THEME_MAP = load_resource(
       "example_theme_map.json",

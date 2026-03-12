@@ -98,12 +98,13 @@ class DatosMadridEsCrawler():
         publisher_el = data.find("dct:publisher", self.ns)
         metadata["publisher"] = {"identifier": utils.get_xml_attr(publisher_el, self.ns["rdf"], "resource") if publisher_el is not None else None}
 
-        access_el = distributions[0].find("dcat:accessURL", self.ns)
-        if access_el is not None:
-            access_url = access_el.text or utils.get_xml_attr(access_el, self.ns["rdf"], "resource")
-            if access_url:
-                domain = urlparse(access_url).netloc
-                metadata["publisher"]["homepage"] = f"https://{domain}"
+        if distributions:
+            access_el = distributions[0].find("dcat:accessURL", self.ns)
+            if access_el is not None:
+                access_url = access_el.text or utils.get_xml_attr(access_el, self.ns["rdf"], "resource")
+                if access_url:
+                    domain = urlparse(access_url).netloc
+                    metadata["publisher"]["homepage"] = f"https://{domain}"
 
         metadata["language"] = None
 

@@ -9,6 +9,34 @@ from opendatacrawler.odcrawler import OpenDataCrawler
 from opendatacrawler.setup_logger import log_manager
 logger = log_manager.log
 
+
+def resolve_option(cli_value, section, option, cast, fallback):
+    if cli_value is not None:
+        return cli_value
+    config_value = utils.get_config_option(section, option, cast=cast, fallback=None)
+    if config_value is not None:
+        return config_value
+    return fallback
+
+
+def apply_portal_runtime_config(crawler, args):
+    section = crawler.dms or ""
+
+    if args.get("max_seconds") is None:
+        crawler.max_sec = utils.get_config_option(section, "max_seconds", cast=int, fallback=crawler.max_sec)
+
+    if args.get("max_threads") is None:
+        crawler.max_threads = utils.get_config_option(section, "max_threads", cast=int, fallback=crawler.max_threads)
+
+    if args.get("max_resource_threads") is None:
+        crawler.max_resource_threads = utils.get_config_option(section, "max_resource_threads", cast=int, fallback=crawler.max_resource_threads)
+
+    if args.get("save_raw_data") is None:
+        crawler.save_raw_data = utils.get_config_option(section, "save_raw_data", cast=bool, fallback=crawler.save_raw_data)
+
+    if args.get("extract_schema") is None:
+        crawler.extract_schema = utils.get_config_option(section, "extract_schema", cast=bool, fallback=crawler.extract_schema)
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-d", "--domain", type=str, required=True,
@@ -41,6 +69,10 @@ def main():
                         help="Force re-download of datasets specified with --id_dataset (delete old metadata and data first)")
     parser.add_argument("-country", "--countries", nargs="+", required=False, 
                         help="Filter datasets by country code (e.g. -country es gr fr)")
+    parser.add_argument("--save-raw-data", required=False, action=argparse.BooleanOptionalAction,
+                        help="Store original raw metadata returned by the source portal (default: disabled)")
+    parser.add_argument("--extract-schema", required=False, action=argparse.BooleanOptionalAction,
+                        help="Extract tabular schema from CSV/TSV files (default: enabled)")
 
     args = vars(parser.parse_args())
 
@@ -48,17 +80,19 @@ def main():
     d_types = [c.lower() for c in args["data_types"]] if args["data_types"] else []
     categories = [c.lower() for c in args["categories"]] if args["categories"] else []
     d_path = args["path"]
-    max_sec = args["max_seconds"]
+    max_sec = resolve_option(args["max_seconds"], "defaults", "max_seconds", int, None)
     partial = args["partial_dataset"]
     id_dataset = args["id_dataset"]
     avoid_data = args["no_dataset"]
     max_packages = args.get("max_packages")
-    max_threads = args["max_threads"] if args["max_threads"] else min(32, (os.cpu_count() or 1) * 5)
-    max_resource_threads = args["max_resource_threads"] if args.get("max_resource_threads") else 4
+    max_threads = resolve_option(args["max_threads"], "defaults", "max_threads", int, min(16, max(4, (os.cpu_count() or 1) * 2)))
+    max_resource_threads = resolve_option(args.get("max_resource_threads"), "defaults", "max_resource_threads", int, 2)
     reset_domain = args.get("reset_domain")
     num_resources = args.get("nr")
     replace = args.get("replace")
     countries = [c.lower() for c in args["countries"]] if args["countries"] else []
+    save_raw_data = resolve_option(args.get("save_raw_data"), "defaults", "save_raw_data", bool, False)
+    extract_schema = resolve_option(args.get("extract_schema"), "defaults", "extract_schema", bool, True)
 
     if num_resources == 0:
         avoid_data = True
@@ -68,11 +102,27 @@ def main():
     crawler = None
     try:
         if utils.is_url(url):
-            crawler = OpenDataCrawler(url, path=d_path, data_types=d_types, categories=categories, partial=partial, avoid_data=avoid_data, max_sec=max_sec, max_threads=max_threads, max_resource_threads=max_resource_threads, num_resources=num_resources, countries=countries)
+            crawler = OpenDataCrawler(
+                url,
+                path=d_path,
+                data_types=d_types,
+                categories=categories,
+                partial=partial,
+                avoid_data=avoid_data,
+                max_sec=max_sec,
+                max_threads=max_threads,
+                max_resource_threads=max_resource_threads,
+                num_resources=num_resources,
+                countries=countries,
+                save_raw_data=save_raw_data,
+                extract_schema=extract_schema,
+            )
 
             if not crawler.dms:
                 log_manager.move_to_domain("_unknownDomain", move_file=True)
                 sys.exit(1)
+
+            apply_portal_runtime_config(crawler, args)
 
             logger(None, "=" * 80, level="print")
 
@@ -123,7 +173,11 @@ def main():
                         logger("INFO", f"Processing data from '{label}' [{country}]", level="print")
                         crawler.set_country_context(country)
 
-                resume_data, downloaded_before_res, failed_before_res, unavailable_before_res, failed_before_pkgs = utils.recover_resume(save_path=crawler.save_path, accepted_types=d_types)
+                resume_data, downloaded_before_res, failed_before_res, unavailable_before_res, failed_before_pkgs = utils.recover_resume(
+                    save_path=crawler.save_path,
+                    accepted_types=d_types,
+                    num_resources=crawler.num_resources,
+                )
 
                 if resume_data:
                     logger("OK", f"Loaded resume with {len(resume_data)} packages and {len(downloaded_before_res)} downloaded resources", level="print")
@@ -153,7 +207,8 @@ def main():
                     # ==================================================
 
                     original_threads = crawler.max_threads
-                    crawler.max_threads = 1
+                    if crawler.serial_metadata_phase:
+                        crawler.max_threads = 1
 
                     if new_packages:
                         logger("...", f"Collecting metadata for {len(new_packages)} new packages...", level="print")
@@ -175,7 +230,11 @@ def main():
                         logger("...", f"Reprocessing resources for {len(failed_packages)} failed packages...", level="print")
                         crawler.process_packages_batch(failed_packages, phase="resources", tqdm_initial=0, tqdm_desc="Reprocessing failed resources", tqdm_colour="yellow", downloaded_before_res=downloaded_before_res, failed_before_res=failed_before_res, unavailable_permanent_before_res=unavailable_before_res)
 
-                    resume_data, downloaded_after_res, failed_after_res, unavailable_permanent_after_res, _ = utils.recover_resume(save_path=crawler.save_path, accepted_types=d_types)
+                    resume_data, downloaded_after_res, failed_after_res, unavailable_permanent_after_res, _ = utils.recover_resume(
+                        save_path=crawler.save_path,
+                        accepted_types=d_types,
+                        num_resources=crawler.num_resources,
+                    )
                     crawler.log_run_summary(downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, unavailable_before_res, unavailable_permanent_after_res, resume_data)
                 else:
                     if not id_dataset and not avoid_data and not max_packages and not categories and not d_types:

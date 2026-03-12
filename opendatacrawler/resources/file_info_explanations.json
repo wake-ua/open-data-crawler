@@ -29,7 +29,7 @@
     "invalid_request": {
         "tag_placeholders": [],
         "tag_explanation": {
-            "reason": "The server rejected the download request due to a malformed or invalid URL (HTTP 400 - Bad Request)"
+            "reason": "The server rejected the request as invalid or malformed (HTTP 400 - Bad Request)"
         }
     },
     "ssl_error": {
@@ -81,6 +81,12 @@
             "values": {
                 "metaMediaType": "<metaMediaType>"
             }
+        }
+    },
+    "html_page_downloaded": {
+        "tag_placeholders": [],
+        "tag_explanation": {
+            "reason": "The downloaded content is an HTML page instead of the expected dataset file, typically because the download URL redirects to an access, authentication, or landing page"
         }
     }
 }

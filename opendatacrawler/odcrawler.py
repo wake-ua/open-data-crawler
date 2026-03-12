@@ -3,6 +3,7 @@ import os
 import shutil
 import requests
 import humanize
+import hashlib
 import gc
 import random
 import threading
@@ -13,25 +14,30 @@ from frictionless import describe, Dialect
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 from opendatacrawler import utils
-from opendatacrawler.datosgobescrawler import DatosGobEsCrawler
-from opendatacrawler.ckancrawler import CkanCrawler
-from opendatacrawler.zenodocrawler import ZenodoCrawler
-from opendatacrawler.gbifcrawler import GbifCrawler
-from opendatacrawler.datosmadrides import DatosMadridEsCrawler
-from opendatacrawler.dataeuropaeucrawler import DataEuropaEuCrawler
+from opendatacrawler.portals import (
+    CkanCrawler,
+    DataEuropaEuCrawler,
+    DatosGobEsCrawler,
+    DatosMadridEsCrawler,
+    GbifCrawler,
+    ZenodoCrawler,
+)
 from urllib.parse import urlparse
 
 from opendatacrawler.setup_logger import log_manager
 logger = log_manager.log
 
 class OpenDataCrawler():
-    def __init__(self, domain, path=None, data_types=None, categories=None, partial=False, avoid_data=None, max_sec=None, max_threads=None, max_resource_threads=None, num_resources=None, countries=None):
+    def __init__(self, domain, path=None, data_types=None, categories=None, partial=False, avoid_data=None, max_sec=None, max_threads=None, max_resource_threads=None, num_resources=None, countries=None, save_raw_data=False, extract_schema=True):
         self.domain = utils.normalize_domain(domain).rstrip("/")
         self.dms = None
         self.dms_instance = None
         self.max_sec = max_sec
         self.max_threads = max_threads
         self.max_resource_threads = max_resource_threads
+        self.serial_metadata_phase = True
+        self.save_raw_data = save_raw_data
+        self.extract_schema = extract_schema
 
         base_path = path or os.path.join(os.getcwd(), "data")
         utils.create_folder(base_path)
@@ -51,11 +57,12 @@ class OpenDataCrawler():
 
         self.user_agent = None
 
-        self.ckan_api_key = utils.AUTH_TOKENS.get("ckan")
         self.domain_netloc = urlparse(self.domain).netloc
         self.ckan_action_requires_post = False
-        self.ckan_auth_mode = None 
-
+        self.host_timeout_threshold = utils.get_config_option("defaults", "host_timeout_threshold", cast=int, fallback=3)
+        self.host_cooldown_seconds = utils.get_config_option("defaults", "host_cooldown_seconds", cast=int, fallback=60)
+        self.host_cooldowns = {}
+        self.host_cooldown_lock = threading.Lock()
         logger("...", f"Detecting DMS for domain '{self.get_print_domain()}'...", level="print")
         self.init_rate_limit()
         self.detect_dms()
@@ -66,7 +73,7 @@ class OpenDataCrawler():
         dms_endpoints = {
             "dataEuropaEu": "/api/hub/repo/catalogues",
             #"Socrata": "/api/catalog/v1",
-            #"datosGobEs": "/apidata/catalog/dataset?_sort=title&_pageSize=1",
+            "datosGobEs": "/apidata/catalog/dataset?_sort=title&_pageSize=1",
             "CKAN": "/api/3/action/package_list",
             #"WorldBank": "/ddhxext/DatasetList",
             #"EuroStat": "/estat-navtree-portlet-prod/BulkDownloadListing?sort=1&dir=metadata",
@@ -153,6 +160,15 @@ class OpenDataCrawler():
             return ("Please use POST method" in txt) or ("Invalid request" in txt)
         except Exception:
             return False
+
+    def get_ckan_api_key(self):
+        if self.dms != "CKAN":
+            return None
+
+        if self.dms_instance and hasattr(self.dms_instance, "token"):
+            return self.dms_instance.token
+
+        return None
         
     def set_country_context(self, country):
         self.current_country = country
@@ -251,14 +267,16 @@ class OpenDataCrawler():
                     f"{total_success} successful, {total_failed} failed, {total_unavailable} permanently unavailable in total "
                     f"across {len(resume_data)} packages", level="print")
 
-    def run_threaded_function(self, items, func, max_workers=1, thread_name_prefix=None, use_tqdm=False, tqdm_initial=0, tqdm_desc="", tqdm_colour=None):
-        results = []
+    def run_threaded_function(self, items, func, max_workers=1, thread_name_prefix=None, use_tqdm=False, tqdm_initial=0, tqdm_desc="", tqdm_colour=None, store_results=True):
+        results = [] if store_results else None
         if max_workers == 1:
             iterable = items
             if use_tqdm:
                 iterable = tqdm(items, total=len(items) + tqdm_initial, initial=tqdm_initial, desc=tqdm_desc, colour=tqdm_colour)
             for item in iterable:
-                results.append(func(item))
+                result = func(item)
+                if store_results:
+                    results.append(result)
         else:
             with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=f"{thread_name_prefix}") as executor:
                 futures = [executor.submit(func, item) for item in items]
@@ -268,13 +286,15 @@ class OpenDataCrawler():
                     else:
                         futures_iter = as_completed(futures)
                     for future in futures_iter:
-                        results.append(future.result())
+                        result = future.result()
+                        if store_results:
+                            results.append(result)
                 except KeyboardInterrupt:
                     for f in futures:
                         f.cancel()
                     executor.shutdown(wait=False)
                     raise
-        return results
+        return results if store_results else None
 
     def process_packages_batch(self, packages, phase, tqdm_initial, tqdm_desc, tqdm_colour, downloaded_before_res, failed_before_res, unavailable_permanent_before_res, max_workers=None):
         try:
@@ -285,7 +305,7 @@ class OpenDataCrawler():
 
             workers = max_workers if max_workers is not None else self.max_threads
 
-            self.run_threaded_function(items=packages, func=func, max_workers=workers, thread_name_prefix="t", use_tqdm=True, tqdm_desc=tqdm_desc, tqdm_colour=tqdm_colour, tqdm_initial=tqdm_initial)
+            self.run_threaded_function(items=packages, func=func, max_workers=workers, thread_name_prefix="t", use_tqdm=True, tqdm_desc=tqdm_desc, tqdm_colour=tqdm_colour, tqdm_initial=tqdm_initial, store_results=False)
 
         except KeyboardInterrupt:
             logger(None, "=" * 80, level="print")
@@ -297,7 +317,11 @@ class OpenDataCrawler():
 
             logger(None, "=" * 80, level="print")
 
-            resume_data, downloaded_after_res, failed_after_res, unavailable_permanent_after_res, _ = utils.recover_resume(save_path=self.save_path, accepted_types=self.data_types)
+            resume_data, downloaded_after_res, failed_after_res, unavailable_permanent_after_res, _ = utils.recover_resume(
+                save_path=self.save_path,
+                accepted_types=self.data_types,
+                num_resources=self.num_resources,
+            )
 
             self.log_run_summary(downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, unavailable_permanent_before_res, unavailable_permanent_after_res, resume_data)
             os._exit(1)
@@ -344,6 +368,59 @@ class OpenDataCrawler():
             self.pending_reqs -= 1
             self.req_total += 1
 
+    def should_rate_limit_url(self, url):
+        if not self.rate_limit or not url:
+            return False
+
+        try:
+            return urlparse(utils.fix_url(url)).netloc == self.domain_netloc
+        except Exception:
+            return False
+
+    def check_host_cooldown(self, url):
+        if not url or self.host_timeout_threshold <= 0 or self.host_cooldown_seconds <= 0:
+            return None
+
+        host = urlparse(utils.fix_url(url)).netloc
+        if not host:
+            return None
+
+        with self.host_cooldown_lock:
+            state = self.host_cooldowns.get(host)
+            if not state:
+                return None
+
+            cooldown_until = state.get("cooldown_until", 0)
+            if cooldown_until and cooldown_until > time.time():
+                wait_seconds = max(1, int(cooldown_until - time.time()))
+                return host, wait_seconds
+
+            if cooldown_until:
+                state["cooldown_until"] = 0
+
+        return None
+
+    def register_host_result(self, url, error_tag=None):
+        if not url or self.host_timeout_threshold <= 0 or self.host_cooldown_seconds <= 0:
+            return
+
+        host = urlparse(utils.fix_url(url)).netloc
+        if not host:
+            return
+
+        with self.host_cooldown_lock:
+            state = self.host_cooldowns.setdefault(host, {"timeouts": 0, "cooldown_until": 0})
+
+            if error_tag == "resource_temporarily_unavailable":
+                state["timeouts"] += 1
+                if state["timeouts"] >= self.host_timeout_threshold:
+                    state["cooldown_until"] = time.time() + self.host_cooldown_seconds
+                    state["timeouts"] = 0
+                    logger("WARNING", f"Host '{host}' entered cooldown for {self.host_cooldown_seconds}s after repeated temporary access failures")
+            else:
+                state["timeouts"] = 0
+                state["cooldown_until"] = 0
+
     def make_action_request(
         self,
         action: str,
@@ -360,9 +437,10 @@ class OpenDataCrawler():
         hdrs.setdefault("Accept", "application/json")
         hdrs.setdefault("Connection", "keep-alive")
 
-        if self.ckan_api_key and urlparse(url).netloc == self.domain_netloc:
-            hdrs.setdefault("X-CKAN-API-Key", self.ckan_api_key)
-            hdrs.setdefault("Authorization", self.ckan_api_key)
+        ckan_api_key = self.get_ckan_api_key()
+        if ckan_api_key and urlparse(url).netloc == self.domain_netloc:
+            hdrs.setdefault("X-CKAN-API-Key", ckan_api_key)
+            hdrs.setdefault("Authorization", ckan_api_key)
 
         agent = current_agent if current_agent is not None else self.user_agent
         timeout = max_sec if max_sec is not None else self.max_sec
@@ -410,11 +488,12 @@ class OpenDataCrawler():
     def make_request(self, url, current_agent, headers=None, **kwargs):
         headers = dict(headers) if headers else {}
 
-        if self.ckan_api_key and urlparse(url).netloc == self.domain_netloc:
-            headers.setdefault("Authorization", self.ckan_api_key)
-            headers.setdefault("X-CKAN-API-Key", self.ckan_api_key)
+        ckan_api_key = self.get_ckan_api_key()
+        if ckan_api_key and urlparse(url).netloc == self.domain_netloc:
+            headers.setdefault("Authorization", ckan_api_key)
+            headers.setdefault("X-CKAN-API-Key", ckan_api_key)
 
-        if self.rate_limit:
+        if self.should_rate_limit_url(url):
             return utils.make_request(url, current_agent, headers=headers, **kwargs, rate_controller=self)
 
         return utils.make_request(url, current_agent, headers=headers, **kwargs)
@@ -433,15 +512,22 @@ class OpenDataCrawler():
         if error_tag:
             return None, error_tag, e
 
+        path = os.path.join(self.save_path, file_name)
+        temp_path = f"{path}.part"
         try:
-            path = os.path.join(self.save_path, file_name)
             total_bytes = 0
             line_limit = 50
             lines_downloaded = 0
 
             response.raw.decode_content = True
             try:
-                with open(path, "wb") as outfile:
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except Exception as cleanup_error:
+                        logger("ERROR", f"Failed to delete stale partial file '{temp_path}' before download", cleanup_error, indent=log_indent)
+
+                with open(temp_path, "wb") as outfile:
                     for chunk in response.iter_content(chunk_size=chunk_size):
                         if not chunk:
                             continue
@@ -455,16 +541,34 @@ class OpenDataCrawler():
                                 logger("WARNING", f"Partial content downloaded (~{line_limit} rows) for '{file_name}'", indent=log_indent)
                                 break
             except (requests.exceptions.ChunkedEncodingError, requests.exceptions.ConnectionError) as e:
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                        logger("DEL", f"Deleted partial file '{temp_path}' after interrupted download", indent=log_indent)
+                    except Exception as cleanup_error:
+                        logger("ERROR", f"Failed to delete partial file '{temp_path}'", cleanup_error, indent=log_indent)
                 logger("WARNING", f"Chunked connection error while saving '{file_name}'", e, indent=log_indent)
                 return None, "resource_temporarily_unavailable", e
 
             if not self.partial and total_bytes == 0:
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except Exception as cleanup_error:
+                        logger("ERROR", f"Failed to delete empty file '{temp_path}'", cleanup_error, indent=log_indent)
                 logger("WARNING", f"No data downloaded for resource '{file_name}'", indent=log_indent)
                 return None, "no_data", None
+
+            os.replace(temp_path, path)
 
             return path, None, None
 
         except Exception as e:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except Exception as cleanup_error:
+                    logger("ERROR", f"Failed to delete incomplete file '{temp_path}' after unexpected error", cleanup_error, indent=log_indent)
             logger("ERROR", f"Unexpected error saving dataset '{file_name}'", [e, traceback.format_exc()], indent=log_indent)
             return None, None, None
         finally:
@@ -481,33 +585,34 @@ class OpenDataCrawler():
             if "crawlerInfo" in package:
                 package["crawlerInfo"] = package.pop("crawlerInfo")
 
-            old_package = None
+            all_resources_complete = True
+            for _, res_info in package["crawlerInfo"]["resourcesInfo"].items():
+                if not res_info.get("fileStatus", {}).get("fileCompleted"):
+                    all_resources_complete = False
+                    break
+
+            if all_resources_complete and not package["crawlerInfo"]["packageStatus"].get("packageCompleted"):
+                package["crawlerInfo"]["packageStatus"]["packageCompleted"] = datetime.now().isoformat()
+
+            sanitized_package = utils.sanitize_json_keys(package)
+            serialized_package = json.dumps(sanitized_package, ensure_ascii=False, indent=log_indent, sort_keys=True)
+            new_hash = hashlib.sha1(serialized_package.encode("utf-8")).hexdigest()
+
+            existing_hash = None
             if os.path.exists(meta_path):
-                try:
-                    with open(meta_path, "r", encoding="utf-8") as f:
-                        old_package = json.load(f)
-                except Exception:
-                    old_package = None
+                sha1 = hashlib.sha1()
+                with open(meta_path, "rb") as f:
+                    for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                        sha1.update(chunk)
+                existing_hash = sha1.hexdigest()
 
-            if old_package != package:
-                all_resources_complete = True
-                for _, res_info in package["crawlerInfo"]["resourcesInfo"].items():
-                    if not res_info.get("fileStatus", {}).get("fileCompleted"):
-                        all_resources_complete = False
-                        break
-
-                if all_resources_complete:
-                    package["crawlerInfo"]["packageStatus"]["packageCompleted"] = datetime.now().isoformat()
-
-                with open(meta_path, "w", encoding="utf-8") as f:
-                    json.dump(package, f, ensure_ascii=False, indent=log_indent)
-
-                logger("OK", f"Metadata saved successfully to '{meta_path}'", indent=log_indent)
-            else:
+            if existing_hash == new_hash:
                 logger("SKIP", f"Metadata file '{meta_path}' already exists and is up-to-date", indent=log_indent)
+                return
+
+            if utils.atomic_dump_json(meta_path, sanitized_package, ensure_ascii=False, indent=log_indent, sort_keys=True):
+                logger("OK", f"Metadata saved successfully to '{meta_path}'", indent=log_indent)
         
-            del package, old_package
-            gc.collect()
         except Exception as e:
             logger("ERROR", f"Failed to save metadata file '{meta_path}'", [e, traceback.format_exc()], indent=log_indent)
 
@@ -544,20 +649,23 @@ class OpenDataCrawler():
 
             return resource, resource_crawler_info
 
-        media_type, file_name, tag_val = utils.resolve_mediatype_conflict(meta_media_type, response, resource["downloadURL"], base_name)
+        try:
+            media_type, file_name, tag_val = utils.resolve_mediatype_conflict(meta_media_type, response, resource["downloadURL"], base_name)
 
-        resource["mediaType"] = media_type
-        resource["fileName"] = file_name
-        if tag_val:
-            logger("WARNING", f"Detected a media type mismatch for '{resource['downloadURL']}'", indent=log_indent)
-            resource_crawler_info["fileMetadataChanges"].update(utils.add_tag_explanations("mimetype_mismatch", tag_val)            )
+            resource["mediaType"] = media_type
+            resource["fileName"] = file_name
+            if tag_val:
+                logger("WARNING", f"Detected a media type mismatch for '{resource['downloadURL']}'", indent=log_indent)
+                resource_crawler_info["fileMetadataChanges"].update(utils.add_tag_explanations("mimetype_mismatch", tag_val))
 
-        if reparse_data:
-            logger("OK", f"Successfully re-parsed resource '{resource['fileName']}' from package '{metadata_file_name}'", indent=log_indent)
-        else:
-            logger("OK", f"Successfully parsed resource '{resource['fileName']}' from package '{metadata_file_name}'", indent=log_indent)
+            if reparse_data:
+                logger("OK", f"Successfully re-parsed resource '{resource['fileName']}' from package '{metadata_file_name}'", indent=log_indent)
+            else:
+                logger("OK", f"Successfully parsed resource '{resource['fileName']}' from package '{metadata_file_name}'", indent=log_indent)
 
-        return resource, resource_crawler_info
+            return resource, resource_crawler_info
+        finally:
+            response.close()
         
     def retry_temporarily_unavailable_resources(self, package, log_indent=2):
         missing_resources = [
@@ -574,20 +682,30 @@ class OpenDataCrawler():
 
             if resource_meta and tag_values:
                 new_resource, new_info = self.handle_parse_resource(resource_meta, old_file_name, package["fileName"], reparse_data=tag_values)
-                new_file_name = new_resource["fileName"]
+                if new_resource:
+                    return old_file_name, new_resource, new_info
+            return old_file_name, None, None
 
+        if missing_resources:
+            logger("...", f"Re-parsing {len(missing_resources)} temporarily unavailable resources...", indent=log_indent)
+            reparsed_resources = self.run_threaded_function(
+                items=missing_resources,
+                func=reparse_resource,
+                max_workers=self.max_resource_threads,
+                thread_name_prefix="r",
+            )
+
+            for old_file_name, new_resource, new_info in reparsed_resources:
+                if not new_resource:
+                    continue
+
+                new_file_name = new_resource["fileName"]
                 if new_file_name != old_file_name:
                     package["resources"].pop(old_file_name, None)
                     package["crawlerInfo"]["resourcesInfo"].pop(old_file_name, None)
 
                 package["resources"][new_file_name] = new_resource
                 package["crawlerInfo"]["resourcesInfo"][new_file_name] = new_info
-
-                gc.collect()
-
-        if missing_resources:
-            logger("...", f"Re-parsing {len(missing_resources)} temporarily unavailable resources...", indent=log_indent)
-            self.run_threaded_function(items=missing_resources, func=reparse_resource, max_workers=self.max_resource_threads, thread_name_prefix=threading.current_thread().name)
 
         return package
 
@@ -600,13 +718,23 @@ class OpenDataCrawler():
         def parse_resource_func(item):
             idx, resource = item
             base_name = utils.generate_short_filename(f"{metadata['fileName']}_{idx}")
+            parsed_resource, parsed_info = self.handle_parse_resource(resource, base_name, metadata["fileName"])
+            return base_name, resource, parsed_resource, parsed_info
 
+        logger("...", f"Parsing {len(distributions)} resources from package '{metadata['fileName']}'...", indent=log_indent)
+        parsed_resources = self.run_threaded_function(
+            items=list(enumerate(distributions)), func=parse_resource_func,
+            max_workers=self.max_resource_threads, thread_name_prefix="r"
+        )
+
+        for base_name, resource, parsed_resource, parsed_info in parsed_resources:
             metadata["resources"][base_name] = resource
             metadata["crawlerInfo"]["resourcesInfo"][base_name] = utils.init_metadata(package=False, crawled=False)
 
-            parsed_resource, parsed_info = self.handle_parse_resource(resource, base_name, metadata["fileName"])
-            new_file_name = parsed_resource["fileName"]
+            if not parsed_resource:
+                continue
 
+            new_file_name = parsed_resource["fileName"]
             if new_file_name != base_name:
                 metadata["resources"].pop(base_name, None)
                 metadata["crawlerInfo"]["resourcesInfo"].pop(base_name, None)
@@ -614,19 +742,13 @@ class OpenDataCrawler():
             metadata["resources"][new_file_name] = parsed_resource
             metadata["crawlerInfo"]["resourcesInfo"][new_file_name] = parsed_info
 
-        logger("...", f"Parsing {len(distributions)} resources from package '{metadata['fileName']}'...", indent=log_indent)
-        self.run_threaded_function(
-            items=list(enumerate(distributions)), func=parse_resource_func,
-            max_workers=self.max_resource_threads, thread_name_prefix=threading.current_thread().name
-        )
-
 
     def process_package_metadata(self, pkg_id, log_indent=1):
         metadata_file_name = f"meta_{utils.generate_short_filename(f'{self.domain}_{pkg_id}')}.json"
         metadata_path = os.path.join(self.save_path, metadata_file_name)
 
         try:
-            logger("META", f"Processing metadata for package '{pkg_id}' ('{metadata_file_name}')...", indent=log_indent-1)
+            logger("WORK", f"Processing metadata for package '{pkg_id}' ('{metadata_file_name}')...", indent=log_indent-1)
 
             if os.path.exists(metadata_path):
                 logger("SKIP", f"Metadata already exists for '{metadata_file_name}', skipping metadata phase", indent=log_indent)
@@ -638,7 +760,7 @@ class OpenDataCrawler():
 
             if not package.get("resources"):
                 logger("WARNING", f"No distributions found in package '{pkg_id}'", indent=log_indent)
-                package["crawlerInfo"]["packageInfo"].update(utils.add_tag_explanations("missing_distributions"))
+                package["crawlerInfo"]["packageMetadataChanges"].update(utils.add_tag_explanations("missing_distributions"))
                 package["crawlerInfo"]["packageStatus"]["packageCompleted"] = datetime.now().isoformat()
                 self.save_metadata(package)
                 return
@@ -658,9 +780,6 @@ class OpenDataCrawler():
                     return
 
             self.save_metadata(package)
-
-            del package
-            gc.collect()
 
         except Exception as e:
             logger(
@@ -690,7 +809,7 @@ class OpenDataCrawler():
 
             if not package.get("resources"):
                 logger("WARNING", f"No distributions found in package metadata '{pkg_id}' ('{metadata_path}')", indent=log_indent)
-                package["crawlerInfo"]["packageInfo"].update(utils.add_tag_explanations("missing_distributions"))
+                package["crawlerInfo"]["packageMetadataChanges"].update(utils.add_tag_explanations("missing_distributions"))
                 package["crawlerInfo"]["packageStatus"]["packageCompleted"] = datetime.now().isoformat()
                 self.save_metadata(package)
                 return
@@ -716,9 +835,18 @@ class OpenDataCrawler():
                     continue
 
                 ext = file_name.split(".")[-1].lower() if "." in file_name else None
-                if self.data_types and ext and ext not in self.data_types:
-                    logger("SKIP", f"Skipping resource '{file_name}' (media type '{media_type}' with extension '.{ext}' not in accepted types)", indent=log_indent)
-                    continue
+                inferred_ext = ext
+                if not inferred_ext:
+                    _, inferred_ext = utils.get_mime_and_ext(media_type)
+
+                if self.data_types:
+                    if not inferred_ext or inferred_ext not in self.data_types:
+                        logger(
+                            "SKIP",
+                            f"Skipping resource '{file_name}' (media type '{media_type}' with inferred extension '{inferred_ext or 'unknown'}' not in accepted types)",
+                            indent=log_indent
+                        )
+                        continue
 
                 resources_to_process.append((file_name, resource))
 
@@ -730,54 +858,104 @@ class OpenDataCrawler():
 
                 resources_to_process = resources_to_process[:self.num_resources]
 
-            self.run_threaded_function(
+            resource_results = self.run_threaded_function(
                 items=resources_to_process, func=lambda item: self.process_resource(item[1], package, metadata_path),
-                max_workers=self.max_resource_threads, thread_name_prefix=threading.current_thread().name
+                max_workers=self.max_resource_threads, thread_name_prefix="r"
             )
 
+            for resource_file_name, updated_resource, resource_info in resource_results:
+                if resource_file_name not in package["resources"]:
+                    continue
+
+                new_file_name = updated_resource.get("fileName") or resource_file_name
+                if new_file_name != resource_file_name:
+                    package["resources"].pop(resource_file_name, None)
+                    package["crawlerInfo"]["resourcesInfo"].pop(resource_file_name, None)
+
+                package["resources"][new_file_name] = updated_resource
+                package["crawlerInfo"]["resourcesInfo"][new_file_name] = resource_info
+
             self.save_metadata(package)
-            del package, metadata_path
-            gc.collect()
 
         except Exception as e:
             logger("ERROR", f"Error processing package '{pkg_id}' ('{metadata_file_name}')", [e, traceback.format_exc()], indent=log_indent)
 
     def process_resource(self, resource, package, metadata_path, log_indent=3):
+        resource = dict(resource)
         resource_file_name = resource.get("fileName")
         download_url = resource.get("downloadURL")
         media_type = resource.get("mediaType")
+        resource_info = dict(package["crawlerInfo"]["resourcesInfo"].get(resource_file_name, {}))
+        resource_info["fileMetadataChanges"] = dict(resource_info.get("fileMetadataChanges", {}))
+        resource_info["binaryFileChanges"] = dict(resource_info.get("binaryFileChanges", {}))
+        resource_info["fileInfo"] = dict(resource_info.get("fileInfo", {}))
+        resource_info["fileStatus"] = dict(resource_info.get("fileStatus", {}))
 
         logger("...", f"Saving and processing resource '{resource_file_name}' from package '{metadata_path}'...", indent=log_indent)
         path, tag, e = self.save_dataset(download_url, resource_file_name)
         if path or tag:
             if path:
                 resource["path"] = os.path.relpath(path, start=os.getcwd())
-                package["crawlerInfo"]["resourcesInfo"][resource_file_name]["fileStatus"]["fileDownloaded"] = datetime.now().isoformat()
+                resource_info["fileStatus"]["fileDownloaded"] = datetime.now().isoformat()
                 logger("SAVE", f"Resource '{resource_file_name}' from package '{metadata_path}' downloaded successfully", indent=log_indent)
 
-                process_success = self.process_dataset_file(package, resource_file_name, path, resource)
-                if process_success:
+                process_result = self.process_dataset_file(resource_info, resource_file_name, path, resource)
+                if process_result is True:
                     logger("OK", f"Resource '{path}' successfully processed from package '{metadata_path}'", indent=log_indent)
+                elif process_result == "completed_without_file":
+                    logger("WARNING", f"Downloaded content for resource '{resource_file_name}' from package '{metadata_path}' was not a valid dataset file and was discarded", indent=log_indent)
 
             if tag:
                 if tag == "resource_temporarily_unavailable":
                     logger("WARNING", f"Retryable error downloading resource '{resource_file_name}'", e, indent=log_indent)
-                    package["crawlerInfo"]["resourcesInfo"][resource_file_name]["fileInfo"].update(utils.add_tag_explanations(tag, {"<metaMediaType>": media_type}))
+                    resource_info["fileInfo"].update(utils.add_tag_explanations(tag, {"<metaMediaType>": media_type}))
                 else:
-                    package["crawlerInfo"]["resourcesInfo"][resource_file_name]["fileInfo"].update(utils.add_tag_explanations(tag))
+                    resource_info["fileInfo"].update(utils.add_tag_explanations(tag))
                     if tag != "no_data":
                         logger("WARNING", f"Non-retryable error downloading resource '{resource_file_name}'", e, indent=log_indent)
 
-                package["crawlerInfo"]["resourcesInfo"][resource_file_name]["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
+                resource_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
 
-        del resource_file_name, download_url, path, tag
-        gc.collect()
-        return package
+        return resource_file_name, resource, resource_info
 
-    def process_dataset_file(self, package, dataset_file_name, dataset_path, resource, log_indent=4):
+    def process_dataset_file(self, resource_info, dataset_file_name, dataset_path, resource, log_indent=4):
         if not os.path.exists(dataset_path):
             logger("ERROR", f"Dataset file '{dataset_path}' does not exist", indent=log_indent)
             return False
+
+        raw_signature = utils.detect_raw_signature(dataset_path)
+        if raw_signature:
+            logger("INFO", f"Detected raw signature '{raw_signature}' for file '{dataset_path}'", indent=log_indent)
+        if raw_signature == "text/html":
+            old_file_name = resource.get("fileName") or dataset_file_name
+            old_media_type = resource.get("mediaType")
+            base_name = old_file_name.rsplit(".", 1)[0] if "." in old_file_name else old_file_name
+            new_file_name = f"{base_name}.html" if base_name else old_file_name
+
+            logger("WARNING", f"File '{dataset_path}' is actually an HTML page, not the expected downloadable dataset", indent=log_indent)
+            resource["mediaType"] = raw_signature
+            resource["fileName"] = new_file_name
+            resource.pop("path", None)
+            resource.pop("encoding", None)
+            resource.pop("delimiter", None)
+            resource.pop("schema", None)
+            resource.pop("size", None)
+            resource_info["fileInfo"].update(utils.add_tag_explanations("html_page_downloaded"))
+            resource_info["fileMetadataChanges"].update(utils.add_tag_explanations("downloaded_html_page", {
+                "<mediaType_old>": old_media_type,
+                "<fileName_old>": old_file_name,
+                "<mediaType_new>": raw_signature,
+                "<fileName_new>": new_file_name,
+            }))
+            resource_info["fileStatus"].pop("fileDownloaded", None)
+            if os.path.exists(dataset_path):
+                try:
+                    os.remove(dataset_path)
+                    logger("DEL", f"Deleted discarded HTML content '{dataset_path}'", indent=log_indent)
+                except Exception as e:
+                    logger("ERROR", f"Failed to delete discarded HTML content '{dataset_path}'", e, indent=log_indent)
+            resource_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
+            return "completed_without_file"
 
         if utils.MIME_TYPE_MAP.get(resource.get("mediaType"), {}).get("compressible", False):
             temp_path, tag = utils.check_file_empty_or_strip(dataset_path)
@@ -785,15 +963,12 @@ class OpenDataCrawler():
             if temp_path:
                 shutil.move(temp_path, dataset_path)
                 logger("FIX", f"File '{dataset_path}' content stripped and overwritten", indent=log_indent)
-                package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations("stripped_data"))
+                resource_info["binaryFileChanges"].update(utils.add_tag_explanations("stripped_data"))
 
             if tag:
                 logger("WARNING", f"File '{dataset_path}' has no data or no valid content", indent=log_indent)
-                package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["fileInfo"].update(utils.add_tag_explanations(tag))
+                resource_info["fileInfo"].update(utils.add_tag_explanations(tag))
                 return False
-        
-            del temp_path, tag
-            gc.collect()
 
             try:
                 encoding, temp_path, raw_flags = utils.detect_best_encoding(dataset_path)
@@ -801,23 +976,59 @@ class OpenDataCrawler():
                     resource["encoding"] = encoding
                 else:
                     logger("ERROR", f"No matching encoding found for: {dataset_path}", indent=log_indent)
+                    return False
 
                 if temp_path:
                     shutil.move(temp_path, dataset_path)
                     logger("FIX", f"Overwrote cleaned content into '{dataset_path}'", indent=log_indent)
                 if raw_flags:
-                    package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations(raw_flags, raw_flags))
-
-                del encoding, temp_path, raw_flags
-                gc.collect()
+                    resource_info["binaryFileChanges"].update(utils.add_tag_explanations(raw_flags, raw_flags))
             except Exception as e:
                 logger("ERROR", f"Error while detecting encoding for: {dataset_path}", [e, traceback.format_exc()], indent=log_indent)
                 return False
+
+            raw_signature = utils.detect_raw_signature(dataset_path)
+            if raw_signature:
+                logger("INFO", f"Detected raw signature '{raw_signature}' for normalized file '{dataset_path}'", indent=log_indent)
+            if raw_signature == "text/html":
+                old_file_name = resource.get("fileName") or dataset_file_name
+                old_media_type = resource.get("mediaType")
+                base_name = old_file_name.rsplit(".", 1)[0] if "." in old_file_name else old_file_name
+                new_file_name = f"{base_name}.html" if base_name else old_file_name
+
+                logger("WARNING", f"Normalized file '{dataset_path}' is actually an HTML page, not the expected downloadable dataset", indent=log_indent)
+                resource["mediaType"] = raw_signature
+                resource["fileName"] = new_file_name
+                resource.pop("path", None)
+                resource.pop("encoding", None)
+                resource.pop("delimiter", None)
+                resource.pop("schema", None)
+                resource.pop("size", None)
+                resource_info["fileInfo"].update(utils.add_tag_explanations("html_page_downloaded"))
+                resource_info["fileMetadataChanges"].update(utils.add_tag_explanations("downloaded_html_page", {
+                    "<mediaType_old>": old_media_type,
+                    "<fileName_old>": old_file_name,
+                    "<mediaType_new>": raw_signature,
+                    "<fileName_new>": new_file_name,
+                }))
+                resource_info["fileStatus"].pop("fileDownloaded", None)
+                if os.path.exists(dataset_path):
+                    try:
+                        os.remove(dataset_path)
+                        logger("DEL", f"Deleted discarded HTML content '{dataset_path}'", indent=log_indent)
+                    except Exception as e:
+                        logger("ERROR", f"Failed to delete discarded HTML content '{dataset_path}'", e, indent=log_indent)
+                resource_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
+                return "completed_without_file"
 
         if os.path.getsize(dataset_path) > 0 and dataset_path.endswith((".csv", ".tsv")):
             try:
                 max_fix_attempts = 2
                 delimiter_fix = None
+                temp_path = None
+                reconstructed_rows = 0
+                outer_quotes_removed = False
+                inner_quotes_fixed = 0
                 for attempt in range(max_fix_attempts):
                     temp_path, reconstructed_rows, outer_quotes_removed, inner_quotes_fixed, delimiter_fix = utils.fix_tabular_data(dataset_path, resource["encoding"])
 
@@ -827,40 +1038,40 @@ class OpenDataCrawler():
                     shutil.move(temp_path, dataset_path)
                     if attempt == 0:
                         logger("FIX", f"Cleaned and standardized the tabular file '{dataset_path}'", indent=log_indent)
-                        package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations("standardized_field_quotes"))
+                        resource_info["binaryFileChanges"].update(utils.add_tag_explanations("standardized_field_quotes"))
                     else:
-                        logger("FIX", f"  attempt != 0 eee 2 vulta '{dataset_path}'", indent=log_indent + 2)
+                        logger("FIX", f"Reprocessing tabular file '{dataset_path}' after previous structural fixes", indent=log_indent)
 
                     if reconstructed_rows:
                         logger("FIX", f"Reconstructed {reconstructed_rows} multiline rows in tabular file '{dataset_path}' by merging quoted fields split across rows", indent=log_indent)
-                        package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations("reconstructed_rows", {"<reconstructed_rows>": reconstructed_rows}))
+                        resource_info["binaryFileChanges"].update(utils.add_tag_explanations("reconstructed_rows", {"<reconstructed_rows>": reconstructed_rows}))
                     if outer_quotes_removed:
                         logger("FIX", f"Removed unnecessary outer quotes wrapping entire rows in tabular file '{dataset_path}'", indent=log_indent)
-                        package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations("stripped_outer_quotes"))
+                        resource_info["binaryFileChanges"].update(utils.add_tag_explanations("stripped_outer_quotes"))
                     if inner_quotes_fixed:
                         logger("FIX", f"Fixed {inner_quotes_fixed} rows with malformed inner quotes in tabular file '{dataset_path}'", indent=log_indent + 2)
-                        package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations("fixed_inner_quotes", {"<fixed_inner_quotes>": inner_quotes_fixed}))
+                        resource_info["binaryFileChanges"].update(utils.add_tag_explanations("fixed_inner_quotes", {"<fixed_inner_quotes>": inner_quotes_fixed}))
                     
                     if delimiter_fix is None and (reconstructed_rows or outer_quotes_removed or inner_quotes_fixed):
-                        logger("FIX", f"eee 2 vulta '{dataset_path}'", indent=log_indent + 2)
-                        if attempt != 0:
-                            logger("FIX", f"CUIDAO, Seee 2 vulta '{dataset_path}'", indent=log_indent + 2)
+                        logger("FIX", f"Retrying delimiter detection on normalized file '{dataset_path}'", indent=log_indent + 2)
                         continue
                     else:
                         break
 
-                if utils.check_single_line(dataset_path, resource["encoding"]):
-                    logger("WARNING", f"Tabular file '{dataset_path}' appears to contain only one line", indent=4)
-                    package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["binaryFileChanges"].update(utils.add_tag_explanations("one_line"))
-        
-                del temp_path, reconstructed_rows, outer_quotes_removed, inner_quotes_fixed
-                gc.collect()
             except Exception as e:
                 logger("ERROR", f"Failed to clean tabular file '{dataset_path}'", [e, traceback.format_exc()], indent=log_indent)
                 return False
 
             try:
-                delimiter, start_row = utils.detect_delimiter_consistent(dataset_path, resource["encoding"])
+                delimiter, start_row, delimiter_stats = utils.detect_delimiter_consistent(
+                    dataset_path,
+                    resource["encoding"],
+                    return_stats=True,
+                )
+                if delimiter_stats.get("nonempty_lines", 0) <= 1:
+                    logger("WARNING", f"Tabular file '{dataset_path}' appears to contain only one line", indent=4)
+                    resource_info["binaryFileChanges"].update(utils.add_tag_explanations("one_line"))
+
                 if delimiter:
                     if delimiter_fix != delimiter:
                         logger("ERROR", f"Delimiter mismatch in '{dataset_path}', expected '{delimiter_fix}', detected '{delimiter} in tabular file '{dataset_path}'", indent=log_indent)
@@ -868,34 +1079,31 @@ class OpenDataCrawler():
                     resource["delimiter"] = delimiter
 
                     if start_row:
-                        package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["fileInfo"].update(utils.add_tag_explanations("skip_rows", {"<skipped_rows>": start_row}))
+                        resource_info["fileInfo"].update(utils.add_tag_explanations("skip_rows", {"<skipped_rows>": start_row}))
                         dialect = Dialect.from_descriptor({"delimiter": delimiter, "comment_rows": [start_row]})
                     else:
                         dialect = Dialect.from_descriptor({"delimiter": delimiter})
 
-                    try:
-                        resource_metadata = describe(dataset_path, encoding=resource["encoding"], dialect=dialect).to_dict()
-                        resource["schema"] = resource_metadata.get("schema")
-                        logger("OK", f"Schema extracted from '{dataset_path}' (encoding: '{resource['encoding']}', delimiter: '{delimiter}', start_row: {start_row})", indent=4)
-                    except Exception as e:
-                        logger("ERROR", f"Failed to extract schema from file '{dataset_path}'", [e, traceback.format_exc()], indent=log_indent)
-                        return False
-
-                    del delimiter, start_row, resource_metadata, dialect
-                    gc.collect()
+                    if self.extract_schema:
+                        try:
+                            resource_metadata = describe(dataset_path, encoding=resource["encoding"], dialect=dialect).to_dict()
+                            resource["schema"] = resource_metadata.get("schema")
+                            logger("OK", f"Schema extracted from '{dataset_path}' (encoding: '{resource['encoding']}', delimiter: '{delimiter}', start_row: {start_row})", indent=4)
+                        except Exception as e:
+                            logger("ERROR", f"Failed to extract schema from file '{dataset_path}'", [e, traceback.format_exc()], indent=log_indent)
+                            return False
                 else:
-                    package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["fileInfo"].update(utils.add_tag_explanations("no_delimiter_detected"))
+                    resource_info["fileInfo"].update(utils.add_tag_explanations("no_delimiter_detected"))
                     logger("WARNING", f"File '{dataset_path}' appears to not contain a delimiter, likely not a structured/tabular file", indent=log_indent)
-                    return False
+                    resource["size"] = humanize.naturalsize(os.path.getsize(dataset_path))
+                    resource_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
+                    return True
             except Exception as e:
                 logger("ERROR", f"Failed to detect delimiter for file '{dataset_path}'", [e, traceback.format_exc()], indent=log_indent)
                 return False
 
         resource["size"] = humanize.naturalsize(os.path.getsize(dataset_path))
-        package["crawlerInfo"]["resourcesInfo"][dataset_file_name]["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
-
-        del dataset_file_name, dataset_path, resource
-        gc.collect()
+        resource_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
         return True
 
     def get_package_list(self):

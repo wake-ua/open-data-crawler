@@ -12,7 +12,8 @@ class ZenodoCrawler():
     def __init__(self, odcrawler):
         self.odcrawler = odcrawler
 
-        self.odcrawler.init_rate_limit(reqs_per_sec= 5000/3600)
+        reqs_per_sec = utils.get_config_option("zenodo", "reqs_per_sec", cast=float, fallback=5000/3600)
+        self.odcrawler.init_rate_limit(reqs_per_sec=reqs_per_sec)
 
         self.token = utils.AUTH_TOKENS.get("zenodo")
         #self.ns = {
@@ -33,8 +34,15 @@ class ZenodoCrawler():
             last_hour = state.get("lastHour", 0)
         else:
             response, self.odcrawler.user_agent = self.odcrawler.make_request(url, self.odcrawler.user_agent, params={"size": 1, "sort": "oldest"}, max_sec=self.odcrawler.max_sec)
+            if not response:
+                return set(), date.today(), 0
+
+            hits = response.json().get("hits", {}).get("hits", [])
             ids = set()
-            last_date = datetime.fromisoformat(response.json()["hits"]["hits"][0]["created"].replace("Z", "+00:00")).date()
+            if not hits:
+                return ids, date.today(), 0
+
+            last_date = datetime.fromisoformat(hits[0]["created"].replace("Z", "+00:00")).date()
             last_hour = 0
 
         return ids, last_date, last_hour
@@ -48,7 +56,14 @@ class ZenodoCrawler():
         try:
             while True:
                 response, self.odcrawler.user_agent = self.odcrawler.make_request(url, self.odcrawler.user_agent, params={"size": 1, "sort": "newest"}, max_sec=self.odcrawler.max_sec)
-                max_date = datetime.fromisoformat(response.json()["hits"]["hits"][0]["created"].replace("Z", "+00:00")).date()
+                if not response:
+                    break
+
+                hits = response.json().get("hits", {}).get("hits", [])
+                if not hits:
+                    break
+
+                max_date = datetime.fromisoformat(hits[0]["created"].replace("Z", "+00:00")).date()
 
                 if last_max_date == max_date:
                     break
@@ -109,8 +124,7 @@ class ZenodoCrawler():
                             else:
                                 state["lastHour"] = hour + 1 if hour < 23 else 0
 
-                            with open(utils.ZENODO_STATE_FILE, "w", encoding="utf-8") as f:
-                                json.dump(state, f, indent=2)
+                            utils.atomic_dump_json(utils.ZENODO_STATE_FILE, state, indent=2)
 
                             pbar.update(1)
 
@@ -215,6 +229,7 @@ class ZenodoCrawler():
         if distributions:
             self.odcrawler.init_and_parse_resources(metadata, distributions)
 
-        metadata["dataRaw"] = data
+        if self.odcrawler.save_raw_data:
+            metadata["dataRaw"] = data
 
         return metadata

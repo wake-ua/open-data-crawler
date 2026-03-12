@@ -1,7 +1,6 @@
 import requests
 import json
 from datetime import datetime
-from urllib.parse import urlparse
 
 from opendatacrawler import utils
 from opendatacrawler.setup_logger import log_manager
@@ -51,7 +50,8 @@ class DataEuropaEuCrawler():
                 return ids
 
             response.raise_for_status()
-            data = response.json()["result"]
+            payload = response.json()
+            data = payload.get("result") or {}
 
             ids.extend(item["id"] for item in data.get("results", []))
 
@@ -66,7 +66,8 @@ class DataEuropaEuCrawler():
                     break
 
                 response.raise_for_status()
-                data = response.json()["result"]
+                payload = response.json()
+                data = payload.get("result") or {}
 
                 batch = data.get("results", [])
                 if not batch:
@@ -128,7 +129,8 @@ class DataEuropaEuCrawler():
                 logger("ERROR", f"Error accessing package '{package_id}' ('{metadata_file_name}')", e, indent=2)
             return None
 
-        data = response.json()["result"]
+        payload = response.json()
+        data = payload.get("result") or {}
 
         metadata["accessURL"] = utils.fix_url(f"{self.odcrawler.domain}/data/datasets/{package_id}")
 
@@ -173,7 +175,8 @@ class DataEuropaEuCrawler():
             metadata["license"] = distributions[0].get("license", "")
             self.odcrawler.init_and_parse_resources(metadata, distributions)
 
-        metadata["rawData"] = data
+        if self.odcrawler.save_raw_data:
+            metadata["rawData"] = data
 
         metadata["crawlerInfo"]["packageStatus"]["packageCompleted"] = (datetime.now().isoformat())
 

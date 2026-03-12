@@ -20,5 +20,21 @@
         "tag_explanation": {
             "reason": "The package original metadata does not contain any listed distributions or downloadable resources"
         }
+    },
+    "downloaded_html_page": {
+        "tag_placeholders": ["<mediaType_old>", "<fileName_old>", "<mediaType_new>", "<fileName_new>"],
+        "tag_explanation": {
+            "reason": "The downloaded content was an HTML page instead of the expected dataset file. Metadata was updated from '<mediaType_old>' to '<mediaType_new>'.",
+            "values": {
+                "oldValue": {
+                    "mediaType": "<mediaType_old>",
+                    "fileName": "<fileName_old>"
+                },
+                "newValue": {
+                    "mediaType": "<mediaType_new>",
+                    "fileName": "<fileName_new>"
+                }
+            }
+        }
     }
 }

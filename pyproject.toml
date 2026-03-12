@@ -17,18 +17,20 @@ dependencies = [
   "humanize",
   "frictionless",
   "chardet",
+  "beautifulsoup4",
   "w3lib",
   "url-normalize",
   "olefile",
   "python-magic",
-  "ftfy"
+  "ftfy",
+  "pycountry"
 ]
 
 [project.scripts]
 opendatacrawler = "opendatacrawler.__main__:main"
 
-[tool.setuptools]
-packages = ["opendatacrawler"]
+[tool.setuptools.packages.find]
+include = ["opendatacrawler", "opendatacrawler.*"]
 
 [tool.setuptools.package-data]
 opendatacrawler = ["config.ini", "resources/*"]

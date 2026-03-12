@@ -1,28 +1,25 @@
 import requests
-from urllib.parse import urlparse
-from opendatacrawler import utils
 import json
 from datetime import datetime
-from opendatacrawler.setup_logger import log_manager
-logger = log_manager.log
+from urllib.parse import urlparse
 
-import requests
+from opendatacrawler import utils
 from opendatacrawler.setup_logger import log_manager
+
 logger = log_manager.log
 
 class CkanCrawler:
     def __init__(self, odcrawler):
         self.odcrawler = odcrawler
+        self.token = utils.AUTH_TOKENS.get("ckan")
 
     def get_package_list(self):
-        token = getattr(self.odcrawler, "ckan_api_key", None) or getattr(self.odcrawler, "token", None)
-
         headers = {
             "Accept": "application/json",
             "Connection": "keep-alive",
         }
 
-        if not token:
+        if not self.token:
             try:
                 resp, self.odcrawler.user_agent, err_tag, err = self.odcrawler.make_action_request(
                     "package_list",
@@ -118,9 +115,7 @@ class CkanCrawler:
 
         resource["downloadURL"] = utils.fix_url(resource_meta.get("download_url") or resource_meta.get("url") or resource_meta.get("original_url"))
 
-        if resource["id"]:
-            url = utils.fix_url(f"{self.odcrawler.domain}/api/3/action/datastore_search?resource_id={resource["id"]}")
-            #response, self.odcrawler.user_agent = self.odcrawler.make_request(url, self.odcrawler.user_agent)
+        if resource["id"] and resource_meta.get("datastore_active"):
             response, self.odcrawler.user_agent, *_ = self.odcrawler.make_action_request(
                 "datastore_search",
                 params={"resource_id": resource["id"], "limit": 0},
@@ -128,7 +123,8 @@ class CkanCrawler:
             )
                         
             if response:
-                schema_data = response.json()["result"]
+                payload = response.json()
+                schema_data = payload.get("result") if payload.get("success", False) else None
                 if schema_data:
                     resource["schema_og"] = {"fields": []}
                     for field in schema_data.get("fields", []):
@@ -146,11 +142,6 @@ class CkanCrawler:
 
     def get_package(self, package_id, metadata_file_name):
         url = utils.fix_url(f"{self.odcrawler.domain}/api/3/action/package_show?id={package_id}")
-        headers = {
-            "Accept": "application/json",
-            "Connection": "keep-alive"
-        }
-
         metadata = utils.init_metadata()
         metadata["identifier"] = package_id
         metadata["requestURL"] = url
@@ -178,8 +169,15 @@ class CkanCrawler:
                 logger("ERROR", f"Error accessing package '{package_id}' ('{metadata_file_name}')", e, indent=2)
             return None
 
-        data = response.json()["result"]
-        metadata["accessURL"] = utils.fix_url(f"{self.odcrawler.domain}/dataset/{data.get("name")}")
+        payload = response.json()
+        if not payload.get("success", False):
+            logger("WARNING", f"CKAN package_show returned success=false for package '{package_id}'", indent=2)
+            metadata["crawlerInfo"]["packageInfo"].update(utils.add_tag_explanations("invalid_request"))
+            metadata["crawlerInfo"]["packageStatus"]["packageCompleted"] = datetime.now().isoformat()
+            return metadata
+
+        data = payload.get("result") or {}
+        metadata["accessURL"] = utils.fix_url(f"{self.odcrawler.domain}/dataset/{data.get('name')}")
 
         metadata["title"] = data.get("title", {})
         metadata["description"] = data.get("notes", {})
@@ -261,6 +259,7 @@ class CkanCrawler:
         if distributions:
             self.odcrawler.init_and_parse_resources(metadata, distributions)
 
-        metadata["rawData"] = data
-        
+        if self.odcrawler.save_raw_data:
+            metadata["rawData"] = data
+
         return metadata

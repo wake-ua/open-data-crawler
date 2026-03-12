@@ -1,7 +1,5 @@
 import requests
-from urllib.parse import urlparse
 from opendatacrawler import utils
-import json
 from datetime import datetime
 from opendatacrawler.setup_logger import log_manager
 logger = log_manager.log
@@ -161,6 +159,7 @@ class GbifCrawler():
             self.odcrawler.init_and_parse_resources(metadata, distributions)
 
         metadata["distributions"] = distributions
-        metadata["rawData"] = data
+        if self.odcrawler.save_raw_data:
+            metadata["rawData"] = data
 
         return metadata
