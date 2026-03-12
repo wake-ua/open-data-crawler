@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import errno
 import requests
 import humanize
 import hashlib
@@ -14,18 +15,16 @@ from frictionless import describe, Dialect
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 from opendatacrawler import utils
-from opendatacrawler.portals import (
-    CkanCrawler,
-    DataEuropaEuCrawler,
-    DatosGobEsCrawler,
-    DatosMadridEsCrawler,
-    GbifCrawler,
-    ZenodoCrawler,
-)
+from opendatacrawler.portals import CkanCrawler, DataEuropaEuCrawler, DatosGobEsCrawler, DatosMadridEsCrawler, GbifCrawler, ZenodoCrawler
 from urllib.parse import urlparse
 
 from opendatacrawler.setup_logger import log_manager
 logger = log_manager.log
+
+
+class LowDiskSpaceError(RuntimeError):
+    pass
+
 
 class OpenDataCrawler():
     def __init__(self, domain, path=None, data_types=None, categories=None, partial=False, avoid_data=None, max_sec=None, max_threads=None, max_resource_threads=None, num_resources=None, countries=None, save_raw_data=False, extract_schema=True):
@@ -61,6 +60,9 @@ class OpenDataCrawler():
         self.ckan_action_requires_post = False
         self.host_timeout_threshold = utils.get_config_option("defaults", "host_timeout_threshold", cast=int, fallback=3)
         self.host_cooldown_seconds = utils.get_config_option("defaults", "host_cooldown_seconds", cast=int, fallback=60)
+        self.max_file_size_mb = utils.get_config_option("defaults", "max_file_size_mb", cast=int, fallback=0)
+        self.min_free_disk_mb = utils.get_config_option("defaults", "min_free_disk_mb", cast=int, fallback=512)
+        self.min_free_disk_percent = utils.get_config_option("defaults", "min_free_disk_percent", cast=float, fallback=2.0)
         self.host_cooldowns = {}
         self.host_cooldown_lock = threading.Lock()
         logger("...", f"Detecting DMS for domain '{self.get_print_domain()}'...", level="print")
@@ -147,13 +149,7 @@ class OpenDataCrawler():
     def detect_ckan_requires_post(self) -> bool:
         probe_url = utils.fix_url(f"{self.domain}/api/3/action/package_show")
         try:
-            r, self.user_agent = self.make_request(
-                probe_url,
-                self.user_agent,
-                headers={"Accept": "application/json"},
-                params={"id": "non-existent"},
-                max_sec=30,
-            )
+            r, self.user_agent = self.make_request(probe_url, self.user_agent, headers={"Accept": "application/json"}, params={"id": "non-existent"}, max_sec=30)
             if r is None:
                 return False
             txt = (r.text or "")
@@ -171,6 +167,7 @@ class OpenDataCrawler():
         return None
         
     def set_country_context(self, country):
+        previous_save_path = self.save_path
         self.current_country = country
 
         if country:
@@ -178,7 +175,13 @@ class OpenDataCrawler():
         else:
             self.save_path = self.base_domain_path
 
-        utils.create_folder(self.save_path)
+        if self.save_path != previous_save_path or not os.path.exists(self.save_path):
+            utils.create_folder(self.save_path)
+
+        removed_parts = utils.cleanup_path_tempfiles(self.save_path)
+        removed_tempfiles = utils.cleanup_system_tempfiles()
+        if removed_parts or removed_tempfiles:
+            logger("DEL", f"Cleaned {removed_parts} orphan partial files and {removed_tempfiles} orphan temporary files before continuing", level="print")
 
     def get_print_domain(self):
         if self.current_country:
@@ -262,10 +265,7 @@ class OpenDataCrawler():
         total_success = len(downloaded_after_res)
         total_failed = len(failed_after_res)
         total_unavailable = len(unavailable_permanent_after)
-        logger("OK", f"{new_downloads} new resources downloaded in this run "
-                    f"({new_failures} new failures, {recovered} recovered, {new_unavailable} marked as permanently unavailable): "
-                    f"{total_success} successful, {total_failed} failed, {total_unavailable} permanently unavailable in total "
-                    f"across {len(resume_data)} packages", level="print")
+        logger("OK", f"{new_downloads} new resources downloaded in this run ({new_failures} new failures, {recovered} recovered, {new_unavailable} marked as permanently unavailable): {total_success} successful, {total_failed} failed, {total_unavailable} permanently unavailable in total across {len(resume_data)} packages", level="print")
 
     def run_threaded_function(self, items, func, max_workers=1, thread_name_prefix=None, use_tqdm=False, tqdm_initial=0, tqdm_desc="", tqdm_colour=None, store_results=True):
         results = [] if store_results else None
@@ -317,11 +317,16 @@ class OpenDataCrawler():
 
             logger(None, "=" * 80, level="print")
 
-            resume_data, downloaded_after_res, failed_after_res, unavailable_permanent_after_res, _ = utils.recover_resume(
-                save_path=self.save_path,
-                accepted_types=self.data_types,
-                num_resources=self.num_resources,
-            )
+            resume_data, downloaded_after_res, failed_after_res, unavailable_permanent_after_res, _ = utils.recover_resume(save_path=self.save_path, accepted_types=self.data_types, num_resources=self.num_resources)
+
+            self.log_run_summary(downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, unavailable_permanent_before_res, unavailable_permanent_after_res, resume_data)
+            os._exit(1)
+        except LowDiskSpaceError as e:
+            logger(None, "=" * 80, level="print")
+            logger("ERROR", "Stopping crawler due to low disk space", e, level="print")
+            logger(None, "=" * 80, level="print")
+
+            resume_data, downloaded_after_res, failed_after_res, unavailable_permanent_after_res, _ = utils.recover_resume(save_path=self.save_path, accepted_types=self.data_types, num_resources=self.num_resources)
 
             self.log_run_summary(downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, unavailable_permanent_before_res, unavailable_permanent_after_res, resume_data)
             os._exit(1)
@@ -421,16 +426,22 @@ class OpenDataCrawler():
                 state["timeouts"] = 0
                 state["cooldown_until"] = 0
 
-    def make_action_request(
-        self,
-        action: str,
-        *,
-        params: dict | None = None,
-        headers: dict | None = None,
-        return_tag: bool = False,
-        current_agent: str | None = None,
-        max_sec: int | None = None,
-    ):
+    def ensure_disk_headroom(self, path, required_bytes=0, context=None, log_indent=4):
+        min_free_bytes = max(int(self.min_free_disk_mb or 0), 0) * 1024 * 1024
+        ok, usage = utils.has_enough_disk_space(path, required_bytes=required_bytes, min_free_bytes=min_free_bytes, min_free_percent=self.min_free_disk_percent)
+        if ok:
+            return True
+
+        free_percent = (usage.free / usage.total * 100) if usage.total else 0
+        required_headroom = max(int(required_bytes or 0) + min_free_bytes, 0)
+        message = "Insufficient free disk space"
+        if context:
+            message += f" while {context}"
+        message += f" (free={humanize.naturalsize(usage.free, binary=True)}, required_headroom>={humanize.naturalsize(required_headroom, binary=True)}, free_percent={free_percent:.2f}%)"
+        logger("WARNING", message, indent=log_indent)
+        raise LowDiskSpaceError(message)
+
+    def make_action_request(self, action: str, *, params: dict | None = None, headers: dict | None = None, return_tag: bool = False, current_agent: str | None = None, max_sec: int | None = None):
         url = utils.fix_url(f"{self.domain}/api/3/action/{action}")
 
         hdrs = dict(headers) if headers else {}
@@ -448,42 +459,12 @@ class OpenDataCrawler():
 
         if self.ckan_action_requires_post:
             if self.rate_limit:
-                return utils.make_request_post(
-                    url,
-                    agent,
-                    headers=hdrs,
-                    json_body=payload,
-                    max_sec=timeout,
-                    return_tag=return_tag,
-                    rate_controller=self,
-                )
-            return utils.make_request_post(
-                url,
-                agent,
-                headers=hdrs,
-                json_body=payload,
-                max_sec=timeout,
-                return_tag=return_tag,
-            )
+                return utils.make_request_post(url, agent, headers=hdrs, json_body=payload, max_sec=timeout, return_tag=return_tag, rate_controller=self)
+            return utils.make_request_post(url, agent, headers=hdrs, json_body=payload, max_sec=timeout, return_tag=return_tag)
 
         if self.rate_limit:
-            return utils.make_request(
-                url,
-                agent,
-                headers=hdrs,
-                params=payload,
-                max_sec=timeout,
-                return_tag=return_tag,
-                rate_controller=self,
-            )
-        return utils.make_request(
-            url,
-            agent,
-            headers=hdrs,
-            params=payload,
-            max_sec=timeout,
-            return_tag=return_tag,
-        )
+            return utils.make_request(url, agent, headers=hdrs, params=payload, max_sec=timeout, return_tag=return_tag, rate_controller=self)
+        return utils.make_request(url, agent, headers=hdrs, params=payload, max_sec=timeout, return_tag=return_tag)
 
     def make_request(self, url, current_agent, headers=None, **kwargs):
         headers = dict(headers) if headers else {}
@@ -515,9 +496,25 @@ class OpenDataCrawler():
         path = os.path.join(self.save_path, file_name)
         temp_path = f"{path}.part"
         try:
+            content_length = response.headers.get("Content-Length")
+            required_bytes = int(content_length) if content_length and str(content_length).isdigit() else 0
+
+            if self.max_file_size_mb and required_bytes:
+                max_allowed_bytes = int(self.max_file_size_mb) * 1024 * 1024
+                if required_bytes > max_allowed_bytes:
+                    logger(
+                        "WARNING",
+                        f"Skipping resource '{file_name}' because server-declared size {humanize.naturalsize(required_bytes, binary=True)} exceeds configured limit of {humanize.naturalsize(max_allowed_bytes, binary=True)}",
+                        indent=log_indent,
+                    )
+                    return None, "resource_too_large", None
+
+            self.ensure_disk_headroom(temp_path, required_bytes=required_bytes, context=f"downloading resource '{file_name}'", log_indent=log_indent)
+
             total_bytes = 0
             line_limit = 50
             lines_downloaded = 0
+            next_space_check = 64 * 1024 * 1024
 
             response.raw.decode_content = True
             try:
@@ -535,11 +532,23 @@ class OpenDataCrawler():
                         outfile.write(chunk)
                         total_bytes += len(chunk)
 
+                        if total_bytes >= next_space_check:
+                            self.ensure_disk_headroom(temp_path, context=f"continuing download of resource '{file_name}'", log_indent=log_indent)
+                            next_space_check += 64 * 1024 * 1024
+
                         if self.partial:
                             lines_downloaded += chunk.count(b"\n")
                             if lines_downloaded >= line_limit:
                                 logger("WARNING", f"Partial content downloaded (~{line_limit} rows) for '{file_name}'", indent=log_indent)
                                 break
+            except LowDiskSpaceError:
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                        logger("DEL", f"Deleted partial file '{temp_path}' after disk-space failure", indent=log_indent)
+                    except Exception as cleanup_error:
+                        logger("ERROR", f"Failed to delete partial file '{temp_path}'", cleanup_error, indent=log_indent)
+                raise
             except (requests.exceptions.ChunkedEncodingError, requests.exceptions.ConnectionError) as e:
                 if os.path.exists(temp_path):
                     try:
@@ -549,6 +558,17 @@ class OpenDataCrawler():
                         logger("ERROR", f"Failed to delete partial file '{temp_path}'", cleanup_error, indent=log_indent)
                 logger("WARNING", f"Chunked connection error while saving '{file_name}'", e, indent=log_indent)
                 return None, "resource_temporarily_unavailable", e
+            except OSError as e:
+                if getattr(e, "errno", None) == errno.ENOSPC:
+                    if os.path.exists(temp_path):
+                        try:
+                            os.remove(temp_path)
+                            logger("DEL", f"Deleted partial file '{temp_path}' after disk-space failure", indent=log_indent)
+                        except Exception as cleanup_error:
+                            logger("ERROR", f"Failed to delete partial file '{temp_path}'", cleanup_error, indent=log_indent)
+                    logger("WARNING", f"Insufficient disk space while saving '{file_name}'", e, indent=log_indent)
+                    raise LowDiskSpaceError(f"Insufficient disk space while saving '{file_name}'") from e
+                raise
 
             if not self.partial and total_bytes == 0:
                 if os.path.exists(temp_path):
@@ -597,6 +617,7 @@ class OpenDataCrawler():
             sanitized_package = utils.sanitize_json_keys(package)
             serialized_package = json.dumps(sanitized_package, ensure_ascii=False, indent=log_indent, sort_keys=True)
             new_hash = hashlib.sha1(serialized_package.encode("utf-8")).hexdigest()
+            required_bytes = len(serialized_package.encode("utf-8"))
 
             existing_hash = None
             if os.path.exists(meta_path):
@@ -610,9 +631,13 @@ class OpenDataCrawler():
                 logger("SKIP", f"Metadata file '{meta_path}' already exists and is up-to-date", indent=log_indent)
                 return
 
+            self.ensure_disk_headroom(meta_path, required_bytes=required_bytes, context=f"saving metadata '{file_name}'", log_indent=log_indent)
+
             if utils.atomic_dump_json(meta_path, sanitized_package, ensure_ascii=False, indent=log_indent, sort_keys=True):
                 logger("OK", f"Metadata saved successfully to '{meta_path}'", indent=log_indent)
         
+        except LowDiskSpaceError:
+            raise
         except Exception as e:
             logger("ERROR", f"Failed to save metadata file '{meta_path}'", [e, traceback.format_exc()], indent=log_indent)
 
@@ -863,6 +888,8 @@ class OpenDataCrawler():
 
             self.save_metadata(package)
 
+        except LowDiskSpaceError:
+            raise
         except Exception as e:
             logger(
                 "ERROR",
@@ -971,6 +998,8 @@ class OpenDataCrawler():
 
             self.save_metadata(package)
 
+        except LowDiskSpaceError:
+            raise
         except Exception as e:
             logger("ERROR", f"Error processing package '{pkg_id}' ('{metadata_file_name}')", [e, traceback.format_exc()], indent=log_indent)
 
@@ -1016,6 +1045,10 @@ class OpenDataCrawler():
         if not os.path.exists(dataset_path):
             logger("ERROR", f"Dataset file '{dataset_path}' does not exist", indent=log_indent)
             return False
+
+        dataset_size = os.path.getsize(dataset_path)
+        processing_headroom = max(dataset_size * 2, 64 * 1024 * 1024)
+        self.ensure_disk_headroom(dataset_path, required_bytes=processing_headroom, context=f"processing dataset '{dataset_file_name}'", log_indent=log_indent)
 
         raw_signature = utils.detect_raw_signature(dataset_path)
         if raw_signature:

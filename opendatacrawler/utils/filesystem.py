@@ -1,11 +1,38 @@
 import json
 import os
+import shutil
 import tempfile
+import time
 
 from opendatacrawler.setup_logger import log_manager
 
 
 logger = log_manager.log
+
+ATOMIC_TEMP_PREFIX = ".odc_tmp_"
+TABULAR_TEMP_PREFIX = "odc_tabular_"
+
+
+def get_disk_usage(path):
+    target = path
+    if not os.path.isdir(target):
+        target = os.path.dirname(target) or "."
+    return shutil.disk_usage(target)
+
+
+def has_enough_disk_space(path, required_bytes=0, min_free_bytes=0, min_free_percent=0.0):
+    usage = get_disk_usage(path)
+    required_free = max(int(required_bytes or 0) + int(min_free_bytes or 0), 0)
+
+    if usage.free < required_free:
+        return False, usage
+
+    if min_free_percent and usage.total > 0:
+        free_percent = (usage.free / usage.total) * 100
+        if free_percent < float(min_free_percent):
+            return False, usage
+
+    return True, usage
 
 
 def create_folder(path):
@@ -28,11 +55,55 @@ def delete_tempfiles(file_paths, keep_path=None):
             os.remove(path)
 
 
+def cleanup_path_tempfiles(root_path):
+    if not root_path or not os.path.exists(root_path):
+        return 0
+
+    removed = 0
+    for current_root, _, files in os.walk(root_path):
+        for name in files:
+            if not (name.endswith(".part") or name.startswith(ATOMIC_TEMP_PREFIX)):
+                continue
+            path = os.path.join(current_root, name)
+            try:
+                os.remove(path)
+                removed += 1
+            except Exception:
+                pass
+    return removed
+
+
+def cleanup_system_tempfiles(older_than_seconds=24 * 3600):
+    temp_dir = tempfile.gettempdir()
+    now = time.time()
+    removed = 0
+
+    try:
+        for name in os.listdir(temp_dir):
+            if not name.startswith(TABULAR_TEMP_PREFIX):
+                continue
+
+            path = os.path.join(temp_dir, name)
+            try:
+                if not os.path.isfile(path):
+                    continue
+                if older_than_seconds and now - os.path.getmtime(path) < older_than_seconds:
+                    continue
+                os.remove(path)
+                removed += 1
+            except Exception:
+                pass
+    except Exception:
+        return 0
+
+    return removed
+
+
 def atomic_dump_json(path, data, **json_kwargs):
     temp_path = None
     try:
         directory = os.path.dirname(path) or "."
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False, dir=directory) as temp_file:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False, dir=directory, prefix=ATOMIC_TEMP_PREFIX) as temp_file:
             json.dump(data, temp_file, **json_kwargs)
             temp_file.flush()
             os.fsync(temp_file.fileno())
@@ -51,7 +122,7 @@ def atomic_write_bytes(path, data):
     temp_path = None
     try:
         directory = os.path.dirname(path) or "."
-        with tempfile.NamedTemporaryFile(mode="wb", delete=False, dir=directory) as temp_file:
+        with tempfile.NamedTemporaryFile(mode="wb", delete=False, dir=directory, prefix=ATOMIC_TEMP_PREFIX) as temp_file:
             temp_file.write(data)
             temp_file.flush()
             os.fsync(temp_file.fileno())

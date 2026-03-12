@@ -116,6 +116,7 @@ def fix_line(line):
 
 
 def check_file_empty_or_strip(path, whitespace=b" \t\r\n"):
+    temp_path = None
     try:
         with open(path, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
             size = mm.size()
@@ -137,10 +138,16 @@ def check_file_empty_or_strip(path, whitespace=b" \t\r\n"):
                 return None, None
 
             cleaned_content = mm[start:end+1]
-            with tempfile.NamedTemporaryFile(mode="wb", delete=False) as temp_out:
+            with tempfile.NamedTemporaryFile(mode="wb", delete=False, prefix=utils.TABULAR_TEMP_PREFIX) as temp_out:
                 temp_out.write(cleaned_content)
-                return temp_out.name, None
+                temp_path = temp_out.name
+                return temp_path, None
     except Exception as e:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
         logger("ERROR", f"Error stripping whitespace from file '{path}'", e, indent=4)
         return None, None
 
@@ -277,78 +284,89 @@ def fix_tabular_data(path, encoding):
     outer_quotes_removed = False
     inner_quotes_fixed = 0
     file_changed = False
+    temp_path = None
 
     delimiter, _ = detect_delimiter_consistent(path, encoding)
 
-    with open(path, "r", encoding=encoding) as f, tempfile.NamedTemporaryFile(mode="w", encoding=encoding, delete=False) as temp_out:
-        buf = []
-        in_quotes = False
-
-        for raw_line in f:
-            line = raw_line.rstrip("\r\n")
-            i = 0
-            n = len(line)
-
-            while i < n:
-                ch = line[i]
-                if ch == QUOTE_CHAR:
-                    if in_quotes and i + 1 < n and line[i + 1] == QUOTE_CHAR:
-                        buf.append(QUOTE_CHAR * 2)
-                        i += 2
-                        continue
-                    in_quotes = not in_quotes
-                    buf.append(ch)
-                else:
-                    buf.append(ch)
-                i += 1
-
-            if in_quotes:
-                reconstructed_lines += 1
-                buf.append(" ")
-                file_changed = True
-                continue
-
-            record = "".join(buf)
+    try:
+        with open(path, "r", encoding=encoding) as f, tempfile.NamedTemporaryFile(mode="w", encoding=encoding, delete=False, prefix=utils.TABULAR_TEMP_PREFIX) as temp_out:
+            temp_path = temp_out.name
             buf = []
             in_quotes = False
 
-            cleaned = remove_outer_quotes(record, delimiter)
-            if cleaned != record:
-                outer_quotes_removed = True
-                file_changed = True
+            for raw_line in f:
+                line = raw_line.rstrip("\r\n")
+                i = 0
+                n = len(line)
 
-            before_inner = count_inner_double_quotes(record)
-            before_quotes = record.count(QUOTE_CHAR)
-            fixed = fix_csv_line(cleaned, delimiter)
-            after_inner = count_inner_double_quotes(fixed)
-            after_quotes = fixed.count(QUOTE_CHAR)
+                while i < n:
+                    ch = line[i]
+                    if ch == QUOTE_CHAR:
+                        if in_quotes and i + 1 < n and line[i + 1] == QUOTE_CHAR:
+                            buf.append(QUOTE_CHAR * 2)
+                            i += 2
+                            continue
+                        in_quotes = not in_quotes
+                        buf.append(ch)
+                    else:
+                        buf.append(ch)
+                    i += 1
 
-            if after_inner > before_inner:
-                inner_quotes_fixed += 1
-                file_changed = True
+                if in_quotes:
+                    reconstructed_lines += 1
+                    buf.append(" ")
+                    file_changed = True
+                    continue
 
-            if after_quotes > before_quotes and not (inner_quotes_fixed or outer_quotes_removed or reconstructed_lines):
-                file_changed = True
+                record = "".join(buf)
+                buf = []
+                in_quotes = False
 
-            temp_out.write(fixed + "\n")
+                cleaned = remove_outer_quotes(record, delimiter)
+                if cleaned != record:
+                    outer_quotes_removed = True
+                    file_changed = True
 
-        if buf:
-            record = "".join(buf)
-            cleaned = remove_outer_quotes(record, delimiter)
-            fixed = fix_csv_line(cleaned, delimiter)
-            temp_out.write(fixed + "\n")
+                before_inner = count_inner_double_quotes(record)
+                before_quotes = record.count(QUOTE_CHAR)
+                fixed = fix_csv_line(cleaned, delimiter)
+                after_inner = count_inner_double_quotes(fixed)
+                after_quotes = fixed.count(QUOTE_CHAR)
+
+                if after_inner > before_inner:
+                    inner_quotes_fixed += 1
+                    file_changed = True
+
+                if after_quotes > before_quotes and not (inner_quotes_fixed or outer_quotes_removed or reconstructed_lines):
+                    file_changed = True
+
+                temp_out.write(fixed + "\n")
+
+            if buf:
+                record = "".join(buf)
+                cleaned = remove_outer_quotes(record, delimiter)
+                fixed = fix_csv_line(cleaned, delimiter)
+                temp_out.write(fixed + "\n")
+    except Exception:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+        raise
 
     if reconstructed_lines > 0:
         file_changed = True
 
     if not file_changed:
         try:
-            os.remove(temp_out.name)
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
         except Exception:
             pass
         return None, 0, False, 0, delimiter
 
-    return temp_out.name, reconstructed_lines, outer_quotes_removed, inner_quotes_fixed, delimiter
+    return temp_path, reconstructed_lines, outer_quotes_removed, inner_quotes_fixed, delimiter
 
 
 def detect_bom(raw):
@@ -406,24 +424,40 @@ def safe_decode(raw, encoding):
 
 
 def stream_decode_to_tempfile(path, encoding, bom_offset=0, bom_bytes=None):
+    temp_path = None
     try:
-        with open(path, "rb") as f, tempfile.NamedTemporaryFile(mode="wb", delete=False) as tmpfile:
+        with open(path, "rb") as f, tempfile.NamedTemporaryFile(mode="wb", delete=False, prefix=utils.TABULAR_TEMP_PREFIX) as tmpfile:
+            temp_path = tmpfile.name
             if bom_offset:
                 f.seek(bom_offset)
 
             reader = codecs.getreader(encoding)(f)
             for line in reader:
                 tmpfile.write(line.encode("utf-8"))
-            return tmpfile.name
+            return temp_path
     except UnicodeDecodeError:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
         return None
+    except Exception:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+        raise
 
 
 def stream_decode_to_tempfile_fixlines(path, encoding, bom_offset=0, bom_bytes=None):
+    temp_path = None
     try:
         fixed_count = 0
         unrecoverable_count = 0
-        with open(path, "rb") as f, tempfile.NamedTemporaryFile(mode="wb", delete=False) as tmpfile:
+        with open(path, "rb") as f, tempfile.NamedTemporaryFile(mode="wb", delete=False, prefix=utils.TABULAR_TEMP_PREFIX) as tmpfile:
+            temp_path = tmpfile.name
             if bom_offset:
                 f.seek(bom_offset)
 
@@ -445,9 +479,21 @@ def stream_decode_to_tempfile_fixlines(path, encoding, bom_offset=0, bom_bytes=N
             elif fixed_count > 0:
                 tag = "fixed_data"
 
-            return tmpfile.name, tag, fixed_count, unrecoverable_count
+            return temp_path, tag, fixed_count, unrecoverable_count
     except UnicodeDecodeError:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
         return None, None, 0, 0
+    except Exception:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+        raise
 
 
 def detect_best_encoding(path, encodings=ENCODING_CANDIDATES, num_bytes=64 * 1024):

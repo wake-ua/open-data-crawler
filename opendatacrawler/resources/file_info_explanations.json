@@ -88,5 +88,17 @@
         "tag_explanation": {
             "reason": "The downloaded content is an HTML page instead of the expected dataset file, typically because the download URL redirects to an access, authentication, or landing page"
         }
+    },
+    "low_disk_space": {
+        "tag_placeholders": [],
+        "tag_explanation": {
+            "reason": "The crawler stopped this resource because the local disk did not have enough free space to safely continue downloading, transforming, or saving metadata"
+        }
+    },
+    "resource_too_large": {
+        "tag_placeholders": [],
+        "tag_explanation": {
+            "reason": "The crawler skipped this resource because the server-declared file size exceeds the configured maximum download size"
+        }
     }
 }

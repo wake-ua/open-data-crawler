@@ -144,6 +144,8 @@ class DatosGobEsCrawler:
         if self._catalog_rows_by_id is not None:
             return self._catalog_rows_by_id
 
+        utils.cleanup_path_tempfiles(os.path.dirname(self.CATALOG_CSV_PATH))
+
         try:
             csv.field_size_limit(sys.maxsize)
         except OverflowError:
@@ -166,13 +168,7 @@ class DatosGobEsCrawler:
 
         if os.path.exists(self.CATALOG_CSV_PATH):
             try:
-                head_response = requests.head(
-                    self.CATALOG_CSV_URL,
-                    headers=headers,
-                    verify=False,
-                    timeout=self.odcrawler.max_sec,
-                    allow_redirects=True,
-                )
+                head_response = requests.head(self.CATALOG_CSV_URL, headers=headers, verify=False, timeout=self.odcrawler.max_sec, allow_redirects=True)
                 if head_response.ok:
                     remote_size = head_response.headers.get("Content-Length")
                     if remote_size and str(remote_size) == str(local_meta.get("content_length")):
@@ -184,11 +180,7 @@ class DatosGobEsCrawler:
                 logger("WARNING", f"Using existing local datos.gob.es catalog CSV at '{self.CATALOG_CSV_PATH}' because remote header check failed")
 
         if refresh_catalog:
-            response, self.odcrawler.user_agent = self.odcrawler.make_request(
-                self.CATALOG_CSV_URL,
-                self.odcrawler.user_agent,
-                headers=headers,
-            )
+            response, self.odcrawler.user_agent = self.odcrawler.make_request(self.CATALOG_CSV_URL, self.odcrawler.user_agent, headers=headers)
             if response:
                 if utils.atomic_write_bytes(self.CATALOG_CSV_PATH, response.content):
                     meta_payload = {
