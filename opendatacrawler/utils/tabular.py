@@ -14,7 +14,7 @@ from ftfy.badness import is_bad
 
 from opendatacrawler.setup_logger import log_manager
 
-from .filesystem import delete_tempfiles
+from .filesystem import TABULAR_TEMP_PREFIX, delete_tempfiles
 from .resources import EXT_TO_MIME, MIME_TYPE_MAP
 
 
@@ -138,7 +138,7 @@ def check_file_empty_or_strip(path, whitespace=b" \t\r\n"):
                 return None, None
 
             cleaned_content = mm[start:end+1]
-            with tempfile.NamedTemporaryFile(mode="wb", delete=False, prefix=utils.TABULAR_TEMP_PREFIX) as temp_out:
+            with tempfile.NamedTemporaryFile(mode="wb", delete=False, prefix=TABULAR_TEMP_PREFIX) as temp_out:
                 temp_out.write(cleaned_content)
                 temp_path = temp_out.name
                 return temp_path, None
@@ -289,7 +289,7 @@ def fix_tabular_data(path, encoding):
     delimiter, _ = detect_delimiter_consistent(path, encoding)
 
     try:
-        with open(path, "r", encoding=encoding) as f, tempfile.NamedTemporaryFile(mode="w", encoding=encoding, delete=False, prefix=utils.TABULAR_TEMP_PREFIX) as temp_out:
+        with open(path, "r", encoding=encoding) as f, tempfile.NamedTemporaryFile(mode="w", encoding=encoding, delete=False, prefix=TABULAR_TEMP_PREFIX) as temp_out:
             temp_path = temp_out.name
             buf = []
             in_quotes = False
@@ -426,7 +426,7 @@ def safe_decode(raw, encoding):
 def stream_decode_to_tempfile(path, encoding, bom_offset=0, bom_bytes=None):
     temp_path = None
     try:
-        with open(path, "rb") as f, tempfile.NamedTemporaryFile(mode="wb", delete=False, prefix=utils.TABULAR_TEMP_PREFIX) as tmpfile:
+        with open(path, "rb") as f, tempfile.NamedTemporaryFile(mode="wb", delete=False, prefix=TABULAR_TEMP_PREFIX) as tmpfile:
             temp_path = tmpfile.name
             if bom_offset:
                 f.seek(bom_offset)
@@ -456,7 +456,7 @@ def stream_decode_to_tempfile_fixlines(path, encoding, bom_offset=0, bom_bytes=N
     try:
         fixed_count = 0
         unrecoverable_count = 0
-        with open(path, "rb") as f, tempfile.NamedTemporaryFile(mode="wb", delete=False, prefix=utils.TABULAR_TEMP_PREFIX) as tmpfile:
+        with open(path, "rb") as f, tempfile.NamedTemporaryFile(mode="wb", delete=False, prefix=TABULAR_TEMP_PREFIX) as tmpfile:
             temp_path = tmpfile.name
             if bom_offset:
                 f.seek(bom_offset)
