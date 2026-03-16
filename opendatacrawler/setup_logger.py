@@ -106,7 +106,6 @@ class LogManager:
                         if len(lines) <= min_lines:
                             os.remove(file_path)
                             deleted += 1
-                            self.log("OK", f"Deleted orphan/empty log file: {file}")
                     except Exception as inner_e:
                         self.log("ERROR", f"Could not read or delete log: {file}", inner_e)
 

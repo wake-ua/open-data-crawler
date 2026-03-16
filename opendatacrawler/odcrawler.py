@@ -348,7 +348,6 @@ class OpenDataCrawler():
         self.req_total = 0
         self.lock = threading.Lock()
 
-        logger(None, "=" * 80, level="print")
         logger("INFO", f"Rate limiting active for domain '{self.get_print_domain()}' ({reqs_per_sec:.3f} req/s ~ {(reqs_per_sec * 3600):.0f} req/h, of which {self.rate_limit:.3f} req/s ~ {(self.rate_limit * 3600):.0f} req/h effective)", level="print")
 
     def check_rate_limit(self):

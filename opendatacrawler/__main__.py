@@ -124,8 +124,6 @@ def main():
 
             apply_portal_runtime_config(crawler, args)
 
-            logger(None, "=" * 80, level="print")
-
             reset_domain_input = False
             has_logs = False
             has_data = False
@@ -156,8 +154,6 @@ def main():
 
             countries_to_process = countries or [None]
             for country in countries_to_process:
-                logger(None, "=" * 80, level="print")
-
                 if country is None:
                     crawler.set_country_context(None)
                 else:
@@ -177,9 +173,11 @@ def main():
                     save_path=crawler.save_path,
                     accepted_types=d_types,
                     num_resources=crawler.num_resources,
+                    max_workers=crawler.max_threads,
                 )
 
                 if resume_data:
+                    logger(None, "=" * 80, level="print")
                     logger("OK", f"Loaded resume with {len(resume_data)} packages and {len(downloaded_before_res)} downloaded resources", level="print")
                     pending_before_res = sum(len(status.get("pending_resources", [])) for status in resume_data.values())
                     if incomplete_before_pkgs:
@@ -204,6 +202,8 @@ def main():
                         logger("...",f"Queued {total_to_process} packages ({len(new_packages)} new packages and {len(incomplete_packages)} incomplete packages)", level="print")
                     else:
                         logger("...", f"Queued {total_to_process} packages for processing", level="print")
+
+                    logger(None, "=" * 80, level="print")
 
                     # ==================================================
 
@@ -231,6 +231,7 @@ def main():
                         save_path=crawler.save_path,
                         accepted_types=d_types,
                         num_resources=crawler.num_resources,
+                        max_workers=crawler.max_threads,
                     )
                     crawler.log_run_summary(downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, unavailable_before_res, unavailable_permanent_after_res, resume_data)
                 else:
