@@ -405,7 +405,7 @@ class OpenDataCrawler():
 
         return None
 
-    def register_host_result(self, url, error_tag=None):
+    def register_host_result(self, url, error_tag=None, error=None):
         if not url or self.host_timeout_threshold <= 0 or self.host_cooldown_seconds <= 0:
             return
 
@@ -417,11 +417,13 @@ class OpenDataCrawler():
             state = self.host_cooldowns.setdefault(host, {"timeouts": 0, "cooldown_until": 0})
 
             if error_tag == "resource_temporarily_unavailable":
-                state["timeouts"] += 1
+                backoff_hint = utils.get_host_backoff_hint(error) if error is not None else {"penalty": 1, "cooldown_scale": 1, "reason": "generic"}
+                state["timeouts"] += backoff_hint.get("penalty", 1)
                 if state["timeouts"] >= self.host_timeout_threshold:
-                    state["cooldown_until"] = time.time() + self.host_cooldown_seconds
+                    cooldown_seconds = max(1, int(self.host_cooldown_seconds * backoff_hint.get("cooldown_scale", 1)))
+                    state["cooldown_until"] = time.time() + cooldown_seconds
                     state["timeouts"] = 0
-                    logger("WARNING", f"Host '{host}' entered cooldown for {self.host_cooldown_seconds}s after repeated temporary access failures")
+                    logger("WARNING", f"Host '{host}' entered cooldown for {cooldown_seconds}s after repeated temporary access failures ({backoff_hint.get('reason', 'generic')})")
             else:
                 state["timeouts"] = 0
                 state["cooldown_until"] = 0
@@ -578,6 +580,10 @@ class OpenDataCrawler():
                         logger("ERROR", f"Failed to delete empty file '{temp_path}'", cleanup_error, indent=log_indent)
                 logger("WARNING", f"No data downloaded for resource '{file_name}'", indent=log_indent)
                 return None, "no_data", None
+
+            if not os.path.exists(temp_path):
+                logger("WARNING", f"Partial file '{temp_path}' disappeared before finalizing download of '{file_name}'", indent=log_indent)
+                return None, "resource_temporarily_unavailable", FileNotFoundError(temp_path)
 
             os.replace(temp_path, path)
 

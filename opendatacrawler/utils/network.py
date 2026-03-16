@@ -73,7 +73,7 @@ def make_request(url, current_agent, headers=None, params=None, max_sec=None, st
                     except requests.exceptions.RequestException as e:
                         tag = get_error_tag_from_exception(e)
                         if rate_controller is not None and hasattr(rate_controller, "register_host_result"):
-                            rate_controller.register_host_result(url, tag)
+                            rate_controller.register_host_result(url, tag, e)
                         tag_explanation = CRAWLER_CHANGES_INFO.get(tag, {}).get("tag_explanation", {}).get("reason", "Unknown reason")
                         if tag == "resource_temporarily_unavailable":
                             return None, user_agent, tag, f"{tag_explanation} ({url}) - [{e}]"
@@ -89,7 +89,7 @@ def make_request(url, current_agent, headers=None, params=None, max_sec=None, st
             except requests.exceptions.RequestException as e:
                 tag = get_error_tag_from_exception(e)
                 if rate_controller is not None and hasattr(rate_controller, "register_host_result"):
-                    rate_controller.register_host_result(url, tag)
+                    rate_controller.register_host_result(url, tag, e)
                 tag_explanation = CRAWLER_CHANGES_INFO.get(tag, {}).get("tag_explanation", {}).get("reason", "Unknown reason")
                 if tag == "resource_temporarily_unavailable":
                     return (None, user_agent, tag, f"{tag_explanation} ({url}) - [{e}]") if return_tag else (None, user_agent)
@@ -144,7 +144,7 @@ def make_request_post(url, current_agent, headers=None, json_body=None, max_sec=
                     except requests.exceptions.RequestException as e:
                         tag = get_error_tag_from_exception(e)
                         if rate_controller is not None and hasattr(rate_controller, "register_host_result"):
-                            rate_controller.register_host_result(url, tag)
+                            rate_controller.register_host_result(url, tag, e)
                         tag_explanation = CRAWLER_CHANGES_INFO.get(tag, {}).get("tag_explanation", {}).get("reason", "Unknown reason")
                         if tag == "resource_temporarily_unavailable":
                             return None, user_agent, tag, f"{tag_explanation} ({url}) - [{e}]"
@@ -160,7 +160,7 @@ def make_request_post(url, current_agent, headers=None, json_body=None, max_sec=
             except requests.exceptions.RequestException as e:
                 tag = get_error_tag_from_exception(e)
                 if rate_controller is not None and hasattr(rate_controller, "register_host_result"):
-                    rate_controller.register_host_result(url, tag)
+                    rate_controller.register_host_result(url, tag, e)
                 tag_explanation = CRAWLER_CHANGES_INFO.get(tag, {}).get("tag_explanation", {}).get("reason", "Unknown reason")
                 if tag == "resource_temporarily_unavailable":
                     return (None, user_agent, tag, f"{tag_explanation} ({url}) - [{e}]") if return_tag else (None, user_agent)
@@ -210,6 +210,19 @@ def get_error_tag_from_exception(e):
         return tag
 
     raise ValueError(f"Unhandled exception type: {e}")
+
+
+def get_host_backoff_hint(e):
+    status_code = getattr(getattr(e, "response", None), "status_code", None)
+    if status_code == 503:
+        return {"penalty": 2, "cooldown_scale": 2, "reason": "503"}
+    if status_code in [502, 504, 522, 429]:
+        return {"penalty": 2, "cooldown_scale": 1.5, "reason": str(status_code)}
+    if isinstance(e, (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout, requests.exceptions.Timeout)):
+        return {"penalty": 2, "cooldown_scale": 1.5, "reason": "timeout"}
+    if isinstance(e, (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError, ConnectionResetError)):
+        return {"penalty": 1, "cooldown_scale": 1, "reason": "connection"}
+    return {"penalty": 1, "cooldown_scale": 1, "reason": "generic"}
 
 
 def get_https_error_tag(status_code):

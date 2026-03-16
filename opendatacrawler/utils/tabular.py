@@ -675,13 +675,14 @@ def resolve_mediatype_conflict(meta_mimetype_og, response, download_url, base_na
     meta_mimetype, _ = get_mime_and_ext(meta_mimetype_og)
     detected_mime, detected_ext = get_resource_ext_info(response, download_url)
     meta_ext = get_extension_mime(meta_mimetype) if meta_mimetype else None
+    clean_base_name = base_name.rsplit(".", 1)[0] if base_name and "." in base_name else base_name
 
     tag_val = final_ext = final_mime = None
     if detected_mime and detected_mime not in GENERIC_MIME_TYPES:
         if meta_ext and detected_ext and meta_ext != detected_ext:
             tag_val = {
-                "<mediaType_old>": meta_mimetype, "<fileName_old>": f"{base_name}.{meta_ext}",
-                "<mediaType_new>": detected_mime, "<fileName_new>": f"{base_name}.{detected_ext}",
+                "<mediaType_old>": meta_mimetype, "<fileName_old>": f"{clean_base_name}.{meta_ext}",
+                "<mediaType_new>": detected_mime, "<fileName_new>": f"{clean_base_name}.{detected_ext}",
             }
         final_mime = detected_mime
         final_ext = detected_ext
@@ -697,7 +698,7 @@ def resolve_mediatype_conflict(meta_mimetype_og, response, download_url, base_na
                 final_mime = detected_mime
                 final_ext = detected_ext
 
-    final_file_name = f"{base_name}.{final_ext}" if final_ext else base_name
+    final_file_name = f"{clean_base_name}.{final_ext}" if final_ext else clean_base_name
     return final_mime, final_file_name, tag_val
 
 

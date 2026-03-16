@@ -55,17 +55,20 @@ def delete_tempfiles(file_paths, keep_path=None):
             os.remove(path)
 
 
-def cleanup_path_tempfiles(root_path):
+def cleanup_path_tempfiles(root_path, older_than_seconds=5 * 60):
     if not root_path or not os.path.exists(root_path):
         return 0
 
     removed = 0
+    now = time.time()
     for current_root, _, files in os.walk(root_path):
         for name in files:
             if not (name.endswith(".part") or name.startswith(ATOMIC_TEMP_PREFIX)):
                 continue
             path = os.path.join(current_root, name)
             try:
+                if older_than_seconds and now - os.path.getmtime(path) < older_than_seconds:
+                    continue
                 os.remove(path)
                 removed += 1
             except Exception:
