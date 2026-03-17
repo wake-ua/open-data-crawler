@@ -3,7 +3,6 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from opendatacrawler.setup_logger import log_manager
-from tqdm import tqdm
 from .tabular import get_mime_and_ext
 
 
@@ -43,10 +42,6 @@ def recover_resume(save_path, accepted_types=None, num_resources=None, max_worke
         existing_paths.add(os.path.join(relative_save_path, entry.name))
 
     total_meta_files = len(meta_files)
-    if total_meta_files > 5000:
-        logger(None, "=" * 80, level="print")
-        logger("INFO", f"Scanning resume metadata in '{save_path}' ({total_meta_files} metadata files)...", level="print")
-
     workers = max_workers if max_workers is not None else min(16, max(4, (os.cpu_count() or 1) * 2))
     workers = max(1, workers)
     use_threads = workers > 1 and total_meta_files > 1000
@@ -54,8 +49,7 @@ def recover_resume(save_path, accepted_types=None, num_resources=None, max_worke
     if use_threads:
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="resume") as executor:
             futures = [executor.submit(load_resume_entry, save_path, fname) for fname in meta_files]
-            futures_iter = tqdm(as_completed(futures), total=len(futures), desc="Scanning resume metadata", colour="blue") if total_meta_files > 5000 else as_completed(futures)
-            for future in futures_iter:
+            for future in as_completed(futures):
                 identifier, entry = future.result()
                 if entry is None:
                     incomplete_packages.add(identifier)
@@ -78,8 +72,7 @@ def recover_resume(save_path, accepted_types=None, num_resources=None, max_worke
                     "pending_resources": pending,
                 }
     else:
-        iterable = tqdm(meta_files, total=total_meta_files, desc="Scanning resume metadata", colour="yellow") if total_meta_files > 5000 else meta_files
-        for fname in iterable:
+        for fname in meta_files:
             identifier, entry = load_resume_entry(save_path, fname)
             if entry is None:
                 incomplete_packages.add(identifier)

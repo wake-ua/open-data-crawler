@@ -27,11 +27,12 @@ class LowDiskSpaceError(RuntimeError):
 
 
 class OpenDataCrawler():
-    def __init__(self, domain, path=None, data_types=None, categories=None, partial=False, avoid_data=None, max_sec=None, max_threads=None, max_resource_threads=None, num_resources=None, countries=None, save_raw_data=False, extract_schema=True):
+    def __init__(self, domain, path=None, data_types=None, categories=None, partial=False, avoid_data=None, max_sec=None, reqs_per_sec=None, max_threads=None, max_resource_threads=None, num_resources=None, countries=None, ignore_hosts=None, save_raw_data=False, extract_schema=True):
         self.domain = utils.normalize_domain(domain).rstrip("/")
         self.dms = None
         self.dms_instance = None
         self.max_sec = max_sec
+        self.config_reqs_per_sec = reqs_per_sec
         self.max_threads = max_threads
         self.max_resource_threads = max_resource_threads
         self.serial_metadata_phase = True
@@ -53,6 +54,7 @@ class OpenDataCrawler():
 
         self.countries = countries
         self.current_country = None
+        self.ignore_hosts = {self.normalize_host(value) for value in (ignore_hosts or []) if self.normalize_host(value)}
 
         self.user_agent = None
 
@@ -66,8 +68,10 @@ class OpenDataCrawler():
         self.host_cooldowns = {}
         self.host_cooldown_lock = threading.Lock()
         logger("...", f"Detecting DMS for domain '{self.get_print_domain()}'...", level="print")
-        self.init_rate_limit()
+        self.init_rate_limit(reqs_per_sec=self.config_reqs_per_sec)
         self.detect_dms()
+        if self.ignore_hosts:
+            logger("INFO", f"Ignoring hosts for this run: {', '.join(sorted(self.ignore_hosts))}", level="print")
 
     # ==============================
     
@@ -266,6 +270,8 @@ class OpenDataCrawler():
         total_failed = len(failed_after_res)
         total_unavailable = len(unavailable_permanent_after)
         logger("OK", f"{new_downloads} new resources downloaded in this run ({new_failures} new failures, {recovered} recovered, {new_unavailable} marked as permanently unavailable): {total_success} successful, {total_failed} failed, {total_unavailable} permanently unavailable in total across {len(resume_data)} packages", level="print")
+        for host_info in self.get_problematic_hosts():
+            logger("WARNING", f"Host '{host_info['host']}' appears to be down or unstable in this run ({host_info['temporary_failures']} temporary failures, {host_info['cooldown_hits']} cooldown skips, last reason: {host_info['last_reason']}). Try again later or use '--ignore-hosts {host_info['host']}' to skip it.", level="print")
 
     def run_threaded_function(self, items, func, max_workers=1, thread_name_prefix=None, use_tqdm=False, tqdm_initial=0, tqdm_desc="", tqdm_colour=None, store_results=True):
         results = [] if store_results else None
@@ -381,6 +387,22 @@ class OpenDataCrawler():
         except Exception:
             return False
 
+    def normalize_host(self, value):
+        if not value:
+            return None
+        try:
+            fixed = utils.fix_url(str(value).strip())
+            host = urlparse(fixed).netloc.lower()
+            return host or None
+        except Exception:
+            return None
+
+    def is_host_ignored(self, url):
+        if not url or not self.ignore_hosts:
+            return None
+        host = self.normalize_host(url)
+        return host if host in self.ignore_hosts else None
+
     def check_host_cooldown(self, url):
         if not url or self.host_timeout_threshold <= 0 or self.host_cooldown_seconds <= 0:
             return None
@@ -396,6 +418,7 @@ class OpenDataCrawler():
 
             cooldown_until = state.get("cooldown_until", 0)
             if cooldown_until and cooldown_until > time.time():
+                state["cooldown_hits"] = state.get("cooldown_hits", 0) + 1
                 wait_seconds = max(1, int(cooldown_until - time.time()))
                 return host, wait_seconds
 
@@ -413,11 +436,16 @@ class OpenDataCrawler():
             return
 
         with self.host_cooldown_lock:
-            state = self.host_cooldowns.setdefault(host, {"timeouts": 0, "cooldown_until": 0})
+            state = self.host_cooldowns.setdefault(host, {"timeouts": 0, "cooldown_until": 0, "temporary_failures": 0, "cooldown_hits": 0, "last_reason": None, "problem_reported": False})
 
             if error_tag == "resource_temporarily_unavailable":
                 backoff_hint = utils.get_host_backoff_hint(error) if error is not None else {"penalty": 1, "cooldown_scale": 1, "reason": "generic"}
                 state["timeouts"] += backoff_hint.get("penalty", 1)
+                state["temporary_failures"] = state.get("temporary_failures", 0) + 1
+                state["last_reason"] = backoff_hint.get("reason", "generic")
+                if not state.get("problem_reported") and state["temporary_failures"] >= self.host_timeout_threshold:
+                    state["problem_reported"] = True
+                    logger("WARNING", f"Host '{host}' is showing repeated temporary failures in this run ({state['temporary_failures']} so far, last reason: {state['last_reason']}). It may be down or unstable. Try again later or use '--ignore-hosts {host}' to skip it.", level="print")
                 if state["timeouts"] >= self.host_timeout_threshold:
                     cooldown_seconds = max(1, int(self.host_cooldown_seconds * backoff_hint.get("cooldown_scale", 1)))
                     state["cooldown_until"] = time.time() + cooldown_seconds
@@ -426,6 +454,22 @@ class OpenDataCrawler():
             else:
                 state["timeouts"] = 0
                 state["cooldown_until"] = 0
+
+    def get_problematic_hosts(self):
+        problematic = []
+        with self.host_cooldown_lock:
+            for host, state in self.host_cooldowns.items():
+                temporary_failures = int(state.get("temporary_failures", 0) or 0)
+                cooldown_hits = int(state.get("cooldown_hits", 0) or 0)
+                if temporary_failures < self.host_timeout_threshold and cooldown_hits < 3:
+                    continue
+                problematic.append({
+                    "host": host,
+                    "temporary_failures": temporary_failures,
+                    "cooldown_hits": cooldown_hits,
+                    "last_reason": state.get("last_reason", "generic"),
+                })
+        return sorted(problematic, key=lambda item: (item["temporary_failures"], item["cooldown_hits"]), reverse=True)
 
     def ensure_disk_headroom(self, path, required_bytes=0, context=None, log_indent=4):
         min_free_bytes = max(int(self.min_free_disk_mb or 0), 0) * 1024 * 1024

@@ -41,6 +41,14 @@ def get_user_agent_list(current_agent):
 def make_request(url, current_agent, headers=None, params=None, max_sec=None, stream=False, sleep_time=3, return_tag=False, rate_controller=None):
     headers = headers.copy() if headers else {}
 
+    if rate_controller is not None and hasattr(rate_controller, "is_host_ignored"):
+        ignored_host = rate_controller.is_host_ignored(url)
+        if ignored_host:
+            tag = "resource_temporarily_unavailable"
+            tag_explanation = CRAWLER_CHANGES_INFO.get(tag, {}).get("tag_explanation", {}).get("reason", "Unknown reason")
+            message = f"{tag_explanation} ({url}) - [host '{ignored_host}' ignored by current configuration]"
+            return (None, current_agent, tag, message) if return_tag else (None, current_agent)
+
     if rate_controller is not None and hasattr(rate_controller, "check_host_cooldown"):
         cooldown_info = rate_controller.check_host_cooldown(url)
         if cooldown_info:
@@ -104,6 +112,14 @@ def make_request(url, current_agent, headers=None, params=None, max_sec=None, st
 
 def make_request_post(url, current_agent, headers=None, json_body=None, max_sec=None, stream=False, sleep_time=3, return_tag=False, rate_controller=None):
     headers = headers.copy() if headers else {}
+
+    if rate_controller is not None and hasattr(rate_controller, "is_host_ignored"):
+        ignored_host = rate_controller.is_host_ignored(url)
+        if ignored_host:
+            tag = "resource_temporarily_unavailable"
+            tag_explanation = CRAWLER_CHANGES_INFO.get(tag, {}).get("tag_explanation", {}).get("reason", "Unknown reason")
+            message = f"{tag_explanation} ({url}) - [host '{ignored_host}' ignored by current configuration]"
+            return (None, current_agent, tag, message) if return_tag else (None, current_agent)
 
     if rate_controller is not None and hasattr(rate_controller, "check_host_cooldown"):
         cooldown_info = rate_controller.check_host_cooldown(url)

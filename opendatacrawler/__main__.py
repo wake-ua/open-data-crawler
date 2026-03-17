@@ -37,6 +37,10 @@ def apply_portal_runtime_config(crawler, args):
     if args.get("extract_schema") is None:
         crawler.extract_schema = utils.get_config_option(section, "extract_schema", cast=bool, fallback=crawler.extract_schema)
 
+    if args.get("reqs_per_sec") is None:
+        reqs_per_sec = utils.get_config_option(section, "reqs_per_sec", cast=float, fallback=crawler.config_reqs_per_sec)
+        crawler.init_rate_limit(reqs_per_sec=reqs_per_sec)
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-d", "--domain", type=str, required=True,
@@ -49,6 +53,8 @@ def main():
                         help="Path to save data (Ex. -p /my/example/path/)")
     parser.add_argument("-s", "--max_seconds", type=int, required=False,
                         help="Max seconds to wait for server response during file download (e.g., -s 60)")
+    parser.add_argument("--reqs-per-sec", type=float, required=False,
+                        help="General requests-per-second limit for the crawler (e.g. --reqs-per-sec 1.5)")
     parser.add_argument("-pd", "--partial_dataset", required=False, action=argparse.BooleanOptionalAction,
                         help="Save partial dataset (default: not save)")
     parser.add_argument("-id", "--id_dataset", nargs="+", required=False,
@@ -69,6 +75,8 @@ def main():
                         help="Force re-download of datasets specified with --id_dataset (delete old metadata and data first)")
     parser.add_argument("-country", "--countries", nargs="+", required=False, 
                         help="Filter datasets by country code (e.g. -country es gr fr)")
+    parser.add_argument("--ignore-hosts", nargs="+", required=False,
+                        help="Hosts or URLs to ignore during crawling (e.g. --ignore-hosts datos.aviles.es https://datosabiertos.navarra.es)")
     parser.add_argument("--save-raw-data", required=False, action=argparse.BooleanOptionalAction,
                         help="Store original raw metadata returned by the source portal (default: disabled)")
     parser.add_argument("--extract-schema", required=False, action=argparse.BooleanOptionalAction,
@@ -81,6 +89,7 @@ def main():
     categories = [c.lower() for c in args["categories"]] if args["categories"] else []
     d_path = args["path"]
     max_sec = resolve_option(args["max_seconds"], "defaults", "max_seconds", int, None)
+    reqs_per_sec = resolve_option(args.get("reqs_per_sec"), "defaults", "reqs_per_sec", float, None)
     partial = args["partial_dataset"]
     id_dataset = args["id_dataset"]
     avoid_data = args["no_dataset"]
@@ -91,6 +100,7 @@ def main():
     num_resources = args.get("nr")
     replace = args.get("replace")
     countries = [c.lower() for c in args["countries"]] if args["countries"] else []
+    ignore_hosts = args.get("ignore_hosts") or []
     save_raw_data = resolve_option(args.get("save_raw_data"), "defaults", "save_raw_data", bool, False)
     extract_schema = resolve_option(args.get("extract_schema"), "defaults", "extract_schema", bool, True)
 
@@ -110,10 +120,12 @@ def main():
                 partial=partial,
                 avoid_data=avoid_data,
                 max_sec=max_sec,
+                reqs_per_sec=reqs_per_sec,
                 max_threads=max_threads,
                 max_resource_threads=max_resource_threads,
                 num_resources=num_resources,
                 countries=countries,
+                ignore_hosts=ignore_hosts,
                 save_raw_data=save_raw_data,
                 extract_schema=extract_schema,
             )
@@ -180,8 +192,10 @@ def main():
                     logger(None, "=" * 80, level="print")
                     logger("OK", f"Loaded resume with {len(resume_data)} packages and {len(downloaded_before_res)} downloaded resources", level="print")
                     pending_before_res = sum(len(status.get("pending_resources", [])) for status in resume_data.values())
+                    accepted_types_label = f"({', '.join(f'.{ext}' for ext in d_types)})" if d_types else "(all accepted types)"
                     if incomplete_before_pkgs:
-                        logger("...", f"Continuing {len(incomplete_before_pkgs)} incomplete packages with {len(failed_before_res)} previously failed resources of accepted types ({", ".join(f".{ext}" for ext in d_types)}) and {pending_before_res} pending resources limited by the current configuration...", level="print")
+                        logger("...", f"{len(incomplete_before_pkgs)} packages are still unresolved for the current configuration {accepted_types_label}", level="print")
+                        logger("...", f"{len(failed_before_res)} retryable resources remain, {len(unavailable_before_res)} resources are permanently unavailable, and {pending_before_res} resources have not been attempted yet because of the current limits", level="print")
                     logger(None, "=" * 80, level="print")
 
                 logger("...", f"Obtaining packages from '{crawler.get_print_domain()}'...", level="print")
