@@ -32,6 +32,17 @@
             "reason": "The server rejected the request as invalid or malformed (HTTP 400 - Bad Request)"
         }
     },
+    "invalid_redirect_location": {
+        "tag_placeholders": ["<redirect_url>", "<location_header>", "<decode_error>"],
+        "tag_explanation": {
+            "reason": "The server returned a redirect for '<redirect_url>' with an invalid or malformed 'Location' header ('<location_header>'), so the crawler could not decode or follow the redirect safely",
+            "values": {
+                "redirectURL": "<redirect_url>",
+                "locationHeader": "<location_header>",
+                "decodeError": "<decode_error>"
+            }
+        }
+    },
     "ssl_error": {
         "tag_placeholders": [],
         "tag_explanation": {
@@ -84,9 +95,19 @@
         }
     },
     "html_page_downloaded": {
-        "tag_placeholders": [],
+        "tag_placeholders": ["<mediaType_old>", "<fileName_old>", "<mediaType_new>", "<fileName_new>"],
         "tag_explanation": {
-            "reason": "The downloaded content is an HTML page instead of the expected dataset file, typically because the download URL redirects to an access, authentication, or landing page"
+            "reason": "The downloaded content is an HTML page instead of the expected dataset file. The resource may have been announced as '<mediaType_old>' with file name '<fileName_old>' by metadata, extension, or HTTP headers, but the actual downloaded content was identified as '<mediaType_new>' and renamed to '<fileName_new>'. This usually means the URL returned a landing page, login page, error page, or another HTML response instead of the dataset.",
+            "values": {
+                "oldValue": {
+                    "mediaType": "<mediaType_old>",
+                    "fileName": "<fileName_old>"
+                },
+                "newValue": {
+                    "mediaType": "<mediaType_new>",
+                    "fileName": "<fileName_new>"
+                }
+            }
         }
     },
     "low_disk_space": {

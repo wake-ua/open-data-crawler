@@ -174,16 +174,18 @@ class ZenodoCrawler():
 
         response, self.odcrawler.user_agent, error_tag, e = self.odcrawler.make_request(url, self.odcrawler.user_agent, headers=headers, return_tag=True)
         if not response:
+            error_message = utils.extract_error_message(e)
+            tag_values = utils.extract_error_tag_values(e)
             if error_tag:
                 if error_tag != "resource_temporarily_unavailable":
-                    logger("WARNING", f"Non-retryable error accessing package '{package_id}' ('{metadata_file_name}')", e, indent=2)
-                    metadata["crawlerInfo"]["packageInfo"].update(utils.add_tag_explanations(error_tag))
+                    logger("WARNING", f"Non-retryable error accessing package '{package_id}' ('{metadata_file_name}')", error_message, indent=2)
+                    metadata["crawlerInfo"]["packageInfo"].update(utils.add_tag_explanations(error_tag, tag_values))
                     metadata["crawlerInfo"]["packageStatus"]["packageCompleted"] = datetime.now().isoformat()
                     return metadata
                 else:
-                    logger("WARNING", f"Retryable error accessing package '{package_id}' ('{metadata_file_name}')", e, indent=2)
+                    logger("WARNING", f"Retryable error accessing package '{package_id}' ('{metadata_file_name}')", error_message, indent=2)
             else:
-                logger("ERROR", f"Error accessing package '{package_id}' ('{metadata_file_name}')", e, indent=2)
+                logger("ERROR", f"Error accessing package '{package_id}' ('{metadata_file_name}')", error_message, indent=2)
             return None
 
         data = response.json()

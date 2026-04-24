@@ -1,8 +1,12 @@
+import json
+import http.client
 import re
 import socket
+import ssl
 import time
 import xml.etree.ElementTree as ET
 from io import BytesIO
+from urllib.parse import urlparse
 
 import requests
 from url_normalize import url_normalize
@@ -38,6 +42,87 @@ def get_user_agent_list(current_agent):
     return [current_agent] + [ua for ua in USER_AGENTS if ua != current_agent] if current_agent else USER_AGENTS
 
 
+def _build_error_details(message, tag_values=None):
+    details = {"message": message}
+    if tag_values:
+        details["tag_values"] = tag_values
+    return details
+
+
+def extract_error_message(error):
+    if isinstance(error, dict):
+        return error.get("message")
+    return error
+
+
+def extract_error_tag_values(error):
+    if isinstance(error, dict):
+        tag_values = error.get("tag_values")
+        if isinstance(tag_values, dict):
+            return tag_values
+    return None
+
+
+def _probe_redirect_location(url, headers=None, params=None, json_body=None, max_sec=None, method="GET"):
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme == "https":
+            conn = http.client.HTTPSConnection(
+                parsed.hostname,
+                parsed.port or 443,
+                timeout=max_sec,
+                context=ssl._create_unverified_context(),
+            )
+        else:
+            conn = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=max_sec)
+
+        path = parsed.path or "/"
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+
+        request_headers = dict(headers or {})
+        if parsed.hostname and "Host" not in request_headers:
+            request_headers["Host"] = parsed.netloc
+
+        if method == "POST":
+            body = json.dumps(json_body or {})
+            request_headers.setdefault("Content-Type", "application/json")
+            request_headers.setdefault("Content-Length", str(len(body.encode("utf-8"))))
+            conn.request("POST", path, body=body, headers=request_headers)
+        else:
+            conn.request("GET", path, headers=request_headers)
+
+        response = conn.getresponse()
+        try:
+            return response.getheader("Location")
+        finally:
+            response.close()
+            conn.close()
+    except Exception:
+        return None
+
+
+def build_invalid_redirect_error(url, decode_error, headers=None, params=None, json_body=None, max_sec=None, method="GET"):
+    location_header = _probe_redirect_location(
+        url,
+        headers=headers,
+        params=params,
+        json_body=json_body,
+        max_sec=max_sec,
+        method=method,
+    ) or "unknown"
+
+    tag = "invalid_redirect_location"
+    tag_explanation = CRAWLER_CHANGES_INFO.get(tag, {}).get("tag_explanation", {}).get("reason", "Unknown reason")
+    tag_values = {
+        "<redirect_url>": url,
+        "<location_header>": location_header,
+        "<decode_error>": str(decode_error),
+    }
+    message = f"{tag_explanation} ({url}) - [Location: {location_header}] - [{decode_error}]"
+    return tag, _build_error_details(message, tag_values)
+
+
 def make_request(url, current_agent, headers=None, params=None, max_sec=None, stream=False, sleep_time=3, return_tag=False, rate_controller=None):
     headers = headers.copy() if headers else {}
 
@@ -58,56 +143,79 @@ def make_request(url, current_agent, headers=None, params=None, max_sec=None, st
             message = f"{tag_explanation} ({url}) - [host '{host}' in cooldown for ~{wait_seconds}s]"
             return (None, current_agent, tag, message) if return_tag else (None, current_agent)
 
-    all_forbidden = True
-    for user_agent in get_user_agent_list(current_agent):
-        headers["User-Agent"] = user_agent
-        while True:
-            try:
-                if rate_controller is not None:
-                    rate_controller.check_rate_limit()
+    host_semaphore = None
+    if rate_controller is not None and hasattr(rate_controller, "acquire_host_request_slot"):
+        _, host_semaphore = rate_controller.acquire_host_request_slot(url)
 
-                response = requests.get(url, headers=headers, params=params, verify=False, timeout=max_sec, stream=stream)
+    try:
+        all_forbidden = True
+        for user_agent in get_user_agent_list(current_agent):
+            headers["User-Agent"] = user_agent
+            while True:
+                try:
+                    if rate_controller is not None and (
+                        not hasattr(rate_controller, "should_rate_limit_url")
+                        or rate_controller.should_rate_limit_url(url)
+                    ):
+                        rate_controller.check_rate_limit()
 
-                if response.status_code == 403:
-                    break
-                elif response.status_code == 429:
-                    time.sleep(sleep_time)
-                    continue
+                    response = requests.get(url, headers=headers, params=params, verify=False, timeout=max_sec, stream=stream)
 
-                all_forbidden = False
-                if return_tag:
-                    try:
-                        response.raise_for_status()
-                    except requests.exceptions.RequestException as e:
-                        tag = get_error_tag_from_exception(e)
+                    if response.status_code == 403:
+                        break
+                    elif response.status_code == 429:
+                        time.sleep(sleep_time)
+                        continue
+
+                    all_forbidden = False
+                    if return_tag:
+                        try:
+                            response.raise_for_status()
+                        except requests.exceptions.RequestException as e:
+                            tag = get_error_tag_from_exception(e)
+                            if rate_controller is not None and hasattr(rate_controller, "register_host_result"):
+                                rate_controller.register_host_result(url, tag, e)
+                            tag_explanation = CRAWLER_CHANGES_INFO.get(tag, {}).get("tag_explanation", {}).get("reason", "Unknown reason")
+                            if tag == "resource_temporarily_unavailable":
+                                return None, user_agent, tag, f"{tag_explanation} ({url}) - [{e}]"
+                            return None, user_agent, tag, f"{tag_explanation} ({url})"
                         if rate_controller is not None and hasattr(rate_controller, "register_host_result"):
-                            rate_controller.register_host_result(url, tag, e)
-                        tag_explanation = CRAWLER_CHANGES_INFO.get(tag, {}).get("tag_explanation", {}).get("reason", "Unknown reason")
-                        if tag == "resource_temporarily_unavailable":
-                            return None, user_agent, tag, f"{tag_explanation} ({url}) - [{e}]"
-                        return None, user_agent, tag, f"{tag_explanation} ({url})"
+                            rate_controller.register_host_result(url, None)
+                        return response, user_agent, None, None
+
                     if rate_controller is not None and hasattr(rate_controller, "register_host_result"):
                         rate_controller.register_host_result(url, None)
-                    return response, user_agent, None, None
+                    return response, user_agent
 
-                if rate_controller is not None and hasattr(rate_controller, "register_host_result"):
-                    rate_controller.register_host_result(url, None)
-                return response, user_agent
+                except UnicodeDecodeError as e:
+                    tag, error_details = build_invalid_redirect_error(
+                        url,
+                        e,
+                        headers=headers,
+                        params=params,
+                        max_sec=max_sec,
+                        method="GET",
+                    )
+                    if rate_controller is not None and hasattr(rate_controller, "register_host_result"):
+                        rate_controller.register_host_result(url, tag, e)
+                    return (None, user_agent, tag, error_details) if return_tag else (None, user_agent)
+                except requests.exceptions.RequestException as e:
+                    tag = get_error_tag_from_exception(e)
+                    if rate_controller is not None and hasattr(rate_controller, "register_host_result"):
+                        rate_controller.register_host_result(url, tag, e)
+                    tag_explanation = CRAWLER_CHANGES_INFO.get(tag, {}).get("tag_explanation", {}).get("reason", "Unknown reason")
+                    if tag == "resource_temporarily_unavailable":
+                        return (None, user_agent, tag, f"{tag_explanation} ({url}) - [{e}]") if return_tag else (None, user_agent)
+                    return (None, user_agent, tag, f"{tag_explanation} ({url})") if return_tag else (None, user_agent)
 
-            except requests.exceptions.RequestException as e:
-                tag = get_error_tag_from_exception(e)
-                if rate_controller is not None and hasattr(rate_controller, "register_host_result"):
-                    rate_controller.register_host_result(url, tag, e)
-                tag_explanation = CRAWLER_CHANGES_INFO.get(tag, {}).get("tag_explanation", {}).get("reason", "Unknown reason")
-                if tag == "resource_temporarily_unavailable":
-                    return (None, user_agent, tag, f"{tag_explanation} ({url}) - [{e}]") if return_tag else (None, user_agent)
-                return (None, user_agent, tag, f"{tag_explanation} ({url})") if return_tag else (None, user_agent)
-
-    if return_tag:
-        if all_forbidden:
-            return None, current_agent, "forbidden_resource", f"{CRAWLER_CHANGES_INFO.get('forbidden_resource', {}).get('tag_explanation', {}).get('reason', 'Unknown reason')} ({url})"
-        return None, current_agent, None, None
-    return None, current_agent
+        if return_tag:
+            if all_forbidden:
+                return None, current_agent, "forbidden_resource", f"{CRAWLER_CHANGES_INFO.get('forbidden_resource', {}).get('tag_explanation', {}).get('reason', 'Unknown reason')} ({url})"
+            return None, current_agent, None, None
+        return None, current_agent
+    finally:
+        if rate_controller is not None and hasattr(rate_controller, "release_host_request_slot"):
+            rate_controller.release_host_request_slot(host_semaphore)
 
 
 def make_request_post(url, current_agent, headers=None, json_body=None, max_sec=None, stream=False, sleep_time=3, return_tag=False, rate_controller=None):
@@ -130,63 +238,86 @@ def make_request_post(url, current_agent, headers=None, json_body=None, max_sec=
             message = f"{tag_explanation} ({url}) - [host '{host}' in cooldown for ~{wait_seconds}s]"
             return (None, current_agent, tag, message) if return_tag else (None, current_agent)
 
-    all_forbidden = True
-    for user_agent in get_user_agent_list(current_agent):
-        headers["User-Agent"] = user_agent
-        while True:
-            try:
-                if rate_controller is not None:
-                    rate_controller.check_rate_limit()
+    host_semaphore = None
+    if rate_controller is not None and hasattr(rate_controller, "acquire_host_request_slot"):
+        _, host_semaphore = rate_controller.acquire_host_request_slot(url)
 
-                response = requests.post(
-                    url,
-                    headers=headers,
-                    json=(json_body or {}),
-                    verify=False,
-                    timeout=max_sec,
-                    stream=stream,
-                )
+    try:
+        all_forbidden = True
+        for user_agent in get_user_agent_list(current_agent):
+            headers["User-Agent"] = user_agent
+            while True:
+                try:
+                    if rate_controller is not None and (
+                        not hasattr(rate_controller, "should_rate_limit_url")
+                        or rate_controller.should_rate_limit_url(url)
+                    ):
+                        rate_controller.check_rate_limit()
 
-                if response.status_code == 403:
-                    break
-                elif response.status_code == 429:
-                    time.sleep(sleep_time)
-                    continue
+                    response = requests.post(
+                        url,
+                        headers=headers,
+                        json=(json_body or {}),
+                        verify=False,
+                        timeout=max_sec,
+                        stream=stream,
+                    )
 
-                all_forbidden = False
-                if return_tag:
-                    try:
-                        response.raise_for_status()
-                    except requests.exceptions.RequestException as e:
-                        tag = get_error_tag_from_exception(e)
+                    if response.status_code == 403:
+                        break
+                    elif response.status_code == 429:
+                        time.sleep(sleep_time)
+                        continue
+
+                    all_forbidden = False
+                    if return_tag:
+                        try:
+                            response.raise_for_status()
+                        except requests.exceptions.RequestException as e:
+                            tag = get_error_tag_from_exception(e)
+                            if rate_controller is not None and hasattr(rate_controller, "register_host_result"):
+                                rate_controller.register_host_result(url, tag, e)
+                            tag_explanation = CRAWLER_CHANGES_INFO.get(tag, {}).get("tag_explanation", {}).get("reason", "Unknown reason")
+                            if tag == "resource_temporarily_unavailable":
+                                return None, user_agent, tag, f"{tag_explanation} ({url}) - [{e}]"
+                            return None, user_agent, tag, f"{tag_explanation} ({url})"
                         if rate_controller is not None and hasattr(rate_controller, "register_host_result"):
-                            rate_controller.register_host_result(url, tag, e)
-                        tag_explanation = CRAWLER_CHANGES_INFO.get(tag, {}).get("tag_explanation", {}).get("reason", "Unknown reason")
-                        if tag == "resource_temporarily_unavailable":
-                            return None, user_agent, tag, f"{tag_explanation} ({url}) - [{e}]"
-                        return None, user_agent, tag, f"{tag_explanation} ({url})"
+                            rate_controller.register_host_result(url, None)
+                        return response, user_agent, None, None
+
                     if rate_controller is not None and hasattr(rate_controller, "register_host_result"):
                         rate_controller.register_host_result(url, None)
-                    return response, user_agent, None, None
+                    return response, user_agent
 
-                if rate_controller is not None and hasattr(rate_controller, "register_host_result"):
-                    rate_controller.register_host_result(url, None)
-                return response, user_agent
+                except UnicodeDecodeError as e:
+                    tag, error_details = build_invalid_redirect_error(
+                        url,
+                        e,
+                        headers=headers,
+                        json_body=json_body,
+                        max_sec=max_sec,
+                        method="POST",
+                    )
+                    if rate_controller is not None and hasattr(rate_controller, "register_host_result"):
+                        rate_controller.register_host_result(url, tag, e)
+                    return (None, user_agent, tag, error_details) if return_tag else (None, user_agent)
+                except requests.exceptions.RequestException as e:
+                    tag = get_error_tag_from_exception(e)
+                    if rate_controller is not None and hasattr(rate_controller, "register_host_result"):
+                        rate_controller.register_host_result(url, tag, e)
+                    tag_explanation = CRAWLER_CHANGES_INFO.get(tag, {}).get("tag_explanation", {}).get("reason", "Unknown reason")
+                    if tag == "resource_temporarily_unavailable":
+                        return (None, user_agent, tag, f"{tag_explanation} ({url}) - [{e}]") if return_tag else (None, user_agent)
+                    return (None, user_agent, tag, f"{tag_explanation} ({url})") if return_tag else (None, user_agent)
 
-            except requests.exceptions.RequestException as e:
-                tag = get_error_tag_from_exception(e)
-                if rate_controller is not None and hasattr(rate_controller, "register_host_result"):
-                    rate_controller.register_host_result(url, tag, e)
-                tag_explanation = CRAWLER_CHANGES_INFO.get(tag, {}).get("tag_explanation", {}).get("reason", "Unknown reason")
-                if tag == "resource_temporarily_unavailable":
-                    return (None, user_agent, tag, f"{tag_explanation} ({url}) - [{e}]") if return_tag else (None, user_agent)
-                return (None, user_agent, tag, f"{tag_explanation} ({url})") if return_tag else (None, user_agent)
-
-    if return_tag:
-        if all_forbidden:
-            return None, current_agent, "forbidden_resource", f"{CRAWLER_CHANGES_INFO.get('forbidden_resource', {}).get('tag_explanation', {}).get('reason', 'Unknown reason')} ({url})"
-        return None, current_agent, None, None
-    return None, current_agent
+        if return_tag:
+            if all_forbidden:
+                return None, current_agent, "forbidden_resource", f"{CRAWLER_CHANGES_INFO.get('forbidden_resource', {}).get('tag_explanation', {}).get('reason', 'Unknown reason')} ({url})"
+            return None, current_agent, None, None
+        return None, current_agent
+    finally:
+        if rate_controller is not None and hasattr(rate_controller, "release_host_request_slot"):
+            rate_controller.release_host_request_slot(host_semaphore)
 
 
 def clean_url(u):
@@ -232,7 +363,7 @@ def get_host_backoff_hint(e):
     status_code = getattr(getattr(e, "response", None), "status_code", None)
     if status_code == 503:
         return {"penalty": 2, "cooldown_scale": 2, "reason": "503"}
-    if status_code in [502, 504, 522, 429]:
+    if status_code in [500, 502, 504, 522, 429]:
         return {"penalty": 2, "cooldown_scale": 1.5, "reason": str(status_code)}
     if isinstance(e, (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout, requests.exceptions.Timeout)):
         return {"penalty": 2, "cooldown_scale": 1.5, "reason": "timeout"}

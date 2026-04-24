@@ -1,6 +1,6 @@
 import json
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 
 from opendatacrawler.setup_logger import log_manager
 from .tabular import get_mime_and_ext
@@ -16,7 +16,14 @@ PERMANENT_UNAVAILABLE_TAGS = {
     "forbidden_resource",
     "ssl_error",
     "invalid_request",
+    "invalid_redirect_location",
 }
+
+
+def package_requires_retry(failed, pending):
+    # Packages whose remaining resources are only permanently unavailable are already
+    # exhausted for the current configuration and should not be re-queued forever.
+    return bool(failed or pending)
 
 
 def recover_resume(save_path, accepted_types=None, num_resources=None, max_workers=None):
@@ -48,17 +55,15 @@ def recover_resume(save_path, accepted_types=None, num_resources=None, max_worke
 
     if use_threads:
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="resume") as executor:
-            futures = [executor.submit(load_resume_entry, save_path, fname) for fname in meta_files]
-            for future in as_completed(futures):
-                identifier, entry = future.result()
+            for identifier, entry in executor.map(lambda fname: load_resume_entry(save_path, fname), meta_files):
                 if entry is None:
                     incomplete_packages.add(identifier)
                     packages_status[identifier] = {"failed_resources": [], "successful_resources": [], "unavailable_permanent": [], "pending_resources": []}
                     continue
 
-                failed, success, unavailable_permanent, pending = compute_package_resume_status(entry, accepted_types, num_resources, existing_paths)
+                failed, success, unavailable_permanent, pending = compute_package_resume_status(entry, accepted_types, num_resources, existing_paths, save_path)
 
-                if failed or pending or unavailable_permanent:
+                if package_requires_retry(failed, pending):
                     incomplete_packages.add(identifier)
 
                 total_failed.extend(failed)
@@ -79,9 +84,9 @@ def recover_resume(save_path, accepted_types=None, num_resources=None, max_worke
                 packages_status[identifier] = {"failed_resources": [], "successful_resources": [], "unavailable_permanent": [], "pending_resources": []}
                 continue
 
-            failed, success, unavailable_permanent, pending = compute_package_resume_status(entry, accepted_types, num_resources, existing_paths)
+            failed, success, unavailable_permanent, pending = compute_package_resume_status(entry, accepted_types, num_resources, existing_paths, save_path)
 
-            if failed or pending or unavailable_permanent:
+            if package_requires_retry(failed, pending):
                 incomplete_packages.add(identifier)
 
             total_failed.extend(failed)
@@ -106,17 +111,20 @@ def load_resume_entry(save_path, fname):
             meta = json.load(f)
         identifier = meta.get("identifier") or identifier
         return identifier, build_resume_entry(meta)
-    except Exception as e:
-        logger("ERROR", f"Could not read {meta_path}; deleting damaged metadata so it can be rebuilt", e)
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        logger("ERROR", f"Could not decode {meta_path}; deleting damaged metadata so it can be rebuilt", e)
         try:
             os.remove(meta_path)
             logger("DEL", f"Deleted damaged metadata file '{meta_path}'")
         except Exception as delete_error:
             logger("ERROR", f"Could not delete damaged metadata file '{meta_path}'", delete_error)
         return identifier, None
+    except Exception as e:
+        logger("ERROR", f"Could not read {meta_path}; keeping metadata file and marking package as pending for safety", e)
+        return identifier, None
 
 
-def compute_package_resume_status(entry, accepted_types=None, num_resources=None, existing_paths=None):
+def compute_package_resume_status(entry, accepted_types=None, num_resources=None, existing_paths=None, save_path=None):
     failed = []
     success = []
     unavailable_permanent = []
@@ -129,8 +137,13 @@ def compute_package_resume_status(entry, accepted_types=None, num_resources=None
         if not inferred_ext:
             _, inferred_ext = get_mime_and_ext(resource.get("mediaType"))
 
-        if accepted_types and (not inferred_ext or inferred_ext not in accepted_types):
-            continue
+        was_attempted = bool(resource.get("fileCrawled")) or bool(resource.get("fileInfoKeys"))
+        if accepted_types:
+            if inferred_ext in accepted_types:
+                considered_resources.append(file_name)
+                continue
+            if was_attempted and inferred_ext:
+                continue
 
         considered_resources.append(file_name)
 
@@ -144,7 +157,7 @@ def compute_package_resume_status(entry, accepted_types=None, num_resources=None
                 pending_unavailable.append(file_name)
                 continue
 
-            if is_completed(entry, file_name) and has_materialized_file(resource, existing_paths):
+            if is_completed(entry, file_name) and has_materialized_file(resource, existing_paths, save_path):
                 success.append(file_name)
                 if len(success) >= num_resources:
                     return [], success, [], []
@@ -166,7 +179,7 @@ def compute_package_resume_status(entry, accepted_types=None, num_resources=None
         resource = entry.get("resources", {}).get(file_name, {})
         if is_completed(entry, file_name, complete=False, unavailable_permanent=True):
             unavailable_permanent.append(file_name)
-        elif is_completed(entry, file_name) and has_materialized_file(resource, existing_paths):
+        elif is_completed(entry, file_name) and has_materialized_file(resource, existing_paths, save_path):
             success.append(file_name)
         else:
             was_attempted = bool(resource.get("fileCrawled")) or bool(resource.get("fileInfoKeys"))
@@ -196,7 +209,7 @@ def build_resume_entry(package, meta_file_name=None, meta_stat=None):
     return {"identifier": package.get("identifier"), "resources": resources}
 
 
-def has_materialized_file(resource, existing_paths=None):
+def has_materialized_file(resource, existing_paths=None, save_path=None):
     path = resource.get("path")
     if not path:
         return False
@@ -204,6 +217,12 @@ def has_materialized_file(resource, existing_paths=None):
     abs_path = path if os.path.isabs(path) else os.path.join(os.getcwd(), path)
     if existing_paths is not None and (path in existing_paths or abs_path in existing_paths):
         return True
+    if save_path and not os.path.isabs(path):
+        alt_path = os.path.join(save_path, os.path.basename(path))
+        if existing_paths is not None and alt_path in existing_paths:
+            return True
+        if os.path.exists(alt_path):
+            return True
     return os.path.exists(abs_path)
 
 

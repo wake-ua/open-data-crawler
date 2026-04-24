@@ -19,6 +19,13 @@ def resolve_option(cli_value, section, option, cast, fallback):
     return fallback
 
 
+def resolve_portal_option(section, option, cast, fallback):
+    config_value = utils.get_config_option(section, option, cast=cast, fallback=None) if section else None
+    if config_value is not None:
+        return config_value
+    return utils.get_config_option("defaults", option, cast=cast, fallback=fallback)
+
+
 def apply_portal_runtime_config(crawler, args):
     section = crawler.dms or ""
 
@@ -41,45 +48,55 @@ def apply_portal_runtime_config(crawler, args):
         reqs_per_sec = utils.get_config_option(section, "reqs_per_sec", cast=float, fallback=crawler.config_reqs_per_sec)
         crawler.init_rate_limit(reqs_per_sec=reqs_per_sec)
 
+    partial_enabled = args.get("partial_dataset")
+    if partial_enabled is None:
+        partial_enabled = resolve_portal_option(section, "partial_dataset", bool, False)
+
+    partial_dataset_rows = resolve_portal_option(section, "partial_dataset_rows", int, 100)
+    if partial_dataset_rows is None or partial_dataset_rows <= 0:
+        partial_dataset_rows = 100
+
+    crawler.partial_dataset_rows = partial_dataset_rows if partial_enabled else None
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-d", "--domain", type=str, required=True,
                         help="A data source (Ex. -d https://domain.example)")
-    parser.add_argument("-t", "--data_types", nargs="+", required=False,
+    parser.add_argument("-t", "--data-types", "--data_types", dest="data_types", nargs="+", required=False,
                         help="data types to save (Ex. -t xls pdf) (default: all)")
     parser.add_argument("-c", "--categories", nargs="+", required=False,
                         help="Categories to save (Ex. -c crime tourism transport) (default: all)")
     parser.add_argument("-p", "--path", type=str, required=False,
                         help="Path to save data (Ex. -p /my/example/path/)")
-    parser.add_argument("-s", "--max_seconds", type=int, required=False,
+    parser.add_argument("-s", "--max-seconds", "--max_seconds", dest="max_seconds", type=int, required=False,
                         help="Max seconds to wait for server response during file download (e.g., -s 60)")
-    parser.add_argument("--reqs-per-sec", type=float, required=False,
+    parser.add_argument("--reqs-per-sec", "--reqs_per_sec", dest="reqs_per_sec", type=float, required=False,
                         help="General requests-per-second limit for the crawler (e.g. --reqs-per-sec 1.5)")
-    parser.add_argument("-pd", "--partial_dataset", required=False, action=argparse.BooleanOptionalAction,
-                        help="Save partial dataset (default: not save)")
-    parser.add_argument("-id", "--id_dataset", nargs="+", required=False,
+    parser.add_argument("-pd", "--partial-dataset", "--partial_dataset", dest="partial_dataset", required=False, action=argparse.BooleanOptionalAction,
+                        help="Enable partial local copies for CSV/TSV datasets after full processing using the row limit configured in config.ini")
+    parser.add_argument("-id", "--id-dataset", "--id_dataset", dest="id_dataset", nargs="+", required=False,
                         help="Save the dataset with that id (Ex. -id edu-alu-fpa-2021) (default: all)")
-    parser.add_argument("-nd", "--no_dataset", required=False, action=argparse.BooleanOptionalAction,
+    parser.add_argument("-nd", "--no-dataset", "--no_dataset", dest="no_dataset", required=False, action=argparse.BooleanOptionalAction,
                         help="No save the dataset (default: save)")
-    parser.add_argument("-n", "--max_packages", type=int, required=False,
+    parser.add_argument("-n", "--max-packages", "--max_packages", dest="max_packages", type=int, required=False,
                         help="Maximum number of packages to process (default: all)")
-    parser.add_argument("-mt", "--max_threads", type=int, required=False,
+    parser.add_argument("-mt", "--max-threads", "--max_threads", dest="max_threads", type=int, required=False,
                         help="Maximum number of threads to use (default: based on CPU count, up to 32)")
-    parser.add_argument("-mrt", "--max_resource_threads", type=int, required=False,
+    parser.add_argument("-mrt", "--max-resource-threads", "--max_resource_threads", dest="max_resource_threads", type=int, required=False,
                         help="Maximum number of threads to use per package for processing resources (default: 4)")
-    parser.add_argument("-rd", "--reset-domain", required=False, action=argparse.BooleanOptionalAction,
+    parser.add_argument("-rd", "--reset-domain", "--reset_domain", dest="reset_domain", required=False, action=argparse.BooleanOptionalAction,
                         help="Delete all data and logs for the specified domain before crawling")
-    parser.add_argument("-nr", type=int, required=False,
+    parser.add_argument("-nr", "--num-resources", dest="num_resources", type=int, required=False,
                         help="Number of resources per package to download (default: all)")
-    parser.add_argument("-replace", required=False, action=argparse.BooleanOptionalAction,
-                        help="Force re-download of datasets specified with --id_dataset (delete old metadata and data first)")
-    parser.add_argument("-country", "--countries", nargs="+", required=False, 
-                        help="Filter datasets by country code (e.g. -country es gr fr)")
-    parser.add_argument("--ignore-hosts", nargs="+", required=False,
+    parser.add_argument("-replace", "--replace", dest="replace", required=False, action=argparse.BooleanOptionalAction,
+                        help="Force re-download of datasets specified with --id-dataset (delete old metadata and data first)")
+    parser.add_argument("-country", "--country", "--countries", dest="countries", nargs="+", required=False,
+                        help="Filter datasets by country code (e.g. --country es gr fr)")
+    parser.add_argument("--ignore-hosts", "--ignore_hosts", dest="ignore_hosts", nargs="+", required=False,
                         help="Hosts or URLs to ignore during crawling (e.g. --ignore-hosts datos.aviles.es https://datosabiertos.navarra.es)")
-    parser.add_argument("--save-raw-data", required=False, action=argparse.BooleanOptionalAction,
+    parser.add_argument("--save-raw-data", "--save_raw_data", dest="save_raw_data", required=False, action=argparse.BooleanOptionalAction,
                         help="Store original raw metadata returned by the source portal (default: disabled)")
-    parser.add_argument("--extract-schema", required=False, action=argparse.BooleanOptionalAction,
+    parser.add_argument("--extract-schema", "--extract_schema", dest="extract_schema", required=False, action=argparse.BooleanOptionalAction,
                         help="Extract tabular schema from CSV/TSV files (default: enabled)")
 
     args = vars(parser.parse_args())
@@ -91,13 +108,18 @@ def main():
     max_sec = resolve_option(args["max_seconds"], "defaults", "max_seconds", int, None)
     reqs_per_sec = resolve_option(args.get("reqs_per_sec"), "defaults", "reqs_per_sec", float, None)
     partial = args["partial_dataset"]
+    partial_dataset_rows = None
+    if partial is True:
+        partial_dataset_rows = utils.get_config_option("defaults", "partial_dataset_rows", cast=int, fallback=100)
+        if partial_dataset_rows is None or partial_dataset_rows <= 0:
+            partial_dataset_rows = 100
     id_dataset = args["id_dataset"]
     avoid_data = args["no_dataset"]
     max_packages = args.get("max_packages")
     max_threads = resolve_option(args["max_threads"], "defaults", "max_threads", int, min(16, max(4, (os.cpu_count() or 1) * 2)))
     max_resource_threads = resolve_option(args.get("max_resource_threads"), "defaults", "max_resource_threads", int, 2)
     reset_domain = args.get("reset_domain")
-    num_resources = args.get("nr")
+    num_resources = args.get("num_resources")
     replace = args.get("replace")
     countries = [c.lower() for c in args["countries"]] if args["countries"] else []
     ignore_hosts = args.get("ignore_hosts") or []
@@ -118,6 +140,7 @@ def main():
                 data_types=d_types,
                 categories=categories,
                 partial=partial,
+                partial_dataset_rows=partial_dataset_rows,
                 avoid_data=avoid_data,
                 max_sec=max_sec,
                 reqs_per_sec=reqs_per_sec,

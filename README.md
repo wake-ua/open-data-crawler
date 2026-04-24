@@ -114,6 +114,12 @@ To set up the project locally, follow these steps:
      token = <yourSocrataToken>
      ```
 * Runtime defaults can also be configured in `opendatacrawler/config.ini` using sections such as `[defaults]`, `[datosgobes]` or `[zenodo]`.
+  * Example for partial tabular downloads:
+    ```ini
+    [defaults]
+    partial_dataset = true
+    partial_dataset_rows = 100
+    ```
 
 > [!IMPORTANT]
 > Command-line arguments take priority over `config.ini`, and `config.ini` takes priority over the built-in defaults.
@@ -171,6 +177,17 @@ python opendatacrawler -d https://datos.gob.es --save-raw-data
 ```
 python opendatacrawler -d https://datos.gob.es --no-extract-schema
 ```
+#### Store partial local copies of CSV/TSV datasets using the row limit defined in `config.ini`:
+```ini
+[defaults]
+partial_dataset = true
+partial_dataset_rows = 100
+```
+```sh
+python opendatacrawler -d https://datos.gob.es --partial-dataset
+```
+> [!NOTE]
+> `--partial-dataset` only enables the feature. The number of retained data rows is read from `config.ini` (`partial_dataset_rows`), preserving any initial non-data lines and the detected header in CSV/TSV files after full download and processing.
 
 <!-- _For more examples, see the [Documentation](https://example.com)_ -->
 

@@ -895,6 +895,9 @@
   "application/json-seq": {
     "source": "iana"
   },
+  "application/jsonp": {
+    "extensions": ["jsonp"]
+  },
   "application/json5": {
     "extensions": ["json5"]
   },
@@ -4657,6 +4660,9 @@
   "application/vnd.oai.workflows+yaml": {
     "source": "iana"
   },
+  "application/vnd.ogc.se_xml": {
+    "extensions": ["xml"]
+  },
   "application/vnd.oasis.opendocument.base": {
     "source": "iana"
   },
@@ -6725,6 +6731,9 @@
   "application/x-pki-message": {
     "source": "iana"
   },
+  "application/x-protobuf": {
+    "extensions": ["pbf"]
+  },
   "application/x-rar-compressed": {
     "source": "apache",
     "compressible": false,
@@ -6814,6 +6823,9 @@
     "source": "apache",
     "extensions": ["texinfo","texi"]
   },
+  "application/x-turtle": {
+    "extensions": ["ttl"]
+  },
   "application/x-tgif": {
     "source": "apache",
     "extensions": ["obj"]
@@ -6897,6 +6909,9 @@
   "application/x-zip-compressed": {
     "extensions": ["zip"],
     "compressible": false
+  },
+  "application/x-zipped-shp": {
+    "extensions": ["zip"]
   },
   "application/x-zmachine": {
     "source": "apache",
@@ -7927,6 +7942,9 @@
     "source": "iana",
     "compressible": true,
     "extensions": ["svg","svgz"]
+  },
+  "image/tif": {
+    "extensions": ["tif"]
   },
   "image/t38": {
     "source": "iana",

@@ -369,6 +369,49 @@ def fix_tabular_data(path, encoding):
     return temp_path, reconstructed_lines, outer_quotes_removed, inner_quotes_fixed, delimiter
 
 
+def trim_tabular_data_rows(path, encoding, max_data_rows, start_row=0):
+    if max_data_rows is None or max_data_rows < 0:
+        return None, 0, 0
+
+    temp_path = None
+    try:
+        with open(path, "r", encoding=encoding, newline="") as f:
+            lines = f.readlines()
+
+        nonempty_indices = [idx for idx, line in enumerate(lines) if line.strip()]
+        if not nonempty_indices or start_row >= len(nonempty_indices):
+            return None, 0, 0
+
+        header_idx = nonempty_indices[start_row]
+        data_lines = lines[header_idx + 1:]
+        total_data_rows = sum(1 for line in data_lines if line.strip())
+
+        if max_data_rows >= total_data_rows:
+            return None, total_data_rows, total_data_rows
+
+        kept_data_rows = 0
+        trimmed_lines = lines[:header_idx + 1]
+        for line in data_lines:
+            if line.strip():
+                if kept_data_rows >= max_data_rows:
+                    break
+                kept_data_rows += 1
+            trimmed_lines.append(line)
+
+        with tempfile.NamedTemporaryFile(mode="w", encoding=encoding, newline="", delete=False, prefix=TABULAR_TEMP_PREFIX) as temp_out:
+            temp_path = temp_out.name
+            temp_out.writelines(trimmed_lines)
+
+        return temp_path, kept_data_rows, total_data_rows
+    except Exception:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+        raise
+
+
 def detect_bom(raw):
     if raw.startswith(b"\xff\xfe\x00\x00"):
         return "utf-32-le"

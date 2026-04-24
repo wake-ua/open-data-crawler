@@ -30,10 +30,14 @@ from .metadata import (
     split_multivalue,
 )
 from .network import (
+    build_invalid_redirect_error,
     clean_url,
     extract_namespaces,
+    extract_error_message,
+    extract_error_tag_values,
     fix_url,
     get_error_tag_from_exception,
+    get_host_backoff_hint,
     get_https_error_tag,
     get_user_agent_list,
     get_xml_attr,
@@ -97,6 +101,7 @@ from .tabular import (
     safe_decode,
     stream_decode_to_tempfile,
     stream_decode_to_tempfile_fixlines,
+    trim_tabular_data_rows,
 )
 
 __all__ = [name for name in globals() if not name.startswith("_")]

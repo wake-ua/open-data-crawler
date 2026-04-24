@@ -142,3 +142,6 @@ opendatacrawler/config.ini
 .vscode/
 
 .DS_Store
+
+opendatacrawler/resources/datosgobes_catalog.csv
+opendatacrawler/resources/datosgobes_catalog_meta.json

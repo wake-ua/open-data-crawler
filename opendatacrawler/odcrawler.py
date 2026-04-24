@@ -2,9 +2,9 @@ import json
 import os
 import shutil
 import errno
+import hashlib
 import requests
 import humanize
-import hashlib
 import gc
 import random
 import threading
@@ -27,7 +27,7 @@ class LowDiskSpaceError(RuntimeError):
 
 
 class OpenDataCrawler():
-    def __init__(self, domain, path=None, data_types=None, categories=None, partial=False, avoid_data=None, max_sec=None, reqs_per_sec=None, max_threads=None, max_resource_threads=None, num_resources=None, countries=None, ignore_hosts=None, save_raw_data=False, extract_schema=True):
+    def __init__(self, domain, path=None, data_types=None, categories=None, partial=False, partial_dataset_rows=None, avoid_data=None, max_sec=None, reqs_per_sec=None, max_threads=None, max_resource_threads=None, num_resources=None, countries=None, ignore_hosts=None, save_raw_data=False, extract_schema=True):
         self.domain = utils.normalize_domain(domain).rstrip("/")
         self.dms = None
         self.dms_instance = None
@@ -48,11 +48,14 @@ class OpenDataCrawler():
 
         self.data_types = data_types
         self.categories = categories
-        self.partial = partial
+        if partial and partial_dataset_rows is None:
+            partial_dataset_rows = 100
+        if partial_dataset_rows is not None and partial_dataset_rows <= 0:
+            partial_dataset_rows = 100
+        self.partial_dataset_rows = partial_dataset_rows
         self.avoid_data = avoid_data
         self.num_resources = num_resources
 
-        self.countries = countries
         self.current_country = None
         self.ignore_hosts = {self.normalize_host(value) for value in (ignore_hosts or []) if self.normalize_host(value)}
 
@@ -62,11 +65,14 @@ class OpenDataCrawler():
         self.ckan_action_requires_post = False
         self.host_timeout_threshold = utils.get_config_option("defaults", "host_timeout_threshold", cast=int, fallback=3)
         self.host_cooldown_seconds = utils.get_config_option("defaults", "host_cooldown_seconds", cast=int, fallback=60)
+        self.host_max_concurrent_requests = max(1, utils.get_config_option("defaults", "host_max_concurrent_requests", cast=int, fallback=1))
         self.max_file_size_mb = utils.get_config_option("defaults", "max_file_size_mb", cast=int, fallback=0)
         self.min_free_disk_mb = utils.get_config_option("defaults", "min_free_disk_mb", cast=int, fallback=512)
         self.min_free_disk_percent = utils.get_config_option("defaults", "min_free_disk_percent", cast=float, fallback=2.0)
         self.host_cooldowns = {}
         self.host_cooldown_lock = threading.Lock()
+        self.host_request_semaphores = {}
+        self.host_request_lock = threading.Lock()
         logger("...", f"Detecting DMS for domain '{self.get_print_domain()}'...", level="print")
         self.init_rate_limit(reqs_per_sec=self.config_reqs_per_sec)
         self.detect_dms()
@@ -271,7 +277,7 @@ class OpenDataCrawler():
         total_unavailable = len(unavailable_permanent_after)
         logger("OK", f"{new_downloads} new resources downloaded in this run ({new_failures} new failures, {recovered} recovered, {new_unavailable} marked as permanently unavailable): {total_success} successful, {total_failed} failed, {total_unavailable} permanently unavailable in total across {len(resume_data)} packages", level="print")
         for host_info in self.get_problematic_hosts():
-            logger("WARNING", f"Host '{host_info['host']}' appears to be down or unstable in this run ({host_info['temporary_failures']} temporary failures, {host_info['cooldown_hits']} cooldown skips, last reason: {host_info['last_reason']}). Try again later or use '--ignore-hosts {host_info['host']}' to skip it.", level="print")
+            logger("WARNING", f"Host '{host_info['host']}' is showing repeated access problems in this run ({host_info['temporary_failures']} temporary failures, {host_info['permanent_failures']} permanent failures, {host_info['cooldown_hits']} cooldown skips, last reason: {host_info['last_reason']}). Try again later or use '--ignore-hosts {host_info['host']}' to skip it.")
 
     def run_threaded_function(self, items, func, max_workers=1, thread_name_prefix=None, use_tqdm=False, tqdm_initial=0, tqdm_desc="", tqdm_colour=None, store_results=True):
         results = [] if store_results else None
@@ -310,8 +316,40 @@ class OpenDataCrawler():
                 func = lambda pkg_id: self.process_package(pkg_id)
 
             workers = max_workers if max_workers is not None else self.max_threads
+            if phase != "resources":
+                self.run_threaded_function(items=packages, func=func, max_workers=workers, thread_name_prefix="t", use_tqdm=True, tqdm_desc=tqdm_desc, tqdm_colour=tqdm_colour, tqdm_initial=tqdm_initial, store_results=False)
+                return
 
-            self.run_threaded_function(items=packages, func=func, max_workers=workers, thread_name_prefix="t", use_tqdm=True, tqdm_desc=tqdm_desc, tqdm_colour=tqdm_colour, tqdm_initial=tqdm_initial, store_results=False)
+            pending_packages = list(packages)
+            current_initial = tqdm_initial
+            defer_round = 0
+            while pending_packages:
+                results = self.run_threaded_function(items=pending_packages, func=func, max_workers=workers, thread_name_prefix="t", use_tqdm=True, tqdm_desc=tqdm_desc, tqdm_colour=tqdm_colour, tqdm_initial=current_initial, store_results=True)
+                deferred_packages = []
+                deferred_hosts = []
+                for result in results:
+                    if not isinstance(result, dict) or result.get("status") != "deferred":
+                        continue
+                    pkg_id = result.get("pkg_id")
+                    if pkg_id and pkg_id not in deferred_packages:
+                        deferred_packages.append(pkg_id)
+                    host = result.get("host")
+                    if host and host not in deferred_hosts:
+                        deferred_hosts.append(host)
+
+                if not deferred_packages:
+                    break
+
+                defer_round += 1
+                if defer_round >= 2:
+                    host_text = f" Hosts still affected: {', '.join(sorted(deferred_hosts))}." if deferred_hosts else ""
+                    logger("WARNING", f"Leaving {len(deferred_packages)} package(s) pending for a later run because their hosts are still unstable or in cooldown.{host_text} Try again later or use '--ignore-hosts' for those hosts.", level="print")
+                    break
+
+                host_text = f" Affected hosts: {', '.join(sorted(deferred_hosts))}." if deferred_hosts else ""
+                logger("INFO", f"Deferring {len(deferred_packages)} package(s) to the end of the current resources phase because their hosts are unstable or in cooldown.{host_text}", level="print")
+                pending_packages = deferred_packages
+                current_initial = 0
 
         except KeyboardInterrupt:
             logger(None, "=" * 80, level="print")
@@ -403,6 +441,22 @@ class OpenDataCrawler():
         host = self.normalize_host(url)
         return host if host in self.ignore_hosts else None
 
+    def acquire_host_request_slot(self, url):
+        host = self.normalize_host(url)
+        if not host:
+            return None, None
+        with self.host_request_lock:
+            semaphore = self.host_request_semaphores.get(host)
+            if semaphore is None:
+                semaphore = threading.BoundedSemaphore(self.host_max_concurrent_requests)
+                self.host_request_semaphores[host] = semaphore
+        semaphore.acquire()
+        return host, semaphore
+
+    def release_host_request_slot(self, semaphore):
+        if semaphore is not None:
+            semaphore.release()
+
     def check_host_cooldown(self, url):
         if not url or self.host_timeout_threshold <= 0 or self.host_cooldown_seconds <= 0:
             return None
@@ -436,21 +490,29 @@ class OpenDataCrawler():
             return
 
         with self.host_cooldown_lock:
-            state = self.host_cooldowns.setdefault(host, {"timeouts": 0, "cooldown_until": 0, "temporary_failures": 0, "cooldown_hits": 0, "last_reason": None, "problem_reported": False})
+            state = self.host_cooldowns.setdefault(host, {"timeouts": 0, "cooldown_until": 0, "temporary_failures": 0, "permanent_failures": 0, "cooldown_hits": 0, "last_reason": None, "problem_reported": False})
 
             if error_tag == "resource_temporarily_unavailable":
                 backoff_hint = utils.get_host_backoff_hint(error) if error is not None else {"penalty": 1, "cooldown_scale": 1, "reason": "generic"}
-                state["timeouts"] += backoff_hint.get("penalty", 1)
+                state["timeouts"] += 1
                 state["temporary_failures"] = state.get("temporary_failures", 0) + 1
                 state["last_reason"] = backoff_hint.get("reason", "generic")
-                if not state.get("problem_reported") and state["temporary_failures"] >= self.host_timeout_threshold:
-                    state["problem_reported"] = True
-                    logger("WARNING", f"Host '{host}' is showing repeated temporary failures in this run ({state['temporary_failures']} so far, last reason: {state['last_reason']}). It may be down or unstable. Try again later or use '--ignore-hosts {host}' to skip it.", level="print")
                 if state["timeouts"] >= self.host_timeout_threshold:
-                    cooldown_seconds = max(1, int(self.host_cooldown_seconds * backoff_hint.get("cooldown_scale", 1)))
+                    cooldown_seconds = max(1, int(self.host_cooldown_seconds))
                     state["cooldown_until"] = time.time() + cooldown_seconds
                     state["timeouts"] = 0
-                    logger("WARNING", f"Host '{host}' entered cooldown for {cooldown_seconds}s after repeated temporary access failures ({backoff_hint.get('reason', 'generic')})")
+                    if not state.get("problem_reported"):
+                        state["problem_reported"] = True
+                    logger("WARNING", f"Host '{host}' is showing repeated temporary failures in this run ({state['temporary_failures']} so far, last reason: {state['last_reason']}) and has entered cooldown for {cooldown_seconds}s. It may be down or unstable. Try again later or use '--ignore-hosts {host}' to skip it.")
+                elif not state.get("problem_reported") and state["temporary_failures"] >= self.host_timeout_threshold:
+                    state["problem_reported"] = True
+                    logger("WARNING", f"Host '{host}' is showing repeated temporary failures in this run ({state['temporary_failures']} so far, last reason: {state['last_reason']}). It may be down or unstable. Try again later or use '--ignore-hosts {host}' to skip it.")
+            elif error_tag:
+                state["permanent_failures"] = state.get("permanent_failures", 0) + 1
+                state["last_reason"] = error_tag
+                if not state.get("problem_reported") and state["permanent_failures"] >= self.host_timeout_threshold:
+                    state["problem_reported"] = True
+                    logger("WARNING", f"Host '{host}' is showing repeated non-retryable access failures in this run ({state['permanent_failures']} so far, last reason: {state['last_reason']}). It may require skipping for this run. Consider '--ignore-hosts {host}'.")
             else:
                 state["timeouts"] = 0
                 state["cooldown_until"] = 0
@@ -460,16 +522,42 @@ class OpenDataCrawler():
         with self.host_cooldown_lock:
             for host, state in self.host_cooldowns.items():
                 temporary_failures = int(state.get("temporary_failures", 0) or 0)
+                permanent_failures = int(state.get("permanent_failures", 0) or 0)
                 cooldown_hits = int(state.get("cooldown_hits", 0) or 0)
-                if temporary_failures < self.host_timeout_threshold and cooldown_hits < 3:
+                if temporary_failures < self.host_timeout_threshold and permanent_failures < self.host_timeout_threshold and cooldown_hits < 3:
                     continue
                 problematic.append({
                     "host": host,
                     "temporary_failures": temporary_failures,
+                    "permanent_failures": permanent_failures,
                     "cooldown_hits": cooldown_hits,
                     "last_reason": state.get("last_reason", "generic"),
                 })
-        return sorted(problematic, key=lambda item: (item["temporary_failures"], item["cooldown_hits"]), reverse=True)
+        return sorted(problematic, key=lambda item: (item["temporary_failures"], item["permanent_failures"], item["cooldown_hits"]), reverse=True)
+
+    def get_host_runtime_state(self, url):
+        host = self.normalize_host(url)
+        if not host:
+            return None
+        now = time.time()
+        with self.host_cooldown_lock:
+            state = dict(self.host_cooldowns.get(host, {}))
+        cooldown_until = state.get("cooldown_until", 0) or 0
+        wait_seconds = max(0, int(cooldown_until - now)) if cooldown_until else 0
+        return {"host": host, "temporary_failures": int(state.get("temporary_failures", 0) or 0), "cooldown_hits": int(state.get("cooldown_hits", 0) or 0), "last_reason": state.get("last_reason", "generic"), "wait_seconds": wait_seconds, "in_cooldown": wait_seconds > 0}
+
+    def should_defer_package_for_url(self, url):
+        state = self.get_host_runtime_state(url)
+        if not state:
+            return None
+        if state["in_cooldown"] or state["temporary_failures"] >= self.host_timeout_threshold:
+            return state
+        return None
+
+    def clear_recovered_resource_tags(self, resource_info):
+        file_info = resource_info.get("fileInfo", {})
+        if "resource_temporarily_unavailable" in file_info:
+            file_info.pop("resource_temporarily_unavailable", None)
 
     def ensure_disk_headroom(self, path, required_bytes=0, context=None, log_indent=4):
         min_free_bytes = max(int(self.min_free_disk_mb or 0), 0) * 1024 * 1024
@@ -503,13 +591,9 @@ class OpenDataCrawler():
         payload = params or {}
 
         if self.ckan_action_requires_post:
-            if self.rate_limit:
-                return utils.make_request_post(url, agent, headers=hdrs, json_body=payload, max_sec=timeout, return_tag=return_tag, rate_controller=self)
-            return utils.make_request_post(url, agent, headers=hdrs, json_body=payload, max_sec=timeout, return_tag=return_tag)
+            return utils.make_request_post(url, agent, headers=hdrs, json_body=payload, max_sec=timeout, return_tag=return_tag, rate_controller=self)
 
-        if self.rate_limit:
-            return utils.make_request(url, agent, headers=hdrs, params=payload, max_sec=timeout, return_tag=return_tag, rate_controller=self)
-        return utils.make_request(url, agent, headers=hdrs, params=payload, max_sec=timeout, return_tag=return_tag)
+        return utils.make_request(url, agent, headers=hdrs, params=payload, max_sec=timeout, return_tag=return_tag, rate_controller=self)
 
     def make_request(self, url, current_agent, headers=None, **kwargs):
         headers = dict(headers) if headers else {}
@@ -519,10 +603,7 @@ class OpenDataCrawler():
             headers.setdefault("Authorization", ckan_api_key)
             headers.setdefault("X-CKAN-API-Key", ckan_api_key)
 
-        if self.should_rate_limit_url(url):
-            return utils.make_request(url, current_agent, headers=headers, **kwargs, rate_controller=self)
-
-        return utils.make_request(url, current_agent, headers=headers, **kwargs)
+        return utils.make_request(url, current_agent, headers=headers, **kwargs, rate_controller=self)
         
     # ==============================
 
@@ -557,8 +638,6 @@ class OpenDataCrawler():
             self.ensure_disk_headroom(temp_path, required_bytes=required_bytes, context=f"downloading resource '{file_name}'", log_indent=log_indent)
 
             total_bytes = 0
-            line_limit = 50
-            lines_downloaded = 0
             next_space_check = 64 * 1024 * 1024
 
             response.raw.decode_content = True
@@ -581,11 +660,6 @@ class OpenDataCrawler():
                             self.ensure_disk_headroom(temp_path, context=f"continuing download of resource '{file_name}'", log_indent=log_indent)
                             next_space_check += 64 * 1024 * 1024
 
-                        if self.partial:
-                            lines_downloaded += chunk.count(b"\n")
-                            if lines_downloaded >= line_limit:
-                                logger("WARNING", f"Partial content downloaded (~{line_limit} rows) for '{file_name}'", indent=log_indent)
-                                break
             except LowDiskSpaceError:
                 if os.path.exists(temp_path):
                     try:
@@ -615,7 +689,7 @@ class OpenDataCrawler():
                     raise LowDiskSpaceError(f"Insufficient disk space while saving '{file_name}'") from e
                 raise
 
-            if not self.partial and total_bytes == 0:
+            if total_bytes == 0:
                 if os.path.exists(temp_path):
                     try:
                         os.remove(temp_path)
@@ -647,12 +721,8 @@ class OpenDataCrawler():
     def save_metadata(self, package, log_indent=2):
         try:
             file_name = package.get("fileName")
-
             meta_path = os.path.join(self.save_path, file_name)
-            logger("SAVE", f"Saving metadata to '{meta_path}'...", indent=log_indent)
-
-            if "crawlerInfo" in package:
-                package["crawlerInfo"] = package.pop("crawlerInfo")
+            package_status = package.setdefault("crawlerInfo", {}).setdefault("packageStatus", {})
 
             all_resources_complete = True
             for _, res_info in package["crawlerInfo"]["resourcesInfo"].items():
@@ -660,13 +730,13 @@ class OpenDataCrawler():
                     all_resources_complete = False
                     break
 
-            if all_resources_complete and not package["crawlerInfo"]["packageStatus"].get("packageCompleted"):
-                package["crawlerInfo"]["packageStatus"]["packageCompleted"] = datetime.now().isoformat()
+            if all_resources_complete and not package_status.get("packageCompleted"):
+                package_status["packageCompleted"] = datetime.now().isoformat()
 
             sanitized_package = utils.sanitize_json_keys(package)
             serialized_package = json.dumps(sanitized_package, ensure_ascii=False, indent=log_indent, sort_keys=True)
-            new_hash = hashlib.sha1(serialized_package.encode("utf-8")).hexdigest()
             required_bytes = len(serialized_package.encode("utf-8"))
+            new_hash = hashlib.sha1(serialized_package.encode("utf-8")).hexdigest()
 
             existing_hash = None
             if os.path.exists(meta_path):
@@ -677,8 +747,12 @@ class OpenDataCrawler():
                 existing_hash = sha1.hexdigest()
 
             if existing_hash == new_hash:
+                package_status["changed_metadata"] = False
                 logger("SKIP", f"Metadata file '{meta_path}' already exists and is up-to-date", indent=log_indent)
                 return
+
+            logger("SAVE", f"Saving metadata to '{meta_path}'...", indent=log_indent)
+            package_status["changed_metadata"] = False
 
             self.ensure_disk_headroom(meta_path, required_bytes=required_bytes, context=f"saving metadata '{file_name}'", log_indent=log_indent)
 
@@ -710,16 +784,21 @@ class OpenDataCrawler():
 
         response, self.user_agent, error_tag, e = self.make_request(resource["downloadURL"], self.user_agent, return_tag=True, max_sec=self.max_sec, stream=True)
         if not response:
+            error_message = utils.extract_error_message(e)
+            tag_values = utils.extract_error_tag_values(e)
             if error_tag:
                 if error_tag != "resource_temporarily_unavailable":
-                    resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag))
-                    logger("WARNING", f"Non-retryable error accessing resource '{base_name}' for parsing", e, indent=log_indent)
+                    resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag, tag_values))
+                    logger("WARNING", f"Non-retryable error accessing resource '{base_name}' for parsing", error_message, indent=log_indent)
                     resource_crawler_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
                 else:
-                    resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag, {"<metaMediaType>": meta_media_type}))
-                    logger("WARNING", f"Retryable error accessing resource '{base_name}' for parsing", e, indent=log_indent)
+                    retry_tag_values = {"<metaMediaType>": meta_media_type}
+                    if tag_values:
+                        retry_tag_values.update(tag_values)
+                    resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag, retry_tag_values))
+                    logger("WARNING", f"Retryable error accessing resource '{base_name}' for parsing", error_message, indent=log_indent)
             else:
-                logger("ERROR", f"Error accessing resource '{base_name}'", e, indent=log_indent)
+                logger("ERROR", f"Error accessing resource '{base_name}'", error_message, indent=log_indent)
 
             return resource, resource_crawler_info
 
@@ -728,6 +807,7 @@ class OpenDataCrawler():
 
             resource["mediaType"] = media_type
             resource["fileName"] = file_name
+            self.clear_recovered_resource_tags(resource_crawler_info)
             if tag_val:
                 logger("WARNING", f"Detected a media type mismatch for '{resource['downloadURL']}'", indent=log_indent)
                 resource_crawler_info["fileMetadataChanges"].update(utils.add_tag_explanations("mimetype_mismatch", tag_val))
@@ -780,6 +860,7 @@ class OpenDataCrawler():
 
                 package["resources"][new_file_name] = new_resource
                 package["crawlerInfo"]["resourcesInfo"][new_file_name] = new_info
+                self.mark_metadata_changed(package)
 
         return package
 
@@ -788,6 +869,7 @@ class OpenDataCrawler():
 
         metadata["resources"] = {}
         metadata["crawlerInfo"]["resourcesInfo"] = {}
+        self.mark_metadata_changed(metadata)
 
         for idx, resource in enumerate(distributions):
             base_name = utils.generate_short_filename(f"{metadata['fileName']}_{idx}")
@@ -822,6 +904,11 @@ class OpenDataCrawler():
             metadata["resources"][new_file_name] = parsed_resource
             metadata["crawlerInfo"]["resourcesInfo"][new_file_name] = parsed_info
 
+        self.mark_metadata_changed(metadata)
+
+    def mark_metadata_changed(self, package):
+        package.setdefault("crawlerInfo", {}).setdefault("packageStatus", {})["changed_metadata"] = True
+
     def upsert_package_resource(self, package, old_file_name, resource, resource_info):
         new_file_name = resource.get("fileName") or old_file_name
 
@@ -831,6 +918,7 @@ class OpenDataCrawler():
 
         package["resources"][new_file_name] = resource
         package["crawlerInfo"]["resourcesInfo"][new_file_name] = resource_info
+        self.mark_metadata_changed(package)
         return new_file_name
 
     def infer_resource_extension(self, file_name, media_type):
@@ -888,7 +976,7 @@ class OpenDataCrawler():
             resource_file_name = self.upsert_package_resource(package, resource_file_name, resource, resource_info)
             return resource_file_name, resource, resource_info
 
-        if not resource_info.get("fileStatus", {}).get("fileCrawled"):
+        if not resource.get("mediaType") or not resource_info.get("fileStatus", {}).get("fileCrawled"):
             parsed_resource, parsed_info = self.handle_parse_resource(resource, resource_file_name, metadata_file_name)
             if parsed_resource:
                 resource = parsed_resource
@@ -898,6 +986,31 @@ class OpenDataCrawler():
 
         return resource_file_name, resource, resource_info
 
+    def metadata_needs_rebuild(self, metadata_path):
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                package = json.load(f)
+        except Exception:
+            return True
+
+        if not isinstance(package, dict):
+            return True
+        if not package.get("identifier"):
+            return True
+        if "resources" not in package or not isinstance(package.get("resources"), dict):
+            return True
+        crawler_info = package.get("crawlerInfo")
+        if not isinstance(crawler_info, dict):
+            return True
+        resources_info = crawler_info.get("resourcesInfo")
+        if not isinstance(resources_info, dict):
+            return True
+        package_status = crawler_info.get("packageStatus")
+        if not isinstance(package_status, dict):
+            return True
+        if set(package.get("resources", {}).keys()) != set(resources_info.keys()):
+            return True
+        return False
 
     def process_package_metadata(self, pkg_id, log_indent=1):
         metadata_file_name = f"meta_{utils.generate_short_filename(f'{self.domain}_{pkg_id}')}.json"
@@ -907,8 +1020,17 @@ class OpenDataCrawler():
             logger("WORK", f"Processing metadata for package '{pkg_id}' ('{metadata_file_name}')...", indent=log_indent-1)
 
             if os.path.exists(metadata_path):
-                logger("SKIP", f"Metadata already exists for '{metadata_file_name}', skipping metadata phase", indent=log_indent)
-                return
+                if self.metadata_needs_rebuild(metadata_path):
+                    logger("WARNING", f"Metadata file '{metadata_file_name}' is missing required fields or is invalid, rebuilding it", indent=log_indent)
+                    try:
+                        os.remove(metadata_path)
+                        logger("DEL", f"Deleted invalid metadata file '{metadata_file_name}' before rebuild", indent=log_indent)
+                    except Exception as e:
+                        logger("ERROR", f"Failed to delete invalid metadata file '{metadata_file_name}'", e, indent=log_indent)
+                        return
+                else:
+                    logger("SKIP", f"Metadata already exists for '{metadata_file_name}', skipping metadata phase", indent=log_indent)
+                    return
 
             package = self.get_package(pkg_id, metadata_file_name)
             if not package:
@@ -918,6 +1040,7 @@ class OpenDataCrawler():
                 logger("WARNING", f"No distributions found in package '{pkg_id}'", indent=log_indent)
                 package["crawlerInfo"]["packageMetadataChanges"].update(utils.add_tag_explanations("missing_distributions"))
                 package["crawlerInfo"]["packageStatus"]["packageCompleted"] = datetime.now().isoformat()
+                self.mark_metadata_changed(package)
                 self.save_metadata(package)
                 return
 
@@ -970,6 +1093,7 @@ class OpenDataCrawler():
                 logger("WARNING", f"No distributions found in package metadata '{pkg_id}' ('{metadata_path}')", indent=log_indent)
                 package["crawlerInfo"]["packageMetadataChanges"].update(utils.add_tag_explanations("missing_distributions"))
                 package["crawlerInfo"]["packageStatus"]["packageCompleted"] = datetime.now().isoformat()
+                self.mark_metadata_changed(package)
                 self.save_metadata(package)
                 return
 
@@ -996,6 +1120,9 @@ class OpenDataCrawler():
                     if not resource:
                         continue
 
+                    if utils.is_completed(package, resource_file_name, complete=False, unavailable_permanent=True):
+                        continue
+
                     if self.resource_has_downloaded_file(resource) and self.resource_matches_filters(resource_file_name, resource, log_indent):
                         completed_valid_resources += 1
                         if completed_valid_resources >= self.num_resources:
@@ -1006,11 +1133,25 @@ class OpenDataCrawler():
                     if not resource:
                         continue
 
+                    defer_info = self.should_defer_package_for_url(resource.get("downloadURL"))
+                    if defer_info and "resource_temporarily_unavailable" in resource_info.get("fileInfo", {}):
+                        wait_text = f" in ~{defer_info['wait_seconds']}s" if defer_info["wait_seconds"] else ""
+                        logger("INFO", f"Host '{defer_info['host']}' is showing repeated temporary failures ({defer_info['last_reason']}); package '{pkg_id}' will be retried later in this run{wait_text}", indent=log_indent)
+                        self.save_metadata(package)
+                        return {"status": "deferred", "pkg_id": pkg_id, "host": defer_info["host"]}
+
                     if not self.resource_matches_filters(resource_file_name, resource, log_indent):
                         continue
 
                     _, updated_resource, updated_info = self.process_resource(resource, package, metadata_path)
                     resource_file_name = self.upsert_package_resource(package, resource_file_name, updated_resource, updated_info)
+
+                    defer_info = self.should_defer_package_for_url(updated_resource.get("downloadURL"))
+                    if defer_info and "resource_temporarily_unavailable" in updated_info.get("fileInfo", {}):
+                        wait_text = f" in ~{defer_info['wait_seconds']}s" if defer_info["wait_seconds"] else ""
+                        logger("INFO", f"Host '{defer_info['host']}' is showing repeated temporary failures ({defer_info['last_reason']}); package '{pkg_id}' will be retried later in this run{wait_text}", indent=log_indent)
+                        self.save_metadata(package)
+                        return {"status": "deferred", "pkg_id": pkg_id, "host": defer_info["host"]}
 
                     if self.resource_has_downloaded_file(updated_resource):
                         completed_valid_resources += 1
@@ -1018,13 +1159,23 @@ class OpenDataCrawler():
                             break
 
                 self.save_metadata(package)
-                return
+                return {"status": "done", "pkg_id": pkg_id}
 
             resources_to_process = []
             for file_name in list(package["resources"].keys()):
+                if utils.is_completed(package, file_name, complete=False, unavailable_permanent=True):
+                    continue
+
                 file_name, resource, resource_info = self.prepare_resource_for_processing(package, file_name, metadata_file_name)
                 if not resource:
                     continue
+
+                defer_info = self.should_defer_package_for_url(resource.get("downloadURL"))
+                if defer_info and "resource_temporarily_unavailable" in resource_info.get("fileInfo", {}):
+                    wait_text = f" in ~{defer_info['wait_seconds']}s" if defer_info["wait_seconds"] else ""
+                    logger("INFO", f"Host '{defer_info['host']}' is showing repeated temporary failures ({defer_info['last_reason']}); package '{pkg_id}' will be retried later in this run{wait_text}", indent=log_indent)
+                    self.save_metadata(package)
+                    return {"status": "deferred", "pkg_id": pkg_id, "host": defer_info["host"]}
 
                 if utils.is_completed(package, file_name, unavailable=True):
                     continue
@@ -1046,6 +1197,7 @@ class OpenDataCrawler():
                 self.upsert_package_resource(package, resource_file_name, updated_resource, resource_info)
 
             self.save_metadata(package)
+            return {"status": "done", "pkg_id": pkg_id}
 
         except LowDiskSpaceError:
             raise
@@ -1066,8 +1218,11 @@ class OpenDataCrawler():
         logger("...", f"Saving and processing resource '{resource_file_name}' from package '{metadata_path}'...", indent=log_indent)
         path, tag, e = self.save_dataset(download_url, resource_file_name)
         if path or tag:
+            error_message = utils.extract_error_message(e)
+            tag_values = utils.extract_error_tag_values(e)
             if path:
                 resource["path"] = os.path.relpath(path, start=os.getcwd())
+                self.clear_recovered_resource_tags(resource_info)
                 resource_info["fileStatus"]["fileDownloaded"] = datetime.now().isoformat()
                 logger("SAVE", f"Resource '{resource_file_name}' from package '{metadata_path}' downloaded successfully", indent=log_indent)
 
@@ -1079,14 +1234,16 @@ class OpenDataCrawler():
 
             if tag:
                 if tag == "resource_temporarily_unavailable":
-                    logger("WARNING", f"Retryable error downloading resource '{resource_file_name}'", e, indent=log_indent)
-                    resource_info["fileInfo"].update(utils.add_tag_explanations(tag, {"<metaMediaType>": media_type}))
+                    logger("WARNING", f"Retryable error downloading resource '{resource_file_name}'", error_message, indent=log_indent)
+                    retry_tag_values = {"<metaMediaType>": media_type}
+                    if tag_values:
+                        retry_tag_values.update(tag_values)
+                    resource_info["fileInfo"].update(utils.add_tag_explanations(tag, retry_tag_values))
                 else:
-                    resource_info["fileInfo"].update(utils.add_tag_explanations(tag))
+                    resource_info["fileInfo"].update(utils.add_tag_explanations(tag, tag_values))
                     if tag != "no_data":
-                        logger("WARNING", f"Non-retryable error downloading resource '{resource_file_name}'", e, indent=log_indent)
-
-                resource_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
+                        logger("WARNING", f"Non-retryable error downloading resource '{resource_file_name}'", error_message, indent=log_indent)
+                    resource_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
 
         return resource_file_name, resource, resource_info
 
@@ -1116,8 +1273,7 @@ class OpenDataCrawler():
             resource.pop("delimiter", None)
             resource.pop("schema", None)
             resource.pop("size", None)
-            resource_info["fileInfo"].update(utils.add_tag_explanations("html_page_downloaded"))
-            resource_info["fileMetadataChanges"].update(utils.add_tag_explanations("downloaded_html_page", {
+            resource_info["fileInfo"].update(utils.add_tag_explanations("html_page_downloaded", {
                 "<mediaType_old>": old_media_type,
                 "<fileName_old>": old_file_name,
                 "<mediaType_new>": raw_signature,
@@ -1180,8 +1336,7 @@ class OpenDataCrawler():
                 resource.pop("delimiter", None)
                 resource.pop("schema", None)
                 resource.pop("size", None)
-                resource_info["fileInfo"].update(utils.add_tag_explanations("html_page_downloaded"))
-                resource_info["fileMetadataChanges"].update(utils.add_tag_explanations("downloaded_html_page", {
+                resource_info["fileInfo"].update(utils.add_tag_explanations("html_page_downloaded", {
                     "<mediaType_old>": old_media_type,
                     "<fileName_old>": old_file_name,
                     "<mediaType_new>": raw_signature,
@@ -1267,6 +1422,27 @@ class OpenDataCrawler():
                             logger("OK", f"Schema extracted from '{dataset_path}' (encoding: '{resource['encoding']}', delimiter: '{delimiter}', start_row: {start_row})", indent=4)
                         except Exception as e:
                             logger("ERROR", f"Failed to extract schema from file '{dataset_path}'", [e, traceback.format_exc()], indent=log_indent)
+                            return False
+
+                    if self.partial_dataset_rows is not None:
+                        try:
+                            temp_path, kept_rows, total_rows = utils.trim_tabular_data_rows(
+                                dataset_path,
+                                resource["encoding"],
+                                self.partial_dataset_rows,
+                                start_row=start_row or 0,
+                            )
+                            if temp_path:
+                                shutil.move(temp_path, dataset_path)
+                                removed_rows = total_rows - kept_rows
+                                logger("FIX", f"Stored partial tabular dataset '{dataset_path}' after full download and post-processing: kept {kept_rows} data rows out of {total_rows} total data rows", indent=log_indent)
+                                resource_info["binaryFileChanges"].update(utils.add_tag_explanations("partial_dataset_trimmed", {
+                                    "<kept_rows>": kept_rows,
+                                    "<total_rows>": total_rows,
+                                    "<removed_rows>": removed_rows,
+                                }))
+                        except Exception as e:
+                            logger("ERROR", f"Failed to trim tabular file '{dataset_path}' to {self.partial_dataset_rows} data rows", [e, traceback.format_exc()], indent=log_indent)
                             return False
                 else:
                     resource_info["fileInfo"].update(utils.add_tag_explanations("no_delimiter_detected"))

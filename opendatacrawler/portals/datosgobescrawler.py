@@ -3,7 +3,7 @@ import json
 import os
 import re
 import sys
-from typing import Any, cast
+from typing import Any
 from urllib.parse import urlparse
 
 import requests
@@ -58,7 +58,7 @@ class DatosGobEsCrawler:
         if not matches:
             return []
 
-        pending_title = {}
+        pending_title: dict[str, list[str]] = {}
         current: dict[str, Any] | None = None
         distributions = []
 
@@ -100,8 +100,7 @@ class DatosGobEsCrawler:
             if key.startswith("TITLE"):
                 lang = key.split("_", 1)[1].lower() if "_" in key else "es"
                 if current is not None and not current.get("accessURL"):
-                    current_dist = cast(Any, current)
-                    target = current_dist["title"]
+                    target = current["title"]
                 else:
                     target = pending_title
                 add_title(target, lang, raw_val)
@@ -118,12 +117,10 @@ class DatosGobEsCrawler:
                 pending_title = {}
             elif key == "MEDIA_TYPE":
                 if current is not None and raw_val:
-                    current_dist = cast(Any, current)
-                    current_dist["format"] = {"value": raw_val}
+                    current["format"] = {"value": raw_val}
             elif key == "RELATION":
                 if current is not None and raw_val:
-                    current_dist = cast(Any, current)
-                    current_dist["relation"] = raw_val
+                    current["relation"] = raw_val
 
         finalize(current)
         return distributions
