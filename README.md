@@ -232,7 +232,8 @@ And don't forget to give the project a star! Thanks for your support! 🌟
         # Optional: authentication token if the portal requires it
         # self.token = utils.AUTH_TOKENS.get(<PortalName>)
   ```
-  > Note: If the portal requires authentication, make sure to define its token in the `config.ini` file (see [Requirements](#requirements))
+  > [!NOTE]
+  > If the portal requires authentication, make sure to define its token in the `config.ini` file (see [Requirements](#requirements))
 
 3. Implement the required methods:
   - **`get_package_list(self)`**:  
@@ -252,7 +253,8 @@ And don't forget to give the project a star! Thanks for your support! 🌟
 
 4. Use helper functions from the `opendatacrawler/utils/` package and built-in logging:
   - **Network calls**: `utils.make_request(url, self.user_agent, headers=...)`  
-    > Note: the function may rotate the `user_agent`. Always capture and reuse the returned value.
+    > [!NOTE]
+    >  The function may rotate the `user_agent`. Always capture and reuse the returned value.
 
   - **File helpers**: `utils.generate_short_filename()`, `utils.get_mime_extension()`, `utils.get_extension_mime()`...
 
@@ -274,7 +276,8 @@ And don't forget to give the project a star! Thanks for your support! 🌟
   - `fileName`: the filename, including its extension, to use when saving the resource locally.
   - `mediaType`: the MIME type of the resource, which should be used to guess the proper file extension via `utils.get_extension_mime()`.
 
-  > Note: You don't need to include all possible DCAT fields, just the ones available in the portal. However, the structure of the returned metadata must remain consistent.
+  > [!NOTE]
+  > You don't need to include all possible DCAT fields, just the ones available in the portal. However, the structure of the returned metadata must remain consistent.
 
 6. Register portal detection:  
   Update the function `detect_dms()` in `odcrawler.py` to detect your portal and return the correct crawler instance.
