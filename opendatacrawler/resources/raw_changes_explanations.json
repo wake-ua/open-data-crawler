@@ -82,13 +82,14 @@
         }
     },
     "partial_dataset_trimmed": {
-        "tag_placeholders": ["<kept_rows>", "<total_rows>", "<removed_rows>"],
+        "tag_placeholders": ["<kept_rows>", "<total_rows>", "<removed_rows>", "<sampling_details>"],
         "tag_explanation": {
-            "reason": "The dataset was fully downloaded and post-processed, then intentionally truncated to <kept_rows> data rows out of <total_rows> total data rows to store a partial local copy while preserving the detected header and any initial non-data lines",
+            "reason": "The dataset was fully downloaded and post-processed, then intentionally truncated to <kept_rows> data rows out of <total_rows> total data rows by keeping <sampling_details> to store a partial local copy while preserving the detected header and any initial non-data lines",
             "values": {
                 "kept_rows": "<kept_rows>",
                 "total_rows": "<total_rows>",
-                "removed_rows": "<removed_rows>"
+                "removed_rows": "<removed_rows>",
+                "sampling_details": "<sampling_details>"
             }
         }
     }

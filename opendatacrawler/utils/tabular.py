@@ -2,6 +2,7 @@ import codecs
 import mimetypes
 import mmap
 import os
+import random
 import re
 import statistics
 import tempfile
@@ -369,40 +370,69 @@ def fix_tabular_data(path, encoding):
     return temp_path, reconstructed_lines, outer_quotes_removed, inner_quotes_fixed, delimiter
 
 
-def trim_tabular_data_rows(path, encoding, max_data_rows, start_row=0):
+def trim_tabular_data_rows(path, encoding, max_data_rows, start_row=0, sample_mode="first", sample_seed=None):
     if max_data_rows is None or max_data_rows < 0:
         return None, 0, 0
 
     temp_path = None
     try:
-        with open(path, "r", encoding=encoding, newline="") as f:
-            lines = f.readlines()
+        sample_mode = str(sample_mode or "first").strip().lower()
+        header_lines = []
+        kept_lines = []
+        reservoir = []
+        rng = random.Random(sample_seed) if sample_mode == "random" else None
+        total_data_rows = 0
+        nonempty_before_header = 0
+        header_found = False
 
-        nonempty_indices = [idx for idx, line in enumerate(lines) if line.strip()]
-        if not nonempty_indices or start_row >= len(nonempty_indices):
+        with open(path, "r", encoding=encoding, newline="") as f:
+            for line in f:
+                if not header_found:
+                    header_lines.append(line)
+                    if not line.strip():
+                        continue
+
+                    if nonempty_before_header == start_row:
+                        header_found = True
+                        continue
+
+                    nonempty_before_header += 1
+                    continue
+
+                if not line.strip():
+                    continue
+
+                row_index = total_data_rows
+                total_data_rows += 1
+
+                if sample_mode == "random":
+                    if len(reservoir) < max_data_rows:
+                        reservoir.append((row_index, line))
+                    else:
+                        replace_at = rng.randint(0, row_index)
+                        if replace_at < max_data_rows:
+                            reservoir[replace_at] = (row_index, line)
+                elif len(kept_lines) < max_data_rows:
+                    kept_lines.append(line)
+
+        if not header_found:
             return None, 0, 0
 
-        header_idx = nonempty_indices[start_row]
-        data_lines = lines[header_idx + 1:]
-        total_data_rows = sum(1 for line in data_lines if line.strip())
-
-        if max_data_rows >= total_data_rows:
-            return None, total_data_rows, total_data_rows
-
-        kept_data_rows = 0
-        trimmed_lines = lines[:header_idx + 1]
-        for line in data_lines:
-            if line.strip():
-                if kept_data_rows >= max_data_rows:
-                    break
-                kept_data_rows += 1
-            trimmed_lines.append(line)
+        if sample_mode == "random":
+            if max_data_rows >= total_data_rows:
+                return None, total_data_rows, total_data_rows
+            selected_lines = [line for _, line in sorted(reservoir, key=lambda item: item[0])]
+        else:
+            if max_data_rows >= total_data_rows:
+                return None, total_data_rows, total_data_rows
+            selected_lines = kept_lines
 
         with tempfile.NamedTemporaryFile(mode="w", encoding=encoding, newline="", delete=False, prefix=TABULAR_TEMP_PREFIX) as temp_out:
             temp_path = temp_out.name
-            temp_out.writelines(trimmed_lines)
+            temp_out.writelines(header_lines)
+            temp_out.writelines(selected_lines)
 
-        return temp_path, kept_data_rows, total_data_rows
+        return temp_path, len(selected_lines), total_data_rows
     except Exception:
         if temp_path and os.path.exists(temp_path):
             try:

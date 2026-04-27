@@ -16,13 +16,12 @@ PERMANENT_UNAVAILABLE_TAGS = {
     "forbidden_resource",
     "ssl_error",
     "invalid_request",
+    "invalid_download_url",
     "invalid_redirect_location",
 }
 
 
 def package_requires_retry(failed, pending):
-    # Packages whose remaining resources are only permanently unavailable are already
-    # exhausted for the current configuration and should not be re-queued forever.
     return bool(failed or pending)
 
 

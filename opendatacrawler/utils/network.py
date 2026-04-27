@@ -1,14 +1,16 @@
 import json
 import http.client
+import ipaddress
 import re
 import socket
 import ssl
 import time
 import xml.etree.ElementTree as ET
 from io import BytesIO
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import requests
+from urllib3.exceptions import LocationParseError
 from url_normalize import url_normalize
 from w3lib.url import url_query_cleaner
 
@@ -123,8 +125,60 @@ def build_invalid_redirect_error(url, decode_error, headers=None, params=None, j
     return tag, _build_error_details(message, tag_values)
 
 
+def validate_http_download_url(url):
+    if not isinstance(url, str) or not url.strip():
+        return False, "missing download URL"
+
+    parsed = urlparse(url.strip())
+    if parsed.scheme not in {"http", "https"}:
+        return False, f"unsupported URL scheme '{parsed.scheme or 'missing'}'"
+
+    if not parsed.netloc or not parsed.hostname:
+        return False, "missing URL host"
+
+    hostname = parsed.hostname.strip()
+    decoded_host = unquote(hostname)
+    if any(token in decoded_host for token in ("=", ";")):
+        return False, "host looks like a connection string instead of a valid web host"
+
+    if any(ch.isspace() for ch in decoded_host):
+        return False, "host contains whitespace"
+
+    try:
+        ipaddress.ip_address(hostname)
+        return True, None
+    except ValueError:
+        pass
+
+    labels = hostname.rstrip(".").split(".")
+    if any(not label or len(label) > 63 for label in labels):
+        return False, "host contains empty or overlong labels"
+
+    valid_label = re.compile(r"^[A-Za-z0-9-]+$")
+    if not all(valid_label.match(label) for label in labels):
+        return False, "host contains invalid characters"
+
+    return True, None
+
+
+def build_invalid_download_url_error(url, reason):
+    tag = "invalid_download_url"
+    tag_explanation = CRAWLER_CHANGES_INFO.get(tag, {}).get("tag_explanation", {}).get("reason", "Unknown reason")
+    tag_values = {
+        "<download_url>": url,
+        "<validation_reason>": str(reason),
+    }
+    message = f"{tag_explanation} ({url}) - [{reason}]"
+    return tag, _build_error_details(message, tag_values)
+
+
 def make_request(url, current_agent, headers=None, params=None, max_sec=None, stream=False, sleep_time=3, return_tag=False, rate_controller=None):
     headers = headers.copy() if headers else {}
+
+    is_valid_url, invalid_reason = validate_http_download_url(url)
+    if not is_valid_url:
+        tag, error_details = build_invalid_download_url_error(url, invalid_reason)
+        return (None, current_agent, tag, error_details) if return_tag else (None, current_agent)
 
     if rate_controller is not None and hasattr(rate_controller, "is_host_ignored"):
         ignored_host = rate_controller.is_host_ignored(url)
@@ -199,6 +253,11 @@ def make_request(url, current_agent, headers=None, params=None, max_sec=None, st
                     if rate_controller is not None and hasattr(rate_controller, "register_host_result"):
                         rate_controller.register_host_result(url, tag, e)
                     return (None, user_agent, tag, error_details) if return_tag else (None, user_agent)
+                except (requests.exceptions.InvalidURL, requests.exceptions.InvalidSchema, requests.exceptions.MissingSchema, LocationParseError) as e:
+                    tag, error_details = build_invalid_download_url_error(url, e)
+                    if rate_controller is not None and hasattr(rate_controller, "register_host_result"):
+                        rate_controller.register_host_result(url, tag, e)
+                    return (None, user_agent, tag, error_details) if return_tag else (None, user_agent)
                 except requests.exceptions.RequestException as e:
                     tag = get_error_tag_from_exception(e)
                     if rate_controller is not None and hasattr(rate_controller, "register_host_result"):
@@ -220,6 +279,11 @@ def make_request(url, current_agent, headers=None, params=None, max_sec=None, st
 
 def make_request_post(url, current_agent, headers=None, json_body=None, max_sec=None, stream=False, sleep_time=3, return_tag=False, rate_controller=None):
     headers = headers.copy() if headers else {}
+
+    is_valid_url, invalid_reason = validate_http_download_url(url)
+    if not is_valid_url:
+        tag, error_details = build_invalid_download_url_error(url, invalid_reason)
+        return (None, current_agent, tag, error_details) if return_tag else (None, current_agent)
 
     if rate_controller is not None and hasattr(rate_controller, "is_host_ignored"):
         ignored_host = rate_controller.is_host_ignored(url)
@@ -301,6 +365,11 @@ def make_request_post(url, current_agent, headers=None, json_body=None, max_sec=
                     if rate_controller is not None and hasattr(rate_controller, "register_host_result"):
                         rate_controller.register_host_result(url, tag, e)
                     return (None, user_agent, tag, error_details) if return_tag else (None, user_agent)
+                except (requests.exceptions.InvalidURL, requests.exceptions.InvalidSchema, requests.exceptions.MissingSchema, LocationParseError) as e:
+                    tag, error_details = build_invalid_download_url_error(url, e)
+                    if rate_controller is not None and hasattr(rate_controller, "register_host_result"):
+                        rate_controller.register_host_result(url, tag, e)
+                    return (None, user_agent, tag, error_details) if return_tag else (None, user_agent)
                 except requests.exceptions.RequestException as e:
                     tag = get_error_tag_from_exception(e)
                     if rate_controller is not None and hasattr(rate_controller, "register_host_result"):
@@ -337,6 +406,9 @@ def get_error_tag_from_exception(e):
 
     if isinstance(e, socket.gaierror):
         return "unresolvable_domain"
+
+    if isinstance(e, (requests.exceptions.InvalidURL, requests.exceptions.InvalidSchema, requests.exceptions.MissingSchema, LocationParseError)):
+        return "invalid_download_url"
 
     if isinstance(e, (
         requests.exceptions.ConnectionError,

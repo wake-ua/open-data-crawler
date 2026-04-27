@@ -53,6 +53,8 @@ class OpenDataCrawler():
         if partial_dataset_rows is not None and partial_dataset_rows <= 0:
             partial_dataset_rows = 100
         self.partial_dataset_rows = partial_dataset_rows
+        self.partial_dataset_sample_mode = "first"
+        self.partial_dataset_random_seed = None
         self.avoid_data = avoid_data
         self.num_resources = num_resources
 
@@ -779,7 +781,22 @@ class OpenDataCrawler():
             meta_media_type = reparse_data.get("metaMediaType") or meta_media_type
 
         if not resource or not resource.get("downloadURL"):
-            logger("ERROR", f"Missing or invalid download URL for resource '{base_name}'", indent=log_indent)
+            raw_download_url = None
+            if isinstance(resource_meta, dict):
+                raw_download_url = resource_meta.get("downloadURL")
+                if not raw_download_url:
+                    raw_access_url = resource_meta.get("access_url")
+                    if isinstance(raw_access_url, list) and raw_access_url:
+                        raw_download_url = raw_access_url[0]
+                    elif isinstance(raw_access_url, str):
+                        raw_download_url = raw_access_url
+
+            resource_crawler_info["fileInfo"].update(utils.add_tag_explanations("invalid_download_url", {
+                "<download_url>": raw_download_url or "(missing)",
+                "<validation_reason>": "missing or unsupported download URL in metadata",
+            }))
+            resource_crawler_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
+            logger("WARNING", f"Missing or unsupported download URL for resource '{base_name}'", indent=log_indent)
             return resource, resource_crawler_info
 
         response, self.user_agent, error_tag, e = self.make_request(resource["downloadURL"], self.user_agent, return_tag=True, max_sec=self.max_sec, stream=True)
@@ -1426,20 +1443,31 @@ class OpenDataCrawler():
 
                     if self.partial_dataset_rows is not None:
                         try:
+                            sample_mode = str(self.partial_dataset_sample_mode or "first").strip().lower()
+                            if sample_mode not in {"first", "random"}:
+                                sample_mode = "first"
+                            sample_seed = self.partial_dataset_random_seed if sample_mode == "random" else None
                             temp_path, kept_rows, total_rows = utils.trim_tabular_data_rows(
                                 dataset_path,
                                 resource["encoding"],
                                 self.partial_dataset_rows,
                                 start_row=start_row or 0,
+                                sample_mode=sample_mode,
+                                sample_seed=sample_seed,
                             )
                             if temp_path:
                                 shutil.move(temp_path, dataset_path)
                                 removed_rows = total_rows - kept_rows
-                                logger("FIX", f"Stored partial tabular dataset '{dataset_path}' after full download and post-processing: kept {kept_rows} data rows out of {total_rows} total data rows", indent=log_indent)
+                                if sample_mode == "random":
+                                    sampling_details = f"a reproducible random sample (seed: {sample_seed})" if sample_seed is not None else "a random sample"
+                                else:
+                                    sampling_details = "the first rows"
+                                logger("FIX", f"Stored partial tabular dataset '{dataset_path}' after full download and post-processing: kept {kept_rows} data rows out of {total_rows} total data rows using {sampling_details}", indent=log_indent)
                                 resource_info["binaryFileChanges"].update(utils.add_tag_explanations("partial_dataset_trimmed", {
                                     "<kept_rows>": kept_rows,
                                     "<total_rows>": total_rows,
                                     "<removed_rows>": removed_rows,
+                                    "<sampling_details>": sampling_details,
                                 }))
                         except Exception as e:
                             logger("ERROR", f"Failed to trim tabular file '{dataset_path}' to {self.partial_dataset_rows} data rows", [e, traceback.format_exc()], indent=log_indent)

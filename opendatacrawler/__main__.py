@@ -48,15 +48,21 @@ def apply_portal_runtime_config(crawler, args):
         reqs_per_sec = utils.get_config_option(section, "reqs_per_sec", cast=float, fallback=crawler.config_reqs_per_sec)
         crawler.init_rate_limit(reqs_per_sec=reqs_per_sec)
 
-    partial_enabled = args.get("partial_dataset")
-    if partial_enabled is None:
-        partial_enabled = resolve_portal_option(section, "partial_dataset", bool, False)
-
-    partial_dataset_rows = resolve_portal_option(section, "partial_dataset_rows", int, 100)
-    if partial_dataset_rows is None or partial_dataset_rows <= 0:
-        partial_dataset_rows = 100
-
-    crawler.partial_dataset_rows = partial_dataset_rows if partial_enabled else None
+    if args.get("partial_dataset") is True:
+        partial_dataset_rows = resolve_portal_option(section, "partial_dataset_rows", int, crawler.partial_dataset_rows or 100)
+        if partial_dataset_rows is None or partial_dataset_rows <= 0:
+            partial_dataset_rows = 100
+        crawler.partial_dataset_rows = partial_dataset_rows
+        partial_dataset_sample_mode = resolve_portal_option(section, "partial_dataset_sample_mode", str, crawler.partial_dataset_sample_mode or "first")
+        partial_dataset_sample_mode = str(partial_dataset_sample_mode or "first").strip().lower()
+        if partial_dataset_sample_mode not in {"first", "random"}:
+            partial_dataset_sample_mode = "first"
+        crawler.partial_dataset_sample_mode = partial_dataset_sample_mode
+        crawler.partial_dataset_random_seed = resolve_portal_option(section, "partial_dataset_random_seed", int, crawler.partial_dataset_random_seed)
+    else:
+        crawler.partial_dataset_rows = None
+        crawler.partial_dataset_sample_mode = "first"
+        crawler.partial_dataset_random_seed = None
 
 def main():
     parser = argparse.ArgumentParser()
@@ -73,7 +79,7 @@ def main():
     parser.add_argument("--reqs-per-sec", "--reqs_per_sec", dest="reqs_per_sec", type=float, required=False,
                         help="General requests-per-second limit for the crawler (e.g. --reqs-per-sec 1.5)")
     parser.add_argument("-pd", "--partial-dataset", "--partial_dataset", dest="partial_dataset", required=False, action=argparse.BooleanOptionalAction,
-                        help="Enable partial local copies for CSV/TSV datasets after full processing using the row limit configured in config.ini")
+                        help="Enable partial local copies for CSV/TSV datasets after full processing using the row limit and sample mode configured in config.ini")
     parser.add_argument("-id", "--id-dataset", "--id_dataset", dest="id_dataset", nargs="+", required=False,
                         help="Save the dataset with that id (Ex. -id edu-alu-fpa-2021) (default: all)")
     parser.add_argument("-nd", "--no-dataset", "--no_dataset", dest="no_dataset", required=False, action=argparse.BooleanOptionalAction,

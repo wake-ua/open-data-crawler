@@ -117,8 +117,9 @@ To set up the project locally, follow these steps:
   * Example for partial tabular downloads:
     ```ini
     [defaults]
-    partial_dataset = true
     partial_dataset_rows = 100
+    partial_dataset_sample_mode = first
+    ; partial_dataset_random_seed = 42
     ```
 
 > [!IMPORTANT]
@@ -177,17 +178,18 @@ python opendatacrawler -d https://datos.gob.es --save-raw-data
 ```
 python opendatacrawler -d https://datos.gob.es --no-extract-schema
 ```
-#### Store partial local copies of CSV/TSV datasets using the row limit defined in `config.ini`:
+#### Store partial local copies of CSV/TSV datasets using the sampling settings defined in `config.ini`:
 ```ini
 [defaults]
-partial_dataset = true
 partial_dataset_rows = 100
+partial_dataset_sample_mode = first
+; partial_dataset_random_seed = 42
 ```
 ```sh
 python opendatacrawler -d https://datos.gob.es --partial-dataset
 ```
 > [!NOTE]
-> `--partial-dataset` only enables the feature. The number of retained data rows is read from `config.ini` (`partial_dataset_rows`), preserving any initial non-data lines and the detected header in CSV/TSV files after full download and processing.
+> `--partial-dataset` enables the feature for the current run. The number of retained data rows is read from `config.ini` (`partial_dataset_rows`), and `partial_dataset_sample_mode` controls whether the crawler keeps the first rows or a random sample after full download and processing. If `partial_dataset_random_seed` is set, the random sample is reproducible across runs.
 
 <!-- _For more examples, see the [Documentation](https://example.com)_ -->
 

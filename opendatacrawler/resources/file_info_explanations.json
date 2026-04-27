@@ -32,6 +32,16 @@
             "reason": "The server rejected the request as invalid or malformed (HTTP 400 - Bad Request)"
         }
     },
+    "invalid_download_url": {
+        "tag_placeholders": ["<download_url>", "<validation_reason>"],
+        "tag_explanation": {
+            "reason": "The resource metadata pointed to an invalid or unsupported download URL ('<download_url>'), so the crawler could not access it as a normal web resource",
+            "values": {
+                "downloadURL": "<download_url>",
+                "validationReason": "<validation_reason>"
+            }
+        }
+    },
     "invalid_redirect_location": {
         "tag_placeholders": ["<redirect_url>", "<location_header>", "<decode_error>"],
         "tag_explanation": {
