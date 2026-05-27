@@ -3,6 +3,7 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
@@ -20,7 +21,6 @@ class DatosGobEsCrawler:
     CATALOG_PACKAGE_IDS = {
         "ea0044367-catalogo-de-datos-de-datos-gob-es",
     }
-
     def __init__(self, odcrawler):
         self.odcrawler = odcrawler
         self._catalog_rows_by_id = None
@@ -137,6 +137,69 @@ class DatosGobEsCrawler:
                 return raw_value.rstrip("/").split("/")[-1]
         return None
 
+    def _normalize_catalog_timestamp(self, value):
+        if not value:
+            return None
+
+        text = str(value).strip()
+        if not text:
+            return None
+
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        elif re.search(r"[+-]\d{4}$", text):
+            text = f"{text[:-5]}{text[-5:-2]}:{text[-2:]}"
+
+        try:
+            dt = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+        return dt
+
+    def _get_metadata_path(self, package_id):
+        metadata_file_name = f"meta_{utils.generate_short_filename(f'{self.odcrawler.domain}_{package_id}')}.json"
+        return metadata_file_name, os.path.join(self.odcrawler.save_path, metadata_file_name)
+
+    def _load_local_package_modified(self, package_id):
+        metadata_file_name, metadata_path = self._get_metadata_path(package_id)
+        if not os.path.exists(metadata_path):
+            return None, False, False
+
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                metadata = json.load(f)
+            return metadata.get("modified"), True, False
+        except Exception as e:
+            logger("WARNING", f"Could not read local metadata file '{metadata_file_name}' while checking datos.gob.es updates; the package will be refreshed", e)
+            return None, True, True
+
+    def _detect_packages_requiring_refresh(self, rows_by_id):
+        refresh_packages = []
+        for package_id, row in (rows_by_id or {}).items():
+            remote_modified = self._normalize_catalog_timestamp(row.get("FECHA DE ÚLTIMA MODIFICACIÓN"))
+            if remote_modified is None:
+                continue
+
+            local_modified, local_exists, local_read_error = self._load_local_package_modified(package_id)
+            if not local_exists:
+                continue
+            if local_read_error:
+                refresh_packages.append(package_id)
+                continue
+
+            local_modified = self._normalize_catalog_timestamp(local_modified)
+            if local_modified is None or remote_modified > local_modified:
+                refresh_packages.append(package_id)
+
+        if refresh_packages:
+            logger("INFO", f"Detected {len(refresh_packages)} existing datos.gob.es package(s) with catalog updates; they will be refreshed in this run", level="print")
+
+        return refresh_packages
+
     def _load_catalog_rows(self):
         if self._catalog_rows_by_id is not None:
             return self._catalog_rows_by_id
@@ -229,7 +292,12 @@ class DatosGobEsCrawler:
         return self._catalog_rows_by_id
 
     def get_package_list(self):
-        ids = list(self._load_catalog_rows().keys())
+        rows_by_id = self._load_catalog_rows()
+        if self.odcrawler.check_remote_updates:
+            self.odcrawler.set_packages_requiring_refresh(self._detect_packages_requiring_refresh(rows_by_id))
+        else:
+            self.odcrawler.set_packages_requiring_refresh([])
+        ids = list(rows_by_id.keys())
         logger("OK", f"Retrieved {len(ids)} packages from '{self.odcrawler.get_print_domain()}'", level="print")
         return ids
 
@@ -244,10 +312,74 @@ class DatosGobEsCrawler:
             resource["name"] = utils.extract_multilang_field(title, "_lang", "_value")
 
         resource["downloadURL"] = utils.fix_url(resource_meta.get("accessURL") or resource_meta.get("downloadURL"))
+        resource["modified"] = resource_meta.get("modified")
 
         meta_media_type = resource_meta.get("format", {}).get("value")
 
         return resource, meta_media_type
+
+    def _build_resource_match_signature(self, resource):
+        if not isinstance(resource, dict):
+            return resource
+        name = resource.get("name")
+        if isinstance(name, dict):
+            name = json.dumps(utils.sanitize_json_keys(name), ensure_ascii=False, sort_keys=True)
+        return (
+            resource.get("downloadURL"),
+            resource.get("mediaType"),
+            resource.get("modified"),
+            name,
+        )
+
+    def merge_existing_package_state(self, existing_package, package):
+        if not isinstance(existing_package, dict) or not isinstance(package, dict):
+            return package
+
+        existing_resources = existing_package.get("resources", {})
+        existing_resources_info = existing_package.get("crawlerInfo", {}).get("resourcesInfo", {})
+        new_resources = package.get("resources", {})
+        new_resources_info = package.get("crawlerInfo", {}).get("resourcesInfo", {})
+
+        if not isinstance(existing_resources, dict) or not isinstance(existing_resources_info, dict):
+            return package
+        if not isinstance(new_resources, dict) or not isinstance(new_resources_info, dict):
+            return package
+
+        existing_by_signature = {}
+        for old_file_name, old_resource in existing_resources.items():
+            if not isinstance(old_resource, dict):
+                continue
+            signature = self._build_resource_match_signature(old_resource)
+            if signature not in existing_by_signature:
+                old_info = existing_resources_info.get(old_file_name, utils.init_metadata(package=False, crawled=False))
+                existing_by_signature[signature] = (old_file_name, old_resource, old_info)
+
+        merged_resources = {}
+        merged_resources_info = {}
+        preserved_resources = 0
+
+        for new_file_name, new_resource in new_resources.items():
+            signature = self._build_resource_match_signature(new_resource)
+            entry = existing_by_signature.get(signature)
+            if not entry:
+                merged_resources[new_file_name] = new_resource
+                merged_resources_info[new_file_name] = new_resources_info.get(new_file_name, utils.init_metadata(package=False, crawled=False))
+                continue
+
+            _, old_resource, old_info = entry
+            merged_resource = self.odcrawler.preserve_local_resource_fields(old_resource, new_resource)
+
+            merged_resources[new_file_name] = merged_resource
+            merged_resources_info[new_file_name] = old_info
+            preserved_resources += 1
+
+        package["resources"] = merged_resources
+        package["crawlerInfo"]["resourcesInfo"] = merged_resources_info
+
+        if preserved_resources:
+            logger("INFO", f"datos.gob.es refresh preserved local state for {preserved_resources} unchanged resource(s) in package '{package.get('identifier')}'", indent=2)
+
+        return package
 
     def get_package(self, package_id, metadata_file_name):
         row = self._load_catalog_rows().get(package_id)

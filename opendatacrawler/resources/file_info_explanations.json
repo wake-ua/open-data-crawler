@@ -53,6 +53,18 @@
             }
         }
     },
+    "too_many_redirects": {
+        "tag_placeholders": ["<redirect_url>", "<final_url>", "<redirect_count>", "<location_header>"],
+        "tag_explanation": {
+            "reason": "The resource URL '<redirect_url>' entered a redirect loop or an excessive redirect chain, so the crawler stopped after <redirect_count> redirects instead of following it indefinitely",
+            "values": {
+                "redirectURL": "<redirect_url>",
+                "finalURL": "<final_url>",
+                "redirectCount": "<redirect_count>",
+                "locationHeader": "<location_header>"
+            }
+        }
+    },
     "ssl_error": {
         "tag_placeholders": [],
         "tag_explanation": {
@@ -130,6 +142,12 @@
         "tag_placeholders": [],
         "tag_explanation": {
             "reason": "The crawler skipped this resource because the server-declared file size exceeds the configured maximum download size"
+        }
+    },
+    "dataset_skipped_by_config": {
+        "tag_placeholders": [],
+        "tag_explanation": {
+            "reason": "The crawler intentionally skipped downloading and parsing this resource because the run was configured to store metadata only without dataset files"
         }
     }
 }

@@ -82,7 +82,7 @@ def main():
                         help="Enable partial local copies for CSV/TSV datasets after full processing using the row limit and sample mode configured in config.ini")
     parser.add_argument("-id", "--id-dataset", "--id_dataset", dest="id_dataset", nargs="+", required=False,
                         help="Save the dataset with that id (Ex. -id edu-alu-fpa-2021) (default: all)")
-    parser.add_argument("-nd", "--no-dataset", "--no_dataset", dest="no_dataset", required=False, action=argparse.BooleanOptionalAction,
+    parser.add_argument("-nd", "--no-dataset", "--no_dataset", dest="no_dataset", required=False, action="store_true",
                         help="No save the dataset (default: save)")
     parser.add_argument("-n", "--max-packages", "--max_packages", dest="max_packages", type=int, required=False,
                         help="Maximum number of packages to process (default: all)")
@@ -104,6 +104,8 @@ def main():
                         help="Store original raw metadata returned by the source portal (default: disabled)")
     parser.add_argument("--extract-schema", "--extract_schema", dest="extract_schema", required=False, action=argparse.BooleanOptionalAction,
                         help="Extract tabular schema from CSV/TSV files (default: enabled)")
+    parser.add_argument("--skip-updates-check", "--skip_updates_check", dest="skip_updates_check", required=False, action="store_true",
+                        help="Skip checking whether already-downloaded packages changed remotely; only resume incomplete packages and process unseen packages")
 
     args = vars(parser.parse_args())
 
@@ -131,9 +133,12 @@ def main():
     ignore_hosts = args.get("ignore_hosts") or []
     save_raw_data = resolve_option(args.get("save_raw_data"), "defaults", "save_raw_data", bool, False)
     extract_schema = resolve_option(args.get("extract_schema"), "defaults", "extract_schema", bool, True)
+    skip_updates_check = bool(args.get("skip_updates_check"))
 
     if num_resources == 0:
         avoid_data = True
+        num_resources = None
+    elif avoid_data:
         num_resources = None
 
     utils.print_intro()
@@ -157,6 +162,7 @@ def main():
                 ignore_hosts=ignore_hosts,
                 save_raw_data=save_raw_data,
                 extract_schema=extract_schema,
+                check_remote_updates=not skip_updates_check,
             )
 
             if not crawler.dms:
@@ -215,6 +221,7 @@ def main():
                     accepted_types=d_types,
                     num_resources=crawler.num_resources,
                     max_workers=crawler.max_threads,
+                    avoid_data=crawler.avoid_data,
                 )
 
                 if resume_data:
@@ -230,21 +237,31 @@ def main():
                 logger("...", f"Obtaining packages from '{crawler.get_print_domain()}'...", level="print")
                 if replace and id_dataset:
                     crawler.force_replace_package(id_dataset)
+                    for pkg_id in id_dataset:
+                        resume_data.pop(pkg_id, None)
+                        incomplete_before_pkgs.discard(pkg_id)
+                        crawler.clear_package_refresh_requirement(pkg_id)
 
                 packages = id_dataset if id_dataset else crawler.get_package_list()
-                new_packages = [pkg for pkg in packages if pkg not in resume_data]
-                incomplete_packages = [pkg for pkg in packages if pkg in incomplete_before_pkgs]
+                refresh_candidates = crawler.get_packages_requiring_refresh()
+                refresh_packages = [pkg for pkg in packages if pkg in refresh_candidates]
+                new_packages = [pkg for pkg in packages if pkg not in resume_data and pkg not in refresh_candidates]
+                incomplete_packages = [pkg for pkg in packages if pkg in incomplete_before_pkgs and pkg not in refresh_candidates]
 
                 if max_packages:
                     new_packages = new_packages[:max_packages]
 
-                if new_packages or incomplete_packages:
-                    total_to_process = len(new_packages) + len(incomplete_packages)
-
+                if new_packages or refresh_packages or incomplete_packages:
+                    total_to_process = len(new_packages) + len(refresh_packages) + len(incomplete_packages)
+                    queued_parts = []
+                    if new_packages:
+                        queued_parts.append(f"{len(new_packages)} new packages")
+                    if refresh_packages:
+                        queued_parts.append(f"{len(refresh_packages)} updated packages")
                     if incomplete_packages:
-                        logger("...",f"Queued {total_to_process} packages ({len(new_packages)} new packages and {len(incomplete_packages)} incomplete packages)", level="print")
-                    else:
-                        logger("...", f"Queued {total_to_process} packages for processing", level="print")
+                        queued_parts.append(f"{len(incomplete_packages)} incomplete packages")
+
+                    logger("...", f"Queued {total_to_process} packages ({', '.join(queued_parts)})", level="print")
 
                     logger(None, "=" * 80, level="print")
 
@@ -254,6 +271,10 @@ def main():
                     if crawler.serial_metadata_phase:
                         crawler.max_threads = 1
 
+                    if refresh_packages:
+                        logger("...", f"Refreshing metadata for {len(refresh_packages)} updated packages...", level="print")
+                        crawler.process_packages_batch(refresh_packages, phase="metadata", tqdm_initial=0, tqdm_desc="Refreshing metadata", tqdm_colour="cyan", downloaded_before_res=downloaded_before_res, failed_before_res=failed_before_res, unavailable_permanent_before_res=unavailable_before_res)
+
                     if new_packages:
                         logger("...", f"Collecting metadata for {len(new_packages)} new packages...", level="print")
                         crawler.process_packages_batch(new_packages, phase="metadata", tqdm_initial=0, tqdm_desc="Collecting metadata", tqdm_colour="blue", downloaded_before_res=downloaded_before_res, failed_before_res=failed_before_res, unavailable_permanent_before_res=unavailable_before_res)
@@ -262,19 +283,27 @@ def main():
 
                     # ==================================================
 
-                    if new_packages:
-                        logger("...", f"Processing resources for {len(new_packages)} new packages...", level="print")
-                        crawler.process_packages_batch(new_packages, phase="resources", tqdm_initial=0, tqdm_desc="Processing resources", tqdm_colour="green", downloaded_before_res=downloaded_before_res, failed_before_res=failed_before_res, unavailable_permanent_before_res=unavailable_before_res)
+                    if avoid_data:
+                        logger("INFO", "Dataset downloads are disabled for this run, skipping the resource phase", level="print")
+                    else:
+                        if refresh_packages:
+                            logger("...", f"Processing resources for {len(refresh_packages)} updated packages...", level="print")
+                            crawler.process_packages_batch(refresh_packages, phase="resources", tqdm_initial=0, tqdm_desc="Refreshing resources", tqdm_colour="cyan", downloaded_before_res=downloaded_before_res, failed_before_res=failed_before_res, unavailable_permanent_before_res=unavailable_before_res)
 
-                    if incomplete_packages:
-                        logger("...", f"Continuing resources for {len(incomplete_packages)} incomplete packages...", level="print")
-                        crawler.process_packages_batch(incomplete_packages, phase="resources", tqdm_initial=0, tqdm_desc="Continuing pending resources", tqdm_colour="yellow", downloaded_before_res=downloaded_before_res, failed_before_res=failed_before_res, unavailable_permanent_before_res=unavailable_before_res)
+                        if new_packages:
+                            logger("...", f"Processing resources for {len(new_packages)} new packages...", level="print")
+                            crawler.process_packages_batch(new_packages, phase="resources", tqdm_initial=0, tqdm_desc="Processing resources", tqdm_colour="green", downloaded_before_res=downloaded_before_res, failed_before_res=failed_before_res, unavailable_permanent_before_res=unavailable_before_res)
+
+                        if incomplete_packages:
+                            logger("...", f"Continuing resources for {len(incomplete_packages)} incomplete packages...", level="print")
+                            crawler.process_packages_batch(incomplete_packages, phase="resources", tqdm_initial=0, tqdm_desc="Continuing pending resources", tqdm_colour="yellow", downloaded_before_res=downloaded_before_res, failed_before_res=failed_before_res, unavailable_permanent_before_res=unavailable_before_res)
 
                     resume_data, downloaded_after_res, failed_after_res, unavailable_permanent_after_res, _ = utils.recover_resume(
                         save_path=crawler.save_path,
                         accepted_types=d_types,
                         num_resources=crawler.num_resources,
                         max_workers=crawler.max_threads,
+                        avoid_data=crawler.avoid_data,
                     )
                     crawler.log_run_summary(downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, unavailable_before_res, unavailable_permanent_after_res, resume_data)
                 else:

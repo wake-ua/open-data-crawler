@@ -27,7 +27,10 @@ class LowDiskSpaceError(RuntimeError):
 
 
 class OpenDataCrawler():
-    def __init__(self, domain, path=None, data_types=None, categories=None, partial=False, partial_dataset_rows=None, avoid_data=None, max_sec=None, reqs_per_sec=None, max_threads=None, max_resource_threads=None, num_resources=None, countries=None, ignore_hosts=None, save_raw_data=False, extract_schema=True):
+    LOCAL_RESOURCE_FIELDS = frozenset({"path", "encoding", "delimiter", "schema", "size"})
+    TEMP_UNAVAILABLE_INFO_KEY = utils.metadata_tag_key("resource_temporarily_unavailable")
+
+    def __init__(self, domain, path=None, data_types=None, categories=None, partial=False, partial_dataset_rows=None, avoid_data=None, max_sec=None, reqs_per_sec=None, max_threads=None, max_resource_threads=None, num_resources=None, countries=None, ignore_hosts=None, save_raw_data=False, extract_schema=True, check_remote_updates=True):
         self.domain = utils.normalize_domain(domain).rstrip("/")
         self.dms = None
         self.dms_instance = None
@@ -38,6 +41,8 @@ class OpenDataCrawler():
         self.serial_metadata_phase = True
         self.save_raw_data = save_raw_data
         self.extract_schema = extract_schema
+        self.check_remote_updates = check_remote_updates
+        self.packages_requiring_refresh = set()
 
         base_path = path or os.path.join(os.getcwd(), "data")
         utils.create_folder(base_path)
@@ -199,6 +204,29 @@ class OpenDataCrawler():
         if self.current_country:
             return f"{self.domain} | {utils.get_country_label(self.current_country)} [{self.current_country}]"
         return self.domain
+
+    def set_packages_requiring_refresh(self, package_ids):
+        self.packages_requiring_refresh = {pkg_id for pkg_id in (package_ids or []) if pkg_id}
+
+    def get_packages_requiring_refresh(self):
+        return set(self.packages_requiring_refresh)
+
+    def needs_package_refresh(self, pkg_id):
+        return pkg_id in self.packages_requiring_refresh
+
+    def clear_package_refresh_requirement(self, pkg_id):
+        self.packages_requiring_refresh.discard(pkg_id)
+
+    def preserve_local_resource_fields(self, old_resource, new_resource):
+        merged_resource = dict(new_resource or {})
+        if not isinstance(old_resource, dict):
+            return merged_resource
+
+        for field in self.LOCAL_RESOURCE_FIELDS:
+            if field in old_resource:
+                merged_resource[field] = old_resource[field]
+
+        return merged_resource
 
     # ==============================
 
@@ -363,7 +391,12 @@ class OpenDataCrawler():
 
             logger(None, "=" * 80, level="print")
 
-            resume_data, downloaded_after_res, failed_after_res, unavailable_permanent_after_res, _ = utils.recover_resume(save_path=self.save_path, accepted_types=self.data_types, num_resources=self.num_resources)
+            resume_data, downloaded_after_res, failed_after_res, unavailable_permanent_after_res, _ = utils.recover_resume(
+                save_path=self.save_path,
+                accepted_types=self.data_types,
+                num_resources=self.num_resources,
+                avoid_data=self.avoid_data,
+            )
 
             self.log_run_summary(downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, unavailable_permanent_before_res, unavailable_permanent_after_res, resume_data)
             os._exit(1)
@@ -372,7 +405,12 @@ class OpenDataCrawler():
             logger("ERROR", "Stopping crawler due to low disk space", e, level="print")
             logger(None, "=" * 80, level="print")
 
-            resume_data, downloaded_after_res, failed_after_res, unavailable_permanent_after_res, _ = utils.recover_resume(save_path=self.save_path, accepted_types=self.data_types, num_resources=self.num_resources)
+            resume_data, downloaded_after_res, failed_after_res, unavailable_permanent_after_res, _ = utils.recover_resume(
+                save_path=self.save_path,
+                accepted_types=self.data_types,
+                num_resources=self.num_resources,
+                avoid_data=self.avoid_data,
+            )
 
             self.log_run_summary(downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, unavailable_permanent_before_res, unavailable_permanent_after_res, resume_data)
             os._exit(1)
@@ -558,8 +596,8 @@ class OpenDataCrawler():
 
     def clear_recovered_resource_tags(self, resource_info):
         file_info = resource_info.get("fileInfo", {})
-        if "resource_temporarily_unavailable" in file_info:
-            file_info.pop("resource_temporarily_unavailable", None)
+        if self.TEMP_UNAVAILABLE_INFO_KEY in file_info:
+            file_info.pop(self.TEMP_UNAVAILABLE_INFO_KEY, None)
 
     def ensure_disk_headroom(self, path, required_bytes=0, context=None, log_indent=4):
         min_free_bytes = max(int(self.min_free_disk_mb or 0), 0) * 1024 * 1024
@@ -735,8 +773,8 @@ class OpenDataCrawler():
             if all_resources_complete and not package_status.get("packageCompleted"):
                 package_status["packageCompleted"] = datetime.now().isoformat()
 
-            sanitized_package = utils.sanitize_json_keys(package)
-            serialized_package = json.dumps(sanitized_package, ensure_ascii=False, indent=log_indent, sort_keys=True)
+            persisted_package = utils.prepare_metadata_for_save(package)
+            serialized_package = json.dumps(persisted_package, ensure_ascii=False, indent=log_indent, sort_keys=True)
             required_bytes = len(serialized_package.encode("utf-8"))
             new_hash = hashlib.sha1(serialized_package.encode("utf-8")).hexdigest()
 
@@ -749,22 +787,23 @@ class OpenDataCrawler():
                 existing_hash = sha1.hexdigest()
 
             if existing_hash == new_hash:
-                package_status["changed_metadata"] = False
                 logger("SKIP", f"Metadata file '{meta_path}' already exists and is up-to-date", indent=log_indent)
-                return
+                return True
 
             logger("SAVE", f"Saving metadata to '{meta_path}'...", indent=log_indent)
-            package_status["changed_metadata"] = False
 
             self.ensure_disk_headroom(meta_path, required_bytes=required_bytes, context=f"saving metadata '{file_name}'", log_indent=log_indent)
 
-            if utils.atomic_dump_json(meta_path, sanitized_package, ensure_ascii=False, indent=log_indent, sort_keys=True):
+            if utils.atomic_dump_json(meta_path, persisted_package, ensure_ascii=False, indent=log_indent, sort_keys=True):
                 logger("OK", f"Metadata saved successfully to '{meta_path}'", indent=log_indent)
+                return True
+            return False
         
         except LowDiskSpaceError:
             raise
         except Exception as e:
             logger("ERROR", f"Failed to save metadata file '{meta_path}'", [e, traceback.format_exc()], indent=log_indent)
+            return False
 
     def handle_parse_resource(self, resource_meta, base_name, metadata_file_name, reparse_data=None, log_indent=4):
         resource_crawler_info = utils.init_metadata(package=False)
@@ -848,7 +887,7 @@ class OpenDataCrawler():
             resource_meta = package["resources"].get(old_file_name)
             info = package["crawlerInfo"]["resourcesInfo"].get(old_file_name, {})
 
-            tag_info = info.get("fileInfo", {}).get("resource_temporarily_unavailable", {})
+            tag_info = info.get("fileInfo", {}).get(self.TEMP_UNAVAILABLE_INFO_KEY, {})
             tag_values = tag_info.get("values", {})
 
             if resource_meta and tag_values:
@@ -877,7 +916,6 @@ class OpenDataCrawler():
 
                 package["resources"][new_file_name] = new_resource
                 package["crawlerInfo"]["resourcesInfo"][new_file_name] = new_info
-                self.mark_metadata_changed(package)
 
         return package
 
@@ -886,12 +924,18 @@ class OpenDataCrawler():
 
         metadata["resources"] = {}
         metadata["crawlerInfo"]["resourcesInfo"] = {}
-        self.mark_metadata_changed(metadata)
 
         for idx, resource in enumerate(distributions):
             base_name = utils.generate_short_filename(f"{metadata['fileName']}_{idx}")
             metadata["resources"][base_name] = resource
-            metadata["crawlerInfo"]["resourcesInfo"][base_name] = utils.init_metadata(package=False, crawled=False)
+            resource_info = utils.init_metadata(package=False, crawled=False)
+            if self.avoid_data:
+                resource_info = self.mark_resource_skipped_by_config(resource_info)
+            metadata["crawlerInfo"]["resourcesInfo"][base_name] = resource_info
+
+        if self.avoid_data:
+            logger("INFO", f"Skipping remote resource parsing for package '{metadata['identifier']}' because dataset downloads are disabled", indent=log_indent)
+            return
 
         if self.num_resources:
             logger("INFO", f"Delaying full resource parsing for package '{metadata['identifier']}' because num_resources={self.num_resources}", indent=log_indent)
@@ -921,10 +965,16 @@ class OpenDataCrawler():
             metadata["resources"][new_file_name] = parsed_resource
             metadata["crawlerInfo"]["resourcesInfo"][new_file_name] = parsed_info
 
-        self.mark_metadata_changed(metadata)
+    def mark_resource_skipped_by_config(self, resource_info):
+        normalized_info = dict(resource_info or {})
+        normalized_info["fileMetadataChanges"] = dict(normalized_info.get("fileMetadataChanges", {}))
+        normalized_info["binaryFileChanges"] = dict(normalized_info.get("binaryFileChanges", {}))
+        normalized_info["fileInfo"] = dict(normalized_info.get("fileInfo", {}))
+        normalized_info["fileStatus"] = dict(normalized_info.get("fileStatus", {}))
 
-    def mark_metadata_changed(self, package):
-        package.setdefault("crawlerInfo", {}).setdefault("packageStatus", {})["changed_metadata"] = True
+        normalized_info["fileInfo"].update(utils.add_tag_explanations("dataset_skipped_by_config"))
+        normalized_info["fileStatus"]["fileSkippedByConfig"] = datetime.now().isoformat()
+        return normalized_info
 
     def upsert_package_resource(self, package, old_file_name, resource, resource_info):
         new_file_name = resource.get("fileName") or old_file_name
@@ -935,7 +985,6 @@ class OpenDataCrawler():
 
         package["resources"][new_file_name] = resource
         package["crawlerInfo"]["resourcesInfo"][new_file_name] = resource_info
-        self.mark_metadata_changed(package)
         return new_file_name
 
     def infer_resource_extension(self, file_name, media_type):
@@ -981,7 +1030,7 @@ class OpenDataCrawler():
         if not resource:
             return resource_file_name, None, resource_info
 
-        tag_info = resource_info.get("fileInfo", {}).get("resource_temporarily_unavailable", {})
+        tag_info = resource_info.get("fileInfo", {}).get(self.TEMP_UNAVAILABLE_INFO_KEY, {})
         tag_values = tag_info.get("values", {})
 
         if tag_values:
@@ -1035,6 +1084,8 @@ class OpenDataCrawler():
 
         try:
             logger("WORK", f"Processing metadata for package '{pkg_id}' ('{metadata_file_name}')...", indent=log_indent-1)
+            refresh_requested = self.needs_package_refresh(pkg_id)
+            existing_package = None
 
             if os.path.exists(metadata_path):
                 if self.metadata_needs_rebuild(metadata_path):
@@ -1045,20 +1096,33 @@ class OpenDataCrawler():
                     except Exception as e:
                         logger("ERROR", f"Failed to delete invalid metadata file '{metadata_file_name}'", e, indent=log_indent)
                         return
+                elif refresh_requested:
+                    logger("INFO", f"Remote metadata changed for package '{pkg_id}', refreshing local metadata", indent=log_indent)
+                    try:
+                        with open(metadata_path, "r", encoding="utf-8") as f:
+                            existing_package = json.load(f)
+                    except Exception as e:
+                        logger("WARNING", f"Could not read existing metadata file '{metadata_file_name}' before refresh; rebuilding from remote data only", e, indent=log_indent)
                 else:
                     logger("SKIP", f"Metadata already exists for '{metadata_file_name}', skipping metadata phase", indent=log_indent)
                     return
+            elif refresh_requested:
+                logger("INFO", f"Refresh requested for package '{pkg_id}', but no local metadata file was found. Rebuilding it from remote data.", indent=log_indent)
 
             package = self.get_package(pkg_id, metadata_file_name)
             if not package:
                 return
 
+            if refresh_requested and existing_package and hasattr(self.dms_instance, "merge_existing_package_state"):
+                package = self.dms_instance.merge_existing_package_state(existing_package, package)
+
             if not package.get("resources"):
                 logger("WARNING", f"No distributions found in package '{pkg_id}'", indent=log_indent)
                 package["crawlerInfo"]["packageMetadataChanges"].update(utils.add_tag_explanations("missing_distributions"))
                 package["crawlerInfo"]["packageStatus"]["packageCompleted"] = datetime.now().isoformat()
-                self.mark_metadata_changed(package)
-                self.save_metadata(package)
+                metadata_saved = self.save_metadata(package)
+                if refresh_requested and metadata_saved:
+                    self.clear_package_refresh_requirement(pkg_id)
                 return
 
             if self.categories:
@@ -1072,10 +1136,14 @@ class OpenDataCrawler():
                         f"Package '{pkg_id}' does not match categories, skipping",
                         indent=log_indent
                     )
-                    self.save_metadata(package)
+                    metadata_saved = self.save_metadata(package)
+                    if refresh_requested and metadata_saved:
+                        self.clear_package_refresh_requirement(pkg_id)
                     return
 
-            self.save_metadata(package)
+            metadata_saved = self.save_metadata(package)
+            if refresh_requested and metadata_saved:
+                self.clear_package_refresh_requirement(pkg_id)
 
         except LowDiskSpaceError:
             raise
@@ -1092,6 +1160,10 @@ class OpenDataCrawler():
         try:
             metadata_path = os.path.join(self.save_path, metadata_file_name)
             logger("WORK", f"Processing package '{pkg_id}' ('{metadata_file_name}')...", indent=log_indent-1)
+
+            if self.needs_package_refresh(pkg_id):
+                logger("SKIP", f"Metadata refresh is still pending for package '{pkg_id}', skipping resource phase for safety", indent=log_indent)
+                return
 
             if not os.path.exists(metadata_path):
                 logger("SKIP", f"Metadata file '{metadata_file_name}' not found, skipping resource phase", indent=log_indent)
@@ -1110,7 +1182,6 @@ class OpenDataCrawler():
                 logger("WARNING", f"No distributions found in package metadata '{pkg_id}' ('{metadata_path}')", indent=log_indent)
                 package["crawlerInfo"]["packageMetadataChanges"].update(utils.add_tag_explanations("missing_distributions"))
                 package["crawlerInfo"]["packageStatus"]["packageCompleted"] = datetime.now().isoformat()
-                self.mark_metadata_changed(package)
                 self.save_metadata(package)
                 return
 
@@ -1120,6 +1191,11 @@ class OpenDataCrawler():
                     logger("SKIP", f"Package '{pkg_id}' ('{metadata_path}') does not match specified categories ({', '.join(self.categories)}), skipping all resources", indent=log_indent)
                     self.save_metadata(package)
                     return
+
+            if self.avoid_data:
+                logger("SKIP", f"Dataset downloads are disabled, skipping resource phase for package '{pkg_id}'", indent=log_indent)
+                self.save_metadata(package)
+                return {"status": "done", "pkg_id": pkg_id}
 
             if self.num_resources:
                 completed_valid_resources = 0
@@ -1151,7 +1227,7 @@ class OpenDataCrawler():
                         continue
 
                     defer_info = self.should_defer_package_for_url(resource.get("downloadURL"))
-                    if defer_info and "resource_temporarily_unavailable" in resource_info.get("fileInfo", {}):
+                    if defer_info and self.TEMP_UNAVAILABLE_INFO_KEY in resource_info.get("fileInfo", {}):
                         wait_text = f" in ~{defer_info['wait_seconds']}s" if defer_info["wait_seconds"] else ""
                         logger("INFO", f"Host '{defer_info['host']}' is showing repeated temporary failures ({defer_info['last_reason']}); package '{pkg_id}' will be retried later in this run{wait_text}", indent=log_indent)
                         self.save_metadata(package)
@@ -1164,7 +1240,7 @@ class OpenDataCrawler():
                     resource_file_name = self.upsert_package_resource(package, resource_file_name, updated_resource, updated_info)
 
                     defer_info = self.should_defer_package_for_url(updated_resource.get("downloadURL"))
-                    if defer_info and "resource_temporarily_unavailable" in updated_info.get("fileInfo", {}):
+                    if defer_info and self.TEMP_UNAVAILABLE_INFO_KEY in updated_info.get("fileInfo", {}):
                         wait_text = f" in ~{defer_info['wait_seconds']}s" if defer_info["wait_seconds"] else ""
                         logger("INFO", f"Host '{defer_info['host']}' is showing repeated temporary failures ({defer_info['last_reason']}); package '{pkg_id}' will be retried later in this run{wait_text}", indent=log_indent)
                         self.save_metadata(package)
@@ -1187,8 +1263,11 @@ class OpenDataCrawler():
                 if not resource:
                     continue
 
+                if self.resource_has_downloaded_file(resource) and utils.is_completed(package, file_name):
+                    continue
+
                 defer_info = self.should_defer_package_for_url(resource.get("downloadURL"))
-                if defer_info and "resource_temporarily_unavailable" in resource_info.get("fileInfo", {}):
+                if defer_info and self.TEMP_UNAVAILABLE_INFO_KEY in resource_info.get("fileInfo", {}):
                     wait_text = f" in ~{defer_info['wait_seconds']}s" if defer_info["wait_seconds"] else ""
                     logger("INFO", f"Host '{defer_info['host']}' is showing repeated temporary failures ({defer_info['last_reason']}); package '{pkg_id}' will be retried later in this run{wait_text}", indent=log_indent)
                     self.save_metadata(package)

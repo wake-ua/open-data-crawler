@@ -172,6 +172,25 @@ def build_invalid_download_url_error(url, reason):
     return tag, _build_error_details(message, tag_values)
 
 
+def build_too_many_redirects_error(url, redirect_error):
+    response = getattr(redirect_error, "response", None)
+    final_url = getattr(response, "url", None) or url
+    history = getattr(response, "history", None) or []
+    redirect_count = len(history) if history else 30
+    location_header = response.headers.get("Location") if response is not None and getattr(response, "headers", None) else None
+
+    tag = "too_many_redirects"
+    tag_explanation = CRAWLER_CHANGES_INFO.get(tag, {}).get("tag_explanation", {}).get("reason", "Unknown reason")
+    tag_values = {
+        "<redirect_url>": url,
+        "<final_url>": final_url,
+        "<redirect_count>": redirect_count,
+        "<location_header>": location_header or "unknown",
+    }
+    message = f"{tag_explanation} ({url}) - [final URL: {final_url}] - [redirects: {redirect_count}]"
+    return tag, _build_error_details(message, tag_values)
+
+
 def make_request(url, current_agent, headers=None, params=None, max_sec=None, stream=False, sleep_time=3, return_tag=False, rate_controller=None):
     headers = headers.copy() if headers else {}
 
@@ -250,6 +269,11 @@ def make_request(url, current_agent, headers=None, params=None, max_sec=None, st
                         max_sec=max_sec,
                         method="GET",
                     )
+                    if rate_controller is not None and hasattr(rate_controller, "register_host_result"):
+                        rate_controller.register_host_result(url, tag, e)
+                    return (None, user_agent, tag, error_details) if return_tag else (None, user_agent)
+                except requests.exceptions.TooManyRedirects as e:
+                    tag, error_details = build_too_many_redirects_error(url, e)
                     if rate_controller is not None and hasattr(rate_controller, "register_host_result"):
                         rate_controller.register_host_result(url, tag, e)
                     return (None, user_agent, tag, error_details) if return_tag else (None, user_agent)
@@ -365,6 +389,11 @@ def make_request_post(url, current_agent, headers=None, json_body=None, max_sec=
                     if rate_controller is not None and hasattr(rate_controller, "register_host_result"):
                         rate_controller.register_host_result(url, tag, e)
                     return (None, user_agent, tag, error_details) if return_tag else (None, user_agent)
+                except requests.exceptions.TooManyRedirects as e:
+                    tag, error_details = build_too_many_redirects_error(url, e)
+                    if rate_controller is not None and hasattr(rate_controller, "register_host_result"):
+                        rate_controller.register_host_result(url, tag, e)
+                    return (None, user_agent, tag, error_details) if return_tag else (None, user_agent)
                 except (requests.exceptions.InvalidURL, requests.exceptions.InvalidSchema, requests.exceptions.MissingSchema, LocationParseError) as e:
                     tag, error_details = build_invalid_download_url_error(url, e)
                     if rate_controller is not None and hasattr(rate_controller, "register_host_result"):
@@ -409,6 +438,9 @@ def get_error_tag_from_exception(e):
 
     if isinstance(e, (requests.exceptions.InvalidURL, requests.exceptions.InvalidSchema, requests.exceptions.MissingSchema, LocationParseError)):
         return "invalid_download_url"
+
+    if isinstance(e, requests.exceptions.TooManyRedirects):
+        return "too_many_redirects"
 
     if isinstance(e, (
         requests.exceptions.ConnectionError,

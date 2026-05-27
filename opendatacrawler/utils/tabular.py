@@ -836,7 +836,8 @@ def get_extension_mime(mime_type):
     try:
         ext = MIME_TYPE_MAP.get(mime_type.lower())
         if isinstance(ext, dict):
-            ext = ext.get("extensions", [])[0]
+            extensions = ext.get("extensions") or []
+            ext = extensions[0] if extensions else None
 
         if ext:
             return ext
@@ -848,7 +849,8 @@ def get_extension_mime(mime_type):
                 if key.endswith("/" + suffix):
                     ext = MIME_TYPE_MAP[key]
                     if isinstance(ext, dict):
-                        ext = ext.get("extensions", [])[0]
+                        extensions = ext.get("extensions") or []
+                        ext = extensions[0] if extensions else None
                     if ext:
                         return ext
 

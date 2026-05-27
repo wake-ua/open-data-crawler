@@ -3489,7 +3489,8 @@
   },
   "application/vnd.geo+json": {
     "source": "apache",
-    "compressible": true
+    "compressible": true,
+    "extensions": ["geojson"]
   },
   "application/vnd.geocube+xml": {
     "source": "apache",
@@ -8933,6 +8934,9 @@
   "text/x-pascal": {
     "source": "apache",
     "extensions": ["p","pas"]
+  },
+  "text/x-pcaxis": {
+    "extensions": ["px"]
   },
   "text/x-processing": {
     "compressible": true,

@@ -1,4 +1,5 @@
 import hashlib
+import copy
 import json
 import re
 from datetime import datetime
@@ -214,6 +215,31 @@ def sanitize_json_keys(obj):
     return obj
 
 
+def snake_to_camel_key(key):
+    if not isinstance(key, str) or "_" not in key:
+        return key
+    head, *tail = key.split("_")
+    return head + "".join(part[:1].upper() + part[1:] for part in tail if part)
+
+
+def metadata_tag_key(tag):
+    return snake_to_camel_key(tag)
+
+
+def prepare_metadata_for_save(package):
+    metadata_copy = copy.deepcopy(package)
+    crawler_info = metadata_copy.get("crawlerInfo")
+    if not isinstance(crawler_info, dict):
+        return sanitize_json_keys(metadata_copy)
+
+    package_status = crawler_info.get("packageStatus")
+    if isinstance(package_status, dict):
+        package_status.pop("changed_metadata", None)
+        package_status.pop("changedMetadata", None)
+
+    return sanitize_json_keys(metadata_copy)
+
+
 def init_metadata(package=True, crawled=True):
     if package:
         return {
@@ -248,9 +274,10 @@ def add_tag_explanations(tags, data_source=None):
 
     explanations = {}
     for tag in tags:
+        metadata_key = metadata_tag_key(tag)
         tag_content = CRAWLER_CHANGES_INFO.get(tag)
         if not tag_content:
-            explanations[tag] = {"reason": "(no explanation available)"}
+            explanations[metadata_key] = {"reason": "(no explanation available)"}
             continue
 
         tag_explanation = json.dumps(tag_content.get("tag_explanation", {}))
@@ -260,6 +287,6 @@ def add_tag_explanations(tags, data_source=None):
                 tag_placeholder, str(data_source.get(tag_placeholder, f"<{tag_placeholder}>"))
             )
 
-        explanations[tag] = json.loads(tag_explanation)
+        explanations[metadata_key] = json.loads(tag_explanation)
 
     return explanations

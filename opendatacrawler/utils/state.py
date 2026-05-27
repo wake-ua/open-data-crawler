@@ -3,29 +3,36 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 
 from opendatacrawler.setup_logger import log_manager
+from .metadata import metadata_tag_key
 from .tabular import get_mime_and_ext
 
 
 logger = log_manager.log
 
 PERMANENT_UNAVAILABLE_TAGS = {
-    "resource_removed",
-    "unresolvable_domain",
-    "method_not_allowed",
-    "missing_resource",
-    "forbidden_resource",
-    "ssl_error",
-    "invalid_request",
-    "invalid_download_url",
-    "invalid_redirect_location",
+    metadata_tag_key(tag)
+    for tag in {
+        "resource_removed",
+        "unresolvable_domain",
+        "method_not_allowed",
+        "missing_resource",
+        "forbidden_resource",
+        "ssl_error",
+        "invalid_request",
+        "invalid_download_url",
+        "invalid_redirect_location",
+        "too_many_redirects",
+    }
 }
+TEMP_UNAVAILABLE_TAG = metadata_tag_key("resource_temporarily_unavailable")
+SKIPPED_BY_CONFIG_TAG = metadata_tag_key("dataset_skipped_by_config")
 
 
 def package_requires_retry(failed, pending):
     return bool(failed or pending)
 
 
-def recover_resume(save_path, accepted_types=None, num_resources=None, max_workers=None):
+def recover_resume(save_path, accepted_types=None, num_resources=None, max_workers=None, avoid_data=False):
     packages_status = {}
     total_failed = []
     total_successful = []
@@ -60,7 +67,14 @@ def recover_resume(save_path, accepted_types=None, num_resources=None, max_worke
                     packages_status[identifier] = {"failed_resources": [], "successful_resources": [], "unavailable_permanent": [], "pending_resources": []}
                     continue
 
-                failed, success, unavailable_permanent, pending = compute_package_resume_status(entry, accepted_types, num_resources, existing_paths, save_path)
+                failed, success, unavailable_permanent, pending = compute_package_resume_status(
+                    entry,
+                    accepted_types,
+                    num_resources,
+                    existing_paths,
+                    save_path,
+                    avoid_data=avoid_data,
+                )
 
                 if package_requires_retry(failed, pending):
                     incomplete_packages.add(identifier)
@@ -83,7 +97,14 @@ def recover_resume(save_path, accepted_types=None, num_resources=None, max_worke
                 packages_status[identifier] = {"failed_resources": [], "successful_resources": [], "unavailable_permanent": [], "pending_resources": []}
                 continue
 
-            failed, success, unavailable_permanent, pending = compute_package_resume_status(entry, accepted_types, num_resources, existing_paths, save_path)
+            failed, success, unavailable_permanent, pending = compute_package_resume_status(
+                entry,
+                accepted_types,
+                num_resources,
+                existing_paths,
+                save_path,
+                avoid_data=avoid_data,
+            )
 
             if package_requires_retry(failed, pending):
                 incomplete_packages.add(identifier)
@@ -123,7 +144,13 @@ def load_resume_entry(save_path, fname):
         return identifier, None
 
 
-def compute_package_resume_status(entry, accepted_types=None, num_resources=None, existing_paths=None, save_path=None):
+def resource_was_attempted(resource):
+    file_info_keys = set(resource.get("fileInfoKeys", []) or [])
+    non_skip_info_keys = file_info_keys - {SKIPPED_BY_CONFIG_TAG}
+    return bool(resource.get("fileCrawled")) or bool(non_skip_info_keys)
+
+
+def compute_package_resume_status(entry, accepted_types=None, num_resources=None, existing_paths=None, save_path=None, avoid_data=False):
     failed = []
     success = []
     unavailable_permanent = []
@@ -136,7 +163,7 @@ def compute_package_resume_status(entry, accepted_types=None, num_resources=None
         if not inferred_ext:
             _, inferred_ext = get_mime_and_ext(resource.get("mediaType"))
 
-        was_attempted = bool(resource.get("fileCrawled")) or bool(resource.get("fileInfoKeys"))
+        was_attempted = resource_was_attempted(resource)
         if accepted_types:
             if inferred_ext in accepted_types:
                 considered_resources.append(file_name)
@@ -145,6 +172,15 @@ def compute_package_resume_status(entry, accepted_types=None, num_resources=None
                 continue
 
         considered_resources.append(file_name)
+
+    if avoid_data:
+        for file_name in considered_resources:
+            resource = entry.get("resources", {}).get(file_name, {})
+            if is_completed(entry, file_name, complete=False, unavailable_permanent=True):
+                unavailable_permanent.append(file_name)
+            elif is_completed(entry, file_name) and has_materialized_file(resource, existing_paths, save_path):
+                success.append(file_name)
+        return [], success, unavailable_permanent, []
 
     if considered_resources and num_resources:
         pending_failed = []
@@ -162,7 +198,7 @@ def compute_package_resume_status(entry, accepted_types=None, num_resources=None
                     return [], success, [], []
                 continue
 
-            was_attempted = bool(resource.get("fileCrawled")) or bool(resource.get("fileInfoKeys"))
+            was_attempted = resource_was_attempted(resource)
             if was_attempted:
                 pending_failed.append(file_name)
             else:
@@ -181,7 +217,7 @@ def compute_package_resume_status(entry, accepted_types=None, num_resources=None
         elif is_completed(entry, file_name) and has_materialized_file(resource, existing_paths, save_path):
             success.append(file_name)
         else:
-            was_attempted = bool(resource.get("fileCrawled")) or bool(resource.get("fileInfoKeys"))
+            was_attempted = resource_was_attempted(resource)
             if was_attempted:
                 failed.append(file_name)
             else:
@@ -202,6 +238,7 @@ def build_resume_entry(package, meta_file_name=None, meta_stat=None):
             "path": resource.get("path"),
             "fileCompleted": bool(file_status.get("fileCompleted")),
             "fileCrawled": bool(file_status.get("fileCrawled")),
+            "fileSkippedByConfig": bool(file_status.get("fileSkippedByConfig")),
             "fileInfoKeys": list(file_info.keys()),
         }
 
@@ -242,7 +279,7 @@ def is_completed(package, file_name, complete=True, unavailable=False, unavailab
             if complete and file_completed:
                 return True
 
-            if unavailable and "resource_temporarily_unavailable" in file_info_keys:
+            if unavailable and TEMP_UNAVAILABLE_TAG in file_info_keys:
                 return True
 
             if unavailable_permanent and any(tag in file_info_keys for tag in PERMANENT_UNAVAILABLE_TAGS):
