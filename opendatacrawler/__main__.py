@@ -1,14 +1,18 @@
 import argparse
 import os
 import sys
-import urllib3
+from contextlib import ExitStack
 import traceback
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from opendatacrawler import utils
 from opendatacrawler.odcrawler import OpenDataCrawler
 from opendatacrawler.setup_logger import log_manager
 logger = log_manager.log
 
+TABULAR_DATA_TYPES = {"csv", "tsv"}
+DATA_TYPE_ALIASES = {
+    "pc-axis": "px",
+    "pcaxis": "px",
+}
 
 def resolve_option(cli_value, section, option, cast, fallback):
     if cli_value is not None:
@@ -18,13 +22,11 @@ def resolve_option(cli_value, section, option, cast, fallback):
         return config_value
     return fallback
 
-
 def resolve_portal_option(section, option, cast, fallback):
     config_value = utils.get_config_option(section, option, cast=cast, fallback=None) if section else None
     if config_value is not None:
         return config_value
     return utils.get_config_option("defaults", option, cast=cast, fallback=fallback)
-
 
 def apply_portal_runtime_config(crawler, args):
     section = crawler.dms or ""
@@ -62,16 +64,74 @@ def apply_portal_runtime_config(crawler, args):
     else:
         crawler.partial_dataset_rows = None
         crawler.partial_dataset_sample_mode = "first"
-        crawler.partial_dataset_random_seed = None
+        crawler.partial_dataset_random_seed = 1
+
+def normalize_data_types(parser, values):
+    normalized = []
+    seen = set()
+    for value in values or []:
+        raw = str(value).strip().lower().lstrip(".")
+        if not raw:
+            continue
+        raw = DATA_TYPE_ALIASES.get(raw, raw)
+        _, ext = utils.get_mime_and_ext(raw)
+        data_type = DATA_TYPE_ALIASES.get((ext or raw).strip().lower().lstrip("."), (ext or raw).strip().lower().lstrip("."))
+        if not data_type:
+            parser.error(f"Invalid empty data type from {value!r}")
+        if data_type not in seen:
+            normalized.append(data_type)
+            seen.add(data_type)
+    return normalized
+
+def validate_initial_args(parser, args, data_types):
+    if args.get("replace") and not args.get("id_dataset"):
+        parser.error("--replace requires --id-dataset")
+    if args.get("no_dataset") and args.get("num_resources") is not None:
+        parser.error("--num-resources has no effect with --no-dataset")
+    if args.get("partial_dataset") is True:
+        if args.get("no_dataset") or args.get("num_resources") == 0:
+            parser.error("--partial-dataset requires dataset downloads; remove --no-dataset or -nr 0")
+        if data_types and not (set(data_types) & TABULAR_DATA_TYPES):
+            parser.error("--partial-dataset only affects CSV/TSV resources; use -t csv/tsv or omit -t")
+
+def validate_crawler_options(crawler, args):
+    if crawler.categories and not getattr(crawler.dms_instance, "SUPPORTS_CATEGORY_FILTER", True):
+        raise ValueError(f"Category filtering is not supported by {crawler.dms}")
+
+    if crawler.countries:
+        if crawler.dms != "dataEuropaEu":
+            raise ValueError("Country filtering is supported only by data.europa.eu")
+        if args.get("id_dataset"):
+            raise ValueError("Country filtering applies to catalog enumeration and cannot be combined with explicit --id-dataset")
+
+    supported_types = getattr(crawler.dms_instance, "SUPPORTED_DATA_TYPES", None)
+    aliases = getattr(crawler.dms_instance, "DATA_TYPE_ALIASES", {})
+    if supported_types and crawler.data_types:
+        requested_types = []
+        for data_type in crawler.data_types:
+            data_type = aliases.get(data_type, data_type)
+            if data_type not in requested_types:
+                requested_types.append(data_type)
+        unsupported = sorted(set(requested_types) - supported_types)
+        if unsupported:
+            allowed = ", ".join(sorted(supported_types))
+            raise ValueError(f"{crawler.dms} does not expose requested data type(s): {', '.join(unsupported)}. Supported types: {allowed}")
+        crawler.data_types = requested_types
+
+    if args.get("partial_dataset") is True:
+        if supported_types and not (supported_types & TABULAR_DATA_TYPES):
+            raise ValueError(f"--partial-dataset has no effect for {crawler.dms}; it does not expose CSV/TSV resources")
+        if crawler.data_types and not (set(crawler.data_types) & TABULAR_DATA_TYPES):
+            raise ValueError("--partial-dataset only affects CSV/TSV resources; use -t csv/tsv or omit -t")
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(prog="opendatacrawler")
     parser.add_argument("-d", "--domain", type=str, required=True,
                         help="A data source (Ex. -d https://domain.example)")
     parser.add_argument("-t", "--data-types", "--data_types", dest="data_types", nargs="+", required=False,
-                        help="data types to save (Ex. -t xls pdf) (default: all)")
+                        help="Data file extensions to save (e.g. -t xls csv). Default: all supported resources; INE defaults to json")
     parser.add_argument("-c", "--categories", nargs="+", required=False,
-                        help="Categories to save (Ex. -c crime tourism transport) (default: all)")
+                        help="Category labels or IDs, ignoring case (e.g. -c turismo transporte). Not supported by INE or Zenodo")
     parser.add_argument("-p", "--path", type=str, required=False,
                         help="Path to save data (Ex. -p /my/example/path/)")
     parser.add_argument("-s", "--max-seconds", "--max_seconds", dest="max_seconds", type=int, required=False,
@@ -83,21 +143,21 @@ def main():
     parser.add_argument("-id", "--id-dataset", "--id_dataset", dest="id_dataset", nargs="+", required=False,
                         help="Save the dataset with that id (Ex. -id edu-alu-fpa-2021) (default: all)")
     parser.add_argument("-nd", "--no-dataset", "--no_dataset", dest="no_dataset", required=False, action="store_true",
-                        help="No save the dataset (default: save)")
+                        help="Do not save dataset files (default: save files)")
     parser.add_argument("-n", "--max-packages", "--max_packages", dest="max_packages", type=int, required=False,
                         help="Maximum number of packages to process (default: all)")
     parser.add_argument("-mt", "--max-threads", "--max_threads", dest="max_threads", type=int, required=False,
-                        help="Maximum number of threads to use (default: based on CPU count, up to 32)")
+                        help="Maximum number of threads to use (default: based on CPU count, up to 16)")
     parser.add_argument("-mrt", "--max-resource-threads", "--max_resource_threads", dest="max_resource_threads", type=int, required=False,
-                        help="Maximum number of threads to use per package for processing resources (default: 4)")
+                        help="Maximum number of threads to use per package for processing resources (default: 2)")
     parser.add_argument("-rd", "--reset-domain", "--reset_domain", dest="reset_domain", required=False, action=argparse.BooleanOptionalAction,
                         help="Delete all data and logs for the specified domain before crawling")
     parser.add_argument("-nr", "--num-resources", dest="num_resources", type=int, required=False,
-                        help="Number of resources per package to download (default: all)")
+                        help="Number of resources per package to download (default: all; 0 skips dataset files)")
     parser.add_argument("-replace", "--replace", dest="replace", required=False, action=argparse.BooleanOptionalAction,
                         help="Force re-download of datasets specified with --id-dataset (delete old metadata and data first)")
     parser.add_argument("-country", "--country", "--countries", dest="countries", nargs="+", required=False,
-                        help="Filter datasets by country code (e.g. --country es gr fr)")
+                        help="Filter data.europa.eu datasets by country code (e.g. --country es gr fr); cannot be combined with --id-dataset")
     parser.add_argument("--ignore-hosts", "--ignore_hosts", dest="ignore_hosts", nargs="+", required=False,
                         help="Hosts or URLs to ignore during crawling (e.g. --ignore-hosts datos.aviles.es https://datosabiertos.navarra.es)")
     parser.add_argument("--save-raw-data", "--save_raw_data", dest="save_raw_data", required=False, action=argparse.BooleanOptionalAction,
@@ -108,12 +168,18 @@ def main():
                         help="Skip checking whether already-downloaded packages changed remotely; only resume incomplete packages and process unseen packages")
 
     args = vars(parser.parse_args())
+    for key in ("max_seconds", "max_threads", "max_resource_threads", "max_packages", "reqs_per_sec"):
+        if args.get(key) is not None and args[key] <= 0:
+            parser.error(f"{key} must be positive")
+    if args.get("num_resources") is not None and args["num_resources"] < 0:
+        parser.error("num_resources must be nonnegative")
 
     url = args["domain"]
-    d_types = [c.lower() for c in args["data_types"]] if args["data_types"] else []
+    d_types = normalize_data_types(parser, args["data_types"])
+    validate_initial_args(parser, args, d_types)
     categories = [c.lower() for c in args["categories"]] if args["categories"] else []
     d_path = args["path"]
-    max_sec = resolve_option(args["max_seconds"], "defaults", "max_seconds", int, None)
+    max_sec = resolve_option(args["max_seconds"], "defaults", "max_seconds", int, 30)
     reqs_per_sec = resolve_option(args.get("reqs_per_sec"), "defaults", "reqs_per_sec", float, None)
     partial = args["partial_dataset"]
     partial_dataset_rows = None
@@ -143,8 +209,12 @@ def main():
 
     utils.print_intro()
     crawler = None
+    locks = ExitStack()
+    exit_code = 0
     try:
         if utils.is_url(url):
+            lock_name = utils.clean_url(utils.normalize_domain(url))
+            locks.enter_context(utils.file_lock(os.path.join(os.getcwd(), "logs", ".locks", lock_name + ".lock")))
             crawler = OpenDataCrawler(
                 url,
                 path=d_path,
@@ -157,6 +227,7 @@ def main():
                 reqs_per_sec=reqs_per_sec,
                 max_threads=max_threads,
                 max_resource_threads=max_resource_threads,
+                max_packages=max_packages,
                 num_resources=num_resources,
                 countries=countries,
                 ignore_hosts=ignore_hosts,
@@ -170,6 +241,16 @@ def main():
                 sys.exit(1)
 
             apply_portal_runtime_config(crawler, args)
+            if any(not utils.get_country_label(country) for country in countries):
+                raise ValueError("Unknown country code")
+            default_data_types = getattr(crawler.dms_instance, "DEFAULT_DATA_TYPES", None)
+            if default_data_types and not crawler.data_types:
+                crawler.data_types = list(default_data_types)
+            validate_crawler_options(crawler, args)
+            d_types = crawler.data_types
+            for key in ("max_sec", "max_threads", "max_resource_threads"):
+                if getattr(crawler, key) is None or getattr(crawler, key) <= 0:
+                    raise ValueError(f"Configured {key} must be positive")
 
             reset_domain_input = False
             has_logs = False
@@ -242,14 +323,18 @@ def main():
                         incomplete_before_pkgs.discard(pkg_id)
                         crawler.clear_package_refresh_requirement(pkg_id)
 
-                packages = id_dataset if id_dataset else crawler.get_package_list()
+                packages = list(dict.fromkeys(str(key) for key in (id_dataset if id_dataset else crawler.get_package_list())))
+                processing_pending = crawler.scan_local_requirements(packages, explicit=bool(id_dataset))
+                incomplete_before_pkgs.update(processing_pending)
                 refresh_candidates = crawler.get_packages_requiring_refresh()
                 refresh_packages = [pkg for pkg in packages if pkg in refresh_candidates]
                 new_packages = [pkg for pkg in packages if pkg not in resume_data and pkg not in refresh_candidates]
                 incomplete_packages = [pkg for pkg in packages if pkg in incomplete_before_pkgs and pkg not in refresh_candidates]
 
                 if max_packages:
-                    new_packages = new_packages[:max_packages]
+                    refresh_packages = refresh_packages[:max_packages]
+                    incomplete_packages = incomplete_packages[:max(0, max_packages - len(refresh_packages))]
+                    new_packages = new_packages[:max(0, max_packages - len(refresh_packages) - len(incomplete_packages))]
 
                 if new_packages or refresh_packages or incomplete_packages:
                     total_to_process = len(new_packages) + len(refresh_packages) + len(incomplete_packages)
@@ -265,8 +350,6 @@ def main():
 
                     logger(None, "=" * 80, level="print")
 
-                    # ==================================================
-
                     original_threads = crawler.max_threads
                     if crawler.serial_metadata_phase:
                         crawler.max_threads = 1
@@ -275,13 +358,14 @@ def main():
                         logger("...", f"Refreshing metadata for {len(refresh_packages)} updated packages...", level="print")
                         crawler.process_packages_batch(refresh_packages, phase="metadata", tqdm_initial=0, tqdm_desc="Refreshing metadata", tqdm_colour="cyan", downloaded_before_res=downloaded_before_res, failed_before_res=failed_before_res, unavailable_permanent_before_res=unavailable_before_res)
 
+                    if incomplete_packages:
+                        crawler.process_packages_batch(incomplete_packages, phase="metadata", tqdm_initial=0, tqdm_desc="Checking pending metadata", tqdm_colour="blue", downloaded_before_res=downloaded_before_res, failed_before_res=failed_before_res, unavailable_permanent_before_res=unavailable_before_res)
+
                     if new_packages:
                         logger("...", f"Collecting metadata for {len(new_packages)} new packages...", level="print")
                         crawler.process_packages_batch(new_packages, phase="metadata", tqdm_initial=0, tqdm_desc="Collecting metadata", tqdm_colour="blue", downloaded_before_res=downloaded_before_res, failed_before_res=failed_before_res, unavailable_permanent_before_res=unavailable_before_res)
 
                     crawler.max_threads = original_threads
-
-                    # ==================================================
 
                     if avoid_data:
                         logger("INFO", "Dataset downloads are disabled for this run, skipping the resource phase", level="print")
@@ -306,6 +390,10 @@ def main():
                         avoid_data=crawler.avoid_data,
                     )
                     crawler.log_run_summary(downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, unavailable_before_res, unavailable_permanent_after_res, resume_data)
+                    processed_ids = new_packages + refresh_packages + incomplete_packages
+                    unresolved = [key for key in processed_ids if key not in resume_data or resume_data[key].get("failed_resources")]
+                    if unresolved or crawler.failed_packages:
+                        exit_code = 1
                 else:
                     if not id_dataset and not avoid_data and not max_packages and not categories and not d_types:
                         logger("OK", f"No packages left to process for '{crawler.dms}', everything is up-to-date", level="print")
@@ -313,9 +401,15 @@ def main():
                         logger("OK", f"No packages left to process for '{crawler.dms}', everything is up-to-date with the configuration provided", level="print")
 
         else:
-            logger("ERROR", "Incorrect domain form. Must have the form 'https://domain.example' or 'http://domain.example'", level="print")
+            raise ValueError("Domain must start with https:// or http://")
+    except KeyboardInterrupt:
+        exit_code = 130
     except Exception as e:
-        logger("ERROR", "Unexpected error occurred", e)
+        exit_code = 1
+        logger("ERROR", "Crawler stopped", e, level="print")
+    finally:
+        locks.close()
+    return exit_code
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

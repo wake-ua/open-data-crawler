@@ -17,11 +17,12 @@ class DatosMadridEsCrawler():
 
         response, self.odcrawler.user_agent = self.odcrawler.make_request(url, self.odcrawler.user_agent, max_sec=self.odcrawler.max_sec)
         if not response:
-            return None, {}
+            raise utils.CatalogError("Madrid RDF catalog unavailable")
         
         catalog_data = response.content
+        response.close()
         if not catalog_data:
-            return None, {}
+            raise utils.CatalogError("Madrid RDF catalog unavailable")
 
         root = ET.parse(BytesIO(catalog_data)).getroot()
         ns = utils.extract_namespaces(catalog_data)
@@ -42,7 +43,9 @@ class DatosMadridEsCrawler():
         except Exception as e:
             logger("ERROR", f"Unexpected error parsing response from '{self.odcrawler.get_print_domain()}'", e)
 
-        return ids
+        if self.catalog_data is None:
+            raise utils.CatalogError("Madrid RDF not loaded")
+        return list(dict.fromkeys(ids))
 
     def parse_resource(self, resource_meta, base_name):
         resource = {}
@@ -51,14 +54,18 @@ class DatosMadridEsCrawler():
 
         resource["name"] = utils.normalize_no_html_text(utils.get_xml_text(resource_meta.find("dct:title", self.ns)))
 
-        download_el = resource_meta.find("dcat:accessURL", self.ns)
+        download_el = resource_meta.find("dcat:downloadURL", self.ns)
+        if download_el is None:
+            download_el = resource_meta.find("dcat:accessURL", self.ns)
         download_url = None
         if download_el is not None:
             download_url = download_el.text or utils.get_xml_attr(download_el, self.ns["rdf"], "resource")
         resource["downloadURL"] = utils.fix_url(download_url)
 
-        media_el = resource_meta.find("dcat:mediaType", self.ns) or resource_meta.find("dct:format", self.ns)
-        meta_media_type = utils.get_xml_text(media_el)
+        media_el = resource_meta.find("dcat:mediaType", self.ns)
+        if media_el is None:
+            media_el = resource_meta.find("dct:format", self.ns)
+        meta_media_type = utils.get_xml_text(media_el) or utils.get_xml_attr(media_el, self.ns["rdf"], "resource")
 
         return resource, meta_media_type
 

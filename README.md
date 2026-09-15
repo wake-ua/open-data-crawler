@@ -52,7 +52,12 @@
         <li><a href="#installation">Installation</a></li>
       </ul>
     </li>
-    <li><a href="#usage">Usage</a></li>
+    <li>
+      <a href="#usage">Usage</a>
+      <ul>
+        <li><a href="#examples">Examples</a></li>
+      </ul>
+    </li>
     <li>
       <a href="#contributing">Contributing</a>
       <ul>
@@ -85,11 +90,11 @@ Open Data Crawler is a tool designed to extract datasets, and optionally their m
 - [x] [GBIF](https://www.gbif.org/es/)
 - [x] [datos.madrid.es](https://datos.madrid.es)
 - [x] [data.europa.eu](https://data.europa.eu)
+- [x] [INE (Instituto Nacional de Estadística)](https://www.ine.es/) *
 - [ ] Socrata *
 - [ ] [Eurostat](https://ec.europa.eu/eurostat) *
 - [ ] [World Bank Data Catalog](https://datacatalogapi.worldbank.org/) *
 - [ ] OpenDataSoft *
-- [ ] [INE (Instituto Nacional de Estadística)](https://www.ine.es/)
 
 \* Works with restrictions or download limitations  
 
@@ -104,29 +109,20 @@ See the [open issues](https://github.com/aberenguerpas/opendatacrawler/issues) f
 To set up the project locally, follow these steps:
 
 ### Requirements
-* Python 3.9+ installed  
-* Some portals (e.g. Socrata, Zenodo) require an API token to authenticate requests or to avoid throttling limits.
-  * Example for Socrata data portals:
-  * 1. Obtain an API key [here](https://support.socrata.com/hc/en-us/articles/210138558-Generating-an-App-Token).  
-  * 2. Set the token under the corresponding section name in your `config.ini` file:
-     ```ini
-     [Socrata]
-     token = <yourSocrataToken>
-     ```
-* Runtime defaults can also be configured in `opendatacrawler/config.ini` using sections such as `[defaults]`, `[datosgobes]` or `[zenodo]`.
+* Python 3.12+ on Linux
+* Optional CKAN and Zenodo tokens can be configured in `[CKAN]` and `[zenodo]` sections. Public endpoints do not receive an empty bearer token.
+* Copy `opendatacrawler/config.example.ini` to a private configuration file and set `ODC_CONFIG=/absolute/path/config.ini`. A local `opendatacrawler/config.ini` is also read when `ODC_CONFIG` is unset; credentials are excluded from built distributions.
+* Runtime defaults can also be configured in `opendatacrawler/config.ini` using sections such as `[defaults]`, `[datosgobes]`, `[zenodo]` or `[ine]`.
   * Example for partial tabular downloads:
     ```ini
     [defaults]
     partial_dataset_rows = 100
     partial_dataset_sample_mode = first
-    ; partial_dataset_random_seed = 42
+    ; partial_dataset_random_seed = 1
     ```
 
 > [!IMPORTANT]
 > Command-line arguments take priority over `config.ini`, and `config.ini` takes priority over the built-in defaults.
-
-> [!NOTE]
-> For `datos.gob.es`, package metadata is currently resolved from the official catalog CSV rather than from the old metadata API. The crawler keeps a local cached copy in `opendatacrawler/resources/datosgobes_catalog.csv` and only refreshes it when the remote file size changes.
 
 ### Installation
 
@@ -150,48 +146,94 @@ Using this tool is very simple: you only need to specify the URL of the data por
 
 For a full list of available commands, run:
 ```sh
-python opendatacrawler -h
+opendatacrawler -h
 ```
 
 ### Examples
 #### Download all data from a portal:
 ```
-python opendatacrawler -d https://datos.gob.es
+opendatacrawler -d https://datos.gob.es
 ```
 > [!NOTE]
-> In `datos.gob.es`, this first refreshes or reuses the local catalog index in `opendatacrawler/resources/datosgobes_catalog.csv`, and then processes packages from that local index.
+> In `datos.gob.es`, this first refreshes or reuses the local catalog index under `<output>/datos.gob.es/.cache/`, and then processes packages from that local index.
 #### Download specific format data (e.g., 'xls' and 'csv'):
 ```
-python opendatacrawler -d https://datos.gob.es -t xls csv
+opendatacrawler -d https://datos.gob.es -t xls csv
 ```
-#### Download specific categories (e.g., 'tourism' and 'transport'):
+> [!NOTE]
+> The INE crawler uses JSON by default and also supports `-t csv`, `-t xlsx`/`-t xls`, and `-t px`, treating `xls` as `xlsx`. Any other extension is rejected for INE. Each selected format is downloaded as a separate distribution.
+
+#### Download specific categories (e.g., 'turismo' and 'transporte'):
 ```
-python opendatacrawler -d https://datos.gob.es -c tourism transport
+opendatacrawler -d https://datos.gob.es -c turismo transporte
 ```
+> [!NOTE]
+> `-c` is not supported by INE as it does not expose categories through this crawler.
+
+#### Download a specific dataset by ID:
+```
+opendatacrawler -d https://datos.gob.es -id a01002820-academias-andaluzas
+```
+#### Save the downloaded data in a custom folder:
+```
+opendatacrawler -d https://datos.gob.es -p /my/example/path/
+```
+#### Limit how many packages are processed:
+```
+opendatacrawler -d https://datos.gob.es -n 10
+```
+#### Limit how many resources are downloaded per package:
+```
+opendatacrawler -d https://datos.gob.es -nr 1
+```
+#### Save only metadata without downloading dataset files:
+```
+opendatacrawler -d https://datos.gob.es -nd
+```
+#### Download data from a specific country in data.europa.eu:
+```
+opendatacrawler -d https://data.europa.eu --country es
+```
+> [!NOTE]
+> `--country` is only supported by data.europa.eu.
+
+#### Force re-download of specific datasets:
+```
+opendatacrawler -d https://datos.gob.es -id a01002820-academias-andaluzas -replace
+```
+#### Resume without checking whether already-downloaded packages changed remotely:
+```
+opendatacrawler -d https://datos.gob.es --skip-updates-check
+```
+#### Reset the local data and logs for one domain before crawling:
+```
+opendatacrawler -d https://datos.gob.es -rd
+```
+> [!CAUTION]
+> `-rd` deletes the local data and logs for the selected domain before starting the crawl.
+
 #### Save original raw metadata from the portal:
 ```
-python opendatacrawler -d https://datos.gob.es --save-raw-data
+opendatacrawler -d https://datos.gob.es --save-raw-data
 ```
 > [!CAUTION]
 > `--save-raw-data` stores the original portal payload inside the generated metadata files. This is useful for debugging and traceability, but it increases metadata size and write time.
 #### Disable schema extraction for CSV/TSV files:
 ```
-python opendatacrawler -d https://datos.gob.es --no-extract-schema
+opendatacrawler -d https://datos.gob.es --no-extract-schema
 ```
-#### Store partial local copies of CSV/TSV datasets using the sampling settings defined in `config.ini`:
+#### Store partial local copies when downloading CSV/TSV datasets using the sampling settings defined in `config.ini`:
 ```ini
 [defaults]
 partial_dataset_rows = 100
 partial_dataset_sample_mode = first
-; partial_dataset_random_seed = 42
+; partial_dataset_random_seed = 1
 ```
 ```sh
-python opendatacrawler -d https://datos.gob.es --partial-dataset
+opendatacrawler -d https://datos.gob.es -t csv tsv --partial-dataset
 ```
-> [!NOTE]
+> [!IMPORTANT]
 > `--partial-dataset` enables the feature for the current run. The number of retained data rows is read from `config.ini` (`partial_dataset_rows`), and `partial_dataset_sample_mode` controls whether the crawler keeps the first rows or a random sample after full download and processing. If `partial_dataset_random_seed` is set, the random sample is reproducible across runs.
-
-<!-- _For more examples, see the [Documentation](https://example.com)_ -->
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 
@@ -224,7 +266,7 @@ And don't forget to give the project a star! Thanks for your support! 🌟
 2. Create a class `<PortalName>Crawler` with this constructor:
   ```python
   class ExampleCrawler:
-      def __init__(self, domain, data_types, user_agent):
+      def __init__(self, odcrawler):
         self.odcrawler = odcrawler
 
         # Optional: limit requests per second (useful if the portal enforces rate limits)
@@ -254,11 +296,11 @@ And don't forget to give the project a star! Thanks for your support! 🌟
     ```
 
 4. Use helper functions from the `opendatacrawler/utils/` package and built-in logging:
-  - **Network calls**: `utils.make_request(url, self.user_agent, headers=...)`  
+  - **Network calls**: `self.odcrawler.make_request(url, self.odcrawler.user_agent, headers=...)`
     > [!NOTE]
-    >  The function may rotate the `user_agent`. Always capture and reuse the returned value.
+    >  Reuse the returned agent value and close every response. Catalog failures must raise `CatalogError`; never return partial IDs as a successful enumeration.
 
-  - **File helpers**: `utils.generate_short_filename()`, `utils.get_mime_extension()`, `utils.get_extension_mime()`...
+  - **File helpers**: `utils.generate_short_filename()`, `utils.get_mime_and_ext()`, `utils.get_extension_mime()`...
 
   - **Field extraction helpers**: `utils.extract_multilang_field()`, `utils.extract_mapped_field()`  
     > For more advanced usage of `utils.extract_mapped_field()` with fallback logic and JSON mappings, see [Define new mapping files](#define-new-mapping-files).
@@ -267,13 +309,13 @@ And don't forget to give the project a star! Thanks for your support! 🌟
   Each package of datasets must return a dictionary containing at least:
   - `identifier`: the package's ID from the portal.
   - `fileName`: the normalized name for saving the metadata file (provided to `get_package()`).
-  - `resources`: a list of resources, each one generated using `parse_resource()`.
+  - `resources`: a dictionary keyed by `fileName`, populated by `init_and_parse_resources()`.
 
     It is also strongly recommended to include the following for debugging and traceability:
     - `requestURL`: the exact URL used to fetch the metadata.
     - `accessURL`: the public-facing URL where a user would normally access the package.
 
-  Each resource in the resources list must contain:
+  Each resource in the resources dictionary must contain:
   - `downloadURL`: the direct link to download the file.
   - `fileName`: the filename, including its extension, to use when saving the resource locally.
   - `mediaType`: the MIME type of the resource, which should be used to guess the proper file extension via `utils.get_extension_mime()`.

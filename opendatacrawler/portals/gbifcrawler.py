@@ -5,52 +5,50 @@ from opendatacrawler.setup_logger import log_manager
 logger = log_manager.log
 
 class GbifCrawler():
+    SUPPORTED_DATA_TYPES = {"zip"}
     def __init__(self, odcrawler):
         self.odcrawler = odcrawler
 
     def get_package_list(self):
-        url = f"{self.odcrawler.domain}/v1/dataset/search?limit=1&offset=0"
-        response, self.odcrawler.user_agent = self.odcrawler.make_request(url, self.odcrawler.user_agent, max_sec=self.odcrawler.max_sec)
-        if not response:
-            logger("ERROR", f"Error fetching package list from '{self.odcrawler.get_print_domain()}'")
-            return []
-        
-        limit = 100
-        max_pages = response.json().get("count") // limit + 1
-        offsets = [i * limit for i in range(max_pages)]
-
-        def fetch_page(offset):
-            url = f"{self.odcrawler.domain}/v1/dataset/search?limit={limit}&offset={offset}"
-            
-            response, self.odcrawler.user_agent = self.odcrawler.make_request(url, self.odcrawler.user_agent, max_sec=self.odcrawler.max_sec)
-            if not response:
-                return []
-
-            data = response.json()
-            ids = [str(pkg["key"]) for pkg in data.get("results", []) if pkg.get("key")]
-
-            return ids
-
-        ids_list = self.odcrawler.run_threaded_function(
-            items=offsets, func=fetch_page, max_workers=self.odcrawler.max_threads,
-            use_tqdm=True, tqdm_desc="Fetching packages IDs...", tqdm_colour="blue"
-        )
-
-        ids = [pkg_id for sublist in ids_list for pkg_id in sublist]
-
-        logger("OK", f"Retrieved {len(ids)} packages from '{self.odcrawler.get_print_domain()}'", level="print")
+        ids, seen = [], set()
+        offset = 0
+        expected = None
+        while True:
+            response, self.odcrawler.user_agent = self.odcrawler.make_request(
+                f"{self.odcrawler.domain}/v1/dataset/search", self.odcrawler.user_agent,
+                params={"limit": 100, "offset": offset})
+            data = utils.read_json(response, "enumerating GBIF")
+            if not isinstance(data, dict) or not isinstance(data.get("count"), int) or not isinstance(data.get("results"), list):
+                raise utils.CatalogError("Invalid GBIF search envelope")
+            if expected is None:
+                expected = data["count"]
+            if expected != data["count"]:
+                raise utils.CatalogError("GBIF catalog count changed during enumeration; retry")
+            batch = [str(item["key"]) for item in data["results"] if item.get("key")]
+            if len(batch) != len(data["results"]) or any(key in seen for key in batch) or len(set(batch)) != len(batch):
+                raise utils.CatalogError("GBIF duplicate/missing keys during pagination")
+            ids.extend(batch); seen.update(batch)
+            if data.get("endOfRecords") or len(ids) >= expected:
+                break
+            if not batch:
+                raise utils.CatalogError("GBIF returned an empty page before completion")
+            offset += len(batch)
+        if len(ids) != expected:
+            raise utils.CatalogError(f"GBIF catalog incomplete: {len(ids)}/{expected}")
         return ids
 
     def parse_resource(self, resource_meta, base_name):
         resource = {}
         resource["fileName"] = base_name
 
+        resource["id"] = resource_meta.get("key")
+        resource["endpointType"] = resource_meta.get("type")
         resource["name"] = resource_meta.get("name") or resource_meta.get("key")
         resource["description"] = resource_meta.get("description")
 
         resource["downloadURL"] = utils.fix_url(resource_meta.get("url"))
 
-        meta_media_type = resource_meta.get("format", "")
+        meta_media_type = "application/zip" if resource_meta.get("type") == "DWC_ARCHIVE" else resource_meta.get("format", "")
 
         return resource, meta_media_type
 
@@ -84,9 +82,11 @@ class GbifCrawler():
                 logger("ERROR", f"Error accessing package '{package_id}' ('{metadata_file_name}')", error_message, indent=2)
             return None
 
-        data = response.json()
+        data = utils.read_json(response, f"reading GBIF dataset {package_id}")
+        if not isinstance(data, dict) or not data.get("key"):
+            raise utils.CatalogError("GBIF dataset response lacks key")
 
-        metadata["accessURL"] = utils.fix_url(f"{self.odcrawler.domain}/dataset/{package_id}")
+        metadata["accessURL"] = utils.fix_url(f"https://www.gbif.org/dataset/{package_id}")
 
         metadata["title"] = data.get("title", {})
         metadata["description"] = data.get("description", {})
@@ -109,7 +109,7 @@ class GbifCrawler():
         distributions = []
         endpoints_res = data.get("endpoints", [])
         for endpoint in endpoints_res:
-            if endpoint.get("type") not in {"EML"}:
+            if endpoint.get("type") == "DWC_ARCHIVE":
                 distributions.append(endpoint)
 
         data_descriptions_res = data.get("dataDescriptions", [])
@@ -132,18 +132,13 @@ class GbifCrawler():
         metadata["accrualPeriodicity"] = data.get("accrualPeriodicity")
 
         metadata["modified"] = data.get("modified", "")
-        metadata["issued"] = data.get("metadata_created", "")
+        metadata["issued"] = data.get("created", "")
         metadata["license"] = data.get("license", "")
 
         metadata["source"] = self.odcrawler.domain
 
-        temporals = data.get("temporalCoverages", {})
-        for temporal in temporals:
-            if isinstance(temporal, dict):
-                metadata["temporal"] = {
-                    "startDate": temporal.get("start"),
-                    "endDate": temporal.get("end")
-                }
+        metadata["temporal"] = utils.temporal_intervals(data.get("temporalCoverages"))
+        metadata["endpoints"] = data.get("endpoints", [])
 
         spatials = data.get("geographicCoverages", [])
         metadata["geo"] = []

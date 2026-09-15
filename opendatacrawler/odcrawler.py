@@ -6,43 +6,53 @@ import hashlib
 import requests
 import humanize
 import gc
+import copy
+import csv
+import tempfile
+import zipfile
+import xml.etree.ElementTree as ET
+from types import SimpleNamespace
 import random
 import threading
 from datetime import datetime, timedelta
 import time
 import traceback
 from frictionless import describe, Dialect
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from tqdm import tqdm
 from opendatacrawler import utils
-from opendatacrawler.portals import CkanCrawler, DataEuropaEuCrawler, DatosGobEsCrawler, DatosMadridEsCrawler, GbifCrawler, ZenodoCrawler
+from opendatacrawler.portals import CkanCrawler, DataEuropaEuCrawler, DatosGobEsCrawler, DatosMadridEsCrawler, GbifCrawler, INECrawler, ZenodoCrawler
 from urllib.parse import urlparse
 
 from opendatacrawler.setup_logger import log_manager
 logger = log_manager.log
 
-
 class LowDiskSpaceError(RuntimeError):
     pass
 
-
 class OpenDataCrawler():
-    LOCAL_RESOURCE_FIELDS = frozenset({"path", "encoding", "delimiter", "schema", "size"})
+    LOCAL_RESOURCE_FIELDS = frozenset({"fileName", "path", "encoding", "delimiter", "schema", "size", "sizeBytes", "downloadHeaders", "processingFingerprint"})
     TEMP_UNAVAILABLE_INFO_KEY = utils.metadata_tag_key("resource_temporarily_unavailable")
 
-    def __init__(self, domain, path=None, data_types=None, categories=None, partial=False, partial_dataset_rows=None, avoid_data=None, max_sec=None, reqs_per_sec=None, max_threads=None, max_resource_threads=None, num_resources=None, countries=None, ignore_hosts=None, save_raw_data=False, extract_schema=True, check_remote_updates=True):
+    def __init__(self, domain, path=None, data_types=None, categories=None, partial=False, partial_dataset_rows=None, avoid_data=None, max_sec=None, reqs_per_sec=None, max_threads=None, max_resource_threads=None, max_packages=None, num_resources=None, countries=None, ignore_hosts=None, save_raw_data=False, extract_schema=True, check_remote_updates=True):
         self.domain = utils.normalize_domain(domain).rstrip("/")
         self.dms = None
         self.dms_instance = None
-        self.max_sec = max_sec
+        self.max_sec = max_sec or 30
         self.config_reqs_per_sec = reqs_per_sec
-        self.max_threads = max_threads
-        self.max_resource_threads = max_resource_threads
+        self.max_threads = max_threads or 4
+        self.max_resource_threads = max_resource_threads or 2
         self.serial_metadata_phase = True
         self.save_raw_data = save_raw_data
         self.extract_schema = extract_schema
         self.check_remote_updates = check_remote_updates
         self.packages_requiring_refresh = set()
+        self.failed_packages = set()
+        self.download_results = {}
+        self.request_deadline_seconds = utils.get_config_option("defaults", "request_deadline_seconds", float, 120)
+        self.download_deadline_seconds = utils.get_config_option("defaults", "download_deadline_seconds", float, 600)
+        self.http_max_attempts = utils.get_config_option("defaults", "http_max_attempts", int, 3)
+        self.max_metadata_bytes = utils.get_config_option("defaults", "max_metadata_mb", int, 64) * 1024 * 1024
 
         base_path = path or os.path.join(os.getcwd(), "data")
         utils.create_folder(base_path)
@@ -59,10 +69,12 @@ class OpenDataCrawler():
             partial_dataset_rows = 100
         self.partial_dataset_rows = partial_dataset_rows
         self.partial_dataset_sample_mode = "first"
-        self.partial_dataset_random_seed = None
+        self.partial_dataset_random_seed = 1
         self.avoid_data = avoid_data
         self.num_resources = num_resources
+        self.max_packages = max_packages
 
+        self.countries = countries or []
         self.current_country = None
         self.ignore_hosts = {self.normalize_host(value) for value in (ignore_hosts or []) if self.normalize_host(value)}
 
@@ -86,93 +98,91 @@ class OpenDataCrawler():
         if self.ignore_hosts:
             logger("INFO", f"Ignoring hosts for this run: {', '.join(sorted(self.ignore_hosts))}", level="print")
 
-    # ==============================
-    
     def detect_dms(self):
-        dms_endpoints = {
-            "dataEuropaEu": "/api/hub/repo/catalogues",
-            #"Socrata": "/api/catalog/v1",
-            "datosGobEs": "/apidata/catalog/dataset?_sort=title&_pageSize=1",
+        endpoints = {
             "CKAN": "/api/3/action/package_list",
-            #"WorldBank": "/ddhxext/DatasetList",
-            #"EuroStat": "/estat-navtree-portlet-prod/BulkDownloadListing?sort=1&dir=metadata",
+            "dataEuropaEu": "/api/hub/repo/catalogues",
+            "datosGobEs": "/apidata/catalog/dataset?_sort=title&_pageSize=1",
             "Zenodo": "/oai2d?verb=Identify",
-            "GBIF" : "/v1/dataset/search?limit=1&offset=0",
-            "OpenDataSoft": "/api/v2/catalog",
+            "GBIF": "/v1/dataset/search?limit=1&offset=0",
             "INE": "/wstempus/js/ES/OPERACIONES_DISPONIBLES",
-            "datosMadridEs": "/portal/site/egob"
         }
-
-        base_url = self.domain.rstrip("/")
-        headers = {
-            "Accept": "application/json",
-        }
-
-        for dms_name, endpoint in dms_endpoints.items():
-            full_url = utils.fix_url(base_url + endpoint)
-            logger("...", f"Checking DMS '{dms_name}' at '{full_url}'...", level="print")
-
-            try:
-                response, self.user_agent = self.make_request(full_url, self.user_agent, headers=headers, max_sec=120)
-                if not response:
-                    logger("NET", f"No response from endpoint '{full_url}' while checking DMS '{dms_name}'")
-                    continue
-
-                if response.status_code != 200:
-                    logger("NET", f"Non-successful response (HTTP {response.status_code}) from '{full_url}' while checking DMS '{dms_name}'")
-                    continue
-                
-                response.raise_for_status()
-                if dms_name == "datosMadridEs" or "text/html" not in response.headers.get("Content-Type", "").lower():
-                    self.dms = dms_name
-                    logger("OK", f"DMS detected: '{dms_name}'", level="print")
-
-                    if not utils.create_folder(self.save_path):
-                        logger("ERROR", f"Can't create folder '{self.save_path}'")
-                    break
-                
-            except requests.RequestException as e:
-                logger("NET", f"Failed to reach '{full_url}'", [e, traceback.format_exc()])
+        host = urlparse(self.domain).hostname
+        hints = {"data.europa.eu": "dataEuropaEu", "datos.gob.es": "datosGobEs",
+                 "api.gbif.org": "GBIF", "zenodo.org": "Zenodo", "sandbox.zenodo.org": "Zenodo",
+                 "www.ine.es": "INE", "servicios.ine.es": "INE", "ine.es": "INE"}
+        order = list(endpoints)
+        if host in hints:
+            order.remove(hints[host]); order.insert(0, hints[host])
+        for name in order:
+            url = self.domain + endpoints[name]
+            if name == "INE" and host in {"www.ine.es", "servicios.ine.es", "ine.es"}:
+                url = "https://servicios.ine.es" + endpoints[name]
+            headers = {"Accept": "application/json"}
+            if name == "CKAN" and utils.AUTH_TOKENS.get("ckan"):
+                headers["Authorization"] = utils.AUTH_TOKENS["ckan"]
+            response, self.user_agent = self.make_request(url, self.user_agent, headers=headers)
+            if response is None:
                 continue
-
-        if self.dms == "CKAN":
-            self.ckan_action_requires_post = self.detect_ckan_requires_post()
-
-        dms_classes = {
-            "CKAN": CkanCrawler,
-            #"Socrata": SocrataCrawler,
-            #"WorldBank": WorldBankCrawler,
-            #"EuroStat": EurostatCrawler,
-            "datosGobEs": DatosGobEsCrawler,
-            "Zenodo": ZenodoCrawler,
-            "GBIF" : GbifCrawler,
-            #"OpenDataSoft": OpenDataSoftCrawler,
-            #"INE": INECrawler,
-            "dataEuropaEu": DataEuropaEuCrawler,
-            "datosMadridEs": DatosMadridEsCrawler
-        }
-
+            if name == "CKAN" and (response.status_code == 405 or "Please use POST method" in response.text):
+                response.close()
+                response, self.user_agent = utils.make_request_post(url, self.user_agent, headers=headers, json_body={}, rate_controller=self)
+                self.ckan_action_requires_post = True
+            if response is None:
+                continue
+            try:
+                response.raise_for_status()
+                if name == "Zenodo":
+                    tree = ET.fromstring(response.content)
+                    valid = tree.tag == "{http://www.openarchives.org/OAI/2.0/}OAI-PMH" and tree.find("{http://www.openarchives.org/OAI/2.0/}Identify") is not None
+                else:
+                    data = response.json()
+                    valid = self.valid_detection_payload(name, data)
+                if valid:
+                    self.dms = name
+                    break
+            except (requests.RequestException, ValueError, ET.ParseError):
+                continue
+            finally:
+                response.close()
+        classes = {"CKAN": CkanCrawler, "dataEuropaEu": DataEuropaEuCrawler,
+                   "datosGobEs": DatosGobEsCrawler, "Zenodo": ZenodoCrawler,
+                   "GBIF": GbifCrawler, "INE": INECrawler, "datosMadridEs": DatosMadridEsCrawler}
         if self.dms:
-            cls = dms_classes.get(self.dms)
-            if cls:
-                try:
-                    self.dms_instance = cls(self)
-                except Exception:
-                    logger("ERROR", f"Error instantiating DMS class for '{self.dms}'", f"\n{traceback.format_exc()}")
+            utils.create_folder(self.save_path)
+            self.dms_instance = classes[self.dms](self)
+            if self.dms == "CKAN" and not self.ckan_action_requires_post:
+                self.ckan_action_requires_post = self.detect_ckan_requires_post()
+            logger("OK", f"DMS detected: '{self.dms}'", level="print")
         else:
-            logger("ERROR", f"No accessible or supported DMS detected at '{self.get_print_domain()}'", level="print")
+            raise utils.CatalogError(f"No supported portal contract found at {self.domain}")
 
-    # ==============================
-    def detect_ckan_requires_post(self) -> bool:
-        probe_url = utils.fix_url(f"{self.domain}/api/3/action/package_show")
-        try:
-            r, self.user_agent = self.make_request(probe_url, self.user_agent, headers={"Accept": "application/json"}, params={"id": "non-existent"}, max_sec=30)
-            if r is None:
-                return False
-            txt = (r.text or "")
-            return ("Please use POST method" in txt) or ("Invalid request" in txt)
-        except Exception:
+    @staticmethod
+    def valid_detection_payload(name, data):
+        if name == "INE":
+            return isinstance(data, list) and bool(data) and all(isinstance(x, dict) and "Codigo" in x and "Nombre" in x for x in data)
+        if name == "dataEuropaEu" and isinstance(data, list):
+            return bool(data) and all(isinstance(x, str) and "/catalogue/" in x for x in data)
+        if not isinstance(data, dict):
             return False
+        if name == "CKAN":
+            return data.get("success") is True and isinstance(data.get("result"), list)
+        if name == "GBIF":
+            return isinstance(data.get("count"), int) and isinstance(data.get("results"), list)
+        if name == "datosGobEs":
+            return isinstance(data.get("result"), dict) and isinstance(data["result"].get("items"), list)
+        if name == "dataEuropaEu":
+            return (data.get("success") is True or data.get("status") == "success") and isinstance(data.get("result"), (dict, list))
+        return False
+
+    def detect_ckan_requires_post(self):
+        response, self.user_agent = self.make_action_request("package_show", params={"id": "non-existent"})
+        if response is None:
+            return False
+        try:
+            return response.status_code == 405 or "Please use POST method" in response.text
+        finally:
+            response.close()
 
     def get_ckan_api_key(self):
         if self.dms != "CKAN":
@@ -181,7 +191,7 @@ class OpenDataCrawler():
         if self.dms_instance and hasattr(self.dms_instance, "token"):
             return self.dms_instance.token
 
-        return None
+        return utils.AUTH_TOKENS.get("ckan")
         
     def set_country_context(self, country):
         previous_save_path = self.save_path
@@ -228,8 +238,6 @@ class OpenDataCrawler():
 
         return merged_resource
 
-    # ==============================
-
     def reset_domain(self, reset_domain, has_data, has_logs):
         if reset_domain and (has_data or has_logs):
             try:
@@ -259,7 +267,7 @@ class OpenDataCrawler():
             return
 
         for pkg_id in dataset_ids:
-            meta_name = f"meta_{utils.generate_short_filename(f'{self.domain}_{pkg_id}')}.json"
+            meta_name = self.metadata_file_name(pkg_id)
             meta_path = os.path.join(self.save_path, meta_name)
 
             if not os.path.exists(meta_path):
@@ -310,32 +318,37 @@ class OpenDataCrawler():
             logger("WARNING", f"Host '{host_info['host']}' is showing repeated access problems in this run ({host_info['temporary_failures']} temporary failures, {host_info['permanent_failures']} permanent failures, {host_info['cooldown_hits']} cooldown skips, last reason: {host_info['last_reason']}). Try again later or use '--ignore-hosts {host_info['host']}' to skip it.")
 
     def run_threaded_function(self, items, func, max_workers=1, thread_name_prefix=None, use_tqdm=False, tqdm_initial=0, tqdm_desc="", tqdm_colour=None, store_results=True):
-        results = [] if store_results else None
-        if max_workers == 1:
-            iterable = items
-            if use_tqdm:
-                iterable = tqdm(items, total=len(items) + tqdm_initial, initial=tqdm_initial, desc=tqdm_desc, colour=tqdm_colour)
-            for item in iterable:
-                result = func(item)
-                if store_results:
-                    results.append(result)
-        else:
-            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=f"{thread_name_prefix}") as executor:
-                futures = [executor.submit(func, item) for item in items]
+        workers = max_workers or self.max_threads
+        results = []
+        iterator = iter(items)
+        progress = tqdm(total=len(items) + tqdm_initial, initial=tqdm_initial, desc=tqdm_desc,
+                        colour=tqdm_colour, disable=not use_tqdm)
+        try:
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix=thread_name_prefix or "odc") as executor:
+                pending = set()
+                def fill():
+                    while len(pending) < workers * 2:
+                        try:
+                            item = next(iterator)
+                        except StopIteration:
+                            break
+                        pending.add(executor.submit(func, item))
+                fill()
                 try:
-                    if use_tqdm:
-                        futures_iter = tqdm(as_completed(futures), total=len(futures) + tqdm_initial, initial=tqdm_initial, desc=tqdm_desc, colour=tqdm_colour)
-                    else:
-                        futures_iter = as_completed(futures)
-                    for future in futures_iter:
-                        result = future.result()
-                        if store_results:
-                            results.append(result)
-                except KeyboardInterrupt:
-                    for f in futures:
-                        f.cancel()
-                    executor.shutdown(wait=False)
+                    while pending:
+                        done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                        for future in done:
+                            value = future.result()
+                            if store_results:
+                                results.append(value)
+                            progress.update(1)
+                        fill()
+                except BaseException:
+                    for future in pending:
+                        future.cancel()
                     raise
+        finally:
+            progress.close()
         return results if store_results else None
 
     def process_packages_batch(self, packages, phase, tqdm_initial, tqdm_desc, tqdm_colour, downloaded_before_res, failed_before_res, unavailable_permanent_before_res, max_workers=None):
@@ -399,7 +412,7 @@ class OpenDataCrawler():
             )
 
             self.log_run_summary(downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, unavailable_permanent_before_res, unavailable_permanent_after_res, resume_data)
-            os._exit(1)
+            raise
         except LowDiskSpaceError as e:
             logger(None, "=" * 80, level="print")
             logger("ERROR", "Stopping crawler due to low disk space", e, level="print")
@@ -413,12 +426,12 @@ class OpenDataCrawler():
             )
 
             self.log_run_summary(downloaded_before_res, failed_before_res, downloaded_after_res, failed_after_res, unavailable_permanent_before_res, unavailable_permanent_after_res, resume_data)
-            os._exit(1)
-
-    # ==============================
+            raise
 
     def init_rate_limit(self, reqs_per_sec=None, safety_factor=0.85):
-        if not reqs_per_sec:
+        if reqs_per_sec is not None and reqs_per_sec <= 0:
+            raise ValueError("reqs_per_sec must be positive")
+        if reqs_per_sec is None:
             self.rate_limit = None
             return
 
@@ -490,7 +503,8 @@ class OpenDataCrawler():
             if semaphore is None:
                 semaphore = threading.BoundedSemaphore(self.host_max_concurrent_requests)
                 self.host_request_semaphores[host] = semaphore
-        semaphore.acquire()
+        if not semaphore.acquire(timeout=self.request_deadline_seconds):
+            raise requests.Timeout(f"Timed out waiting for a connection slot for {host}")
         return host, semaphore
 
     def release_host_request_slot(self, semaphore):
@@ -622,7 +636,7 @@ class OpenDataCrawler():
         hdrs.setdefault("Connection", "keep-alive")
 
         ckan_api_key = self.get_ckan_api_key()
-        if ckan_api_key and urlparse(url).netloc == self.domain_netloc:
+        if ckan_api_key and (urlparse(url).scheme, urlparse(url).netloc) == (urlparse(self.domain).scheme, self.domain_netloc):
             hdrs.setdefault("X-CKAN-API-Key", ckan_api_key)
             hdrs.setdefault("Authorization", ckan_api_key)
 
@@ -639,124 +653,66 @@ class OpenDataCrawler():
         headers = dict(headers) if headers else {}
 
         ckan_api_key = self.get_ckan_api_key()
-        if ckan_api_key and urlparse(url).netloc == self.domain_netloc:
+        if ckan_api_key and (urlparse(url).scheme, urlparse(url).netloc) == (urlparse(self.domain).scheme, self.domain_netloc):
             headers.setdefault("Authorization", ckan_api_key)
             headers.setdefault("X-CKAN-API-Key", ckan_api_key)
 
+        kwargs.setdefault("max_sec", self.max_sec)
+        if self.dms == "Zenodo" and (urlparse(url).scheme, urlparse(url).netloc) == (urlparse(self.domain).scheme, self.domain_netloc) and getattr(self.dms_instance, "token", None):
+            headers.setdefault("Authorization", f"Bearer {self.dms_instance.token}")
         return utils.make_request(url, current_agent, headers=headers, **kwargs, rate_controller=self)
         
-    # ==============================
-
     def save_dataset(self, url, file_name, chunk_size=64*1024, log_indent=4):
-        logger("...", f"Attempting to download resource '{file_name}' from '{url}'...", indent=log_indent)
-
-        headers = {
-            "Accept": "*/*", 
-            "Connection": "keep-alive"
-        }
-
-        response, self.user_agent, error_tag, e = self.make_request(url, self.user_agent, headers=headers, max_sec=self.max_sec, stream=True, return_tag=True)
-        if error_tag:
-            return None, error_tag, e
-
-        path = os.path.join(self.save_path, file_name)
-        temp_path = f"{path}.part"
+        response, self.user_agent, tag, error = self.make_request(url, self.user_agent, stream=True, return_tag=True)
+        if response is None:
+            return None, tag or "resource_temporarily_unavailable", error
+        path = os.path.join(self.save_path, os.path.basename(file_name))
+        temporary = None
         try:
-            content_length = response.headers.get("Content-Length")
-            required_bytes = int(content_length) if content_length and str(content_length).isdigit() else 0
-
-            if self.max_file_size_mb and required_bytes:
-                max_allowed_bytes = int(self.max_file_size_mb) * 1024 * 1024
-                if required_bytes > max_allowed_bytes:
-                    logger(
-                        "WARNING",
-                        f"Skipping resource '{file_name}' because server-declared size {humanize.naturalsize(required_bytes, binary=True)} exceeds configured limit of {humanize.naturalsize(max_allowed_bytes, binary=True)}",
-                        indent=log_indent,
-                    )
-                    return None, "resource_too_large", None
-
-            self.ensure_disk_headroom(temp_path, required_bytes=required_bytes, context=f"downloading resource '{file_name}'", log_indent=log_indent)
-
-            total_bytes = 0
-            next_space_check = 64 * 1024 * 1024
-
-            response.raw.decode_content = True
-            try:
-                if os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                    except Exception as cleanup_error:
-                        logger("ERROR", f"Failed to delete stale partial file '{temp_path}' before download", cleanup_error, indent=log_indent)
-
-                with open(temp_path, "wb") as outfile:
-                    for chunk in response.iter_content(chunk_size=chunk_size):
-                        if not chunk:
-                            continue
-
-                        outfile.write(chunk)
-                        total_bytes += len(chunk)
-
-                        if total_bytes >= next_space_check:
-                            self.ensure_disk_headroom(temp_path, context=f"continuing download of resource '{file_name}'", log_indent=log_indent)
-                            next_space_check += 64 * 1024 * 1024
-
-            except LowDiskSpaceError:
-                if os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                        logger("DEL", f"Deleted partial file '{temp_path}' after disk-space failure", indent=log_indent)
-                    except Exception as cleanup_error:
-                        logger("ERROR", f"Failed to delete partial file '{temp_path}'", cleanup_error, indent=log_indent)
-                raise
-            except (requests.exceptions.ChunkedEncodingError, requests.exceptions.ConnectionError) as e:
-                if os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                        logger("DEL", f"Deleted partial file '{temp_path}' after interrupted download", indent=log_indent)
-                    except Exception as cleanup_error:
-                        logger("ERROR", f"Failed to delete partial file '{temp_path}'", cleanup_error, indent=log_indent)
-                logger("WARNING", f"Chunked connection error while saving '{file_name}'", e, indent=log_indent)
-                return None, "resource_temporarily_unavailable", e
-            except OSError as e:
-                if getattr(e, "errno", None) == errno.ENOSPC:
-                    if os.path.exists(temp_path):
-                        try:
-                            os.remove(temp_path)
-                            logger("DEL", f"Deleted partial file '{temp_path}' after disk-space failure", indent=log_indent)
-                        except Exception as cleanup_error:
-                            logger("ERROR", f"Failed to delete partial file '{temp_path}'", cleanup_error, indent=log_indent)
-                    logger("WARNING", f"Insufficient disk space while saving '{file_name}'", e, indent=log_indent)
-                    raise LowDiskSpaceError(f"Insufficient disk space while saving '{file_name}'") from e
-                raise
-
-            if total_bytes == 0:
-                if os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                    except Exception as cleanup_error:
-                        logger("ERROR", f"Failed to delete empty file '{temp_path}'", cleanup_error, indent=log_indent)
-                logger("WARNING", f"No data downloaded for resource '{file_name}'", indent=log_indent)
+            length = response.headers.get("Content-Length", "")
+            length = int(length) if str(length).isdigit() else 0
+            maximum = int(self.max_file_size_mb or 0) * 1024 * 1024
+            if maximum and length > maximum:
+                return None, "resource_too_large", {"message": "Content-Length exceeds limit"}
+            self.ensure_disk_headroom(path, required_bytes=length, context="downloading")
+            digest = hashlib.sha256()
+            total = 0
+            deadline = time.monotonic() + self.download_deadline_seconds
+            next_check = 8 * 1024 * 1024
+            with tempfile.NamedTemporaryFile(dir=self.save_path, prefix=utils.ATOMIC_TEMP_PREFIX, delete=False) as output:
+                temporary = output.name
+                for chunk in response.iter_content(chunk_size=chunk_size):
+                    if time.monotonic() >= deadline:
+                        raise requests.Timeout("Download deadline exceeded")
+                    total += len(chunk)
+                    if maximum and total > maximum:
+                        return None, "resource_too_large", {"message": "Actual response body exceeds limit", "sizeBytes": total}
+                    digest.update(chunk)
+                    output.write(chunk)
+                    if total >= next_check:
+                        self.ensure_disk_headroom(path, context="downloading")
+                        next_check = total + 8 * 1024 * 1024
+                output.flush()
+                os.fsync(output.fileno())
+            if not total:
                 return None, "no_data", None
-
-            if not os.path.exists(temp_path):
-                logger("WARNING", f"Partial file '{temp_path}' disappeared before finalizing download of '{file_name}'", indent=log_indent)
-                return None, "resource_temporarily_unavailable", FileNotFoundError(temp_path)
-
-            os.replace(temp_path, path)
-
+            os.replace(temporary, path)
+            self.download_results[path] = {"sha256": digest.hexdigest(), "sizeBytes": total,
+                "url": response.url, "headers": {key: response.headers[key] for key in
+                    ("Content-Type", "Content-Disposition", "ETag", "Last-Modified", "Content-Length") if key in response.headers}}
             return path, None, None
-
-        except Exception as e:
-            if os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except Exception as cleanup_error:
-                    logger("ERROR", f"Failed to delete incomplete file '{temp_path}' after unexpected error", cleanup_error, indent=log_indent)
-            logger("ERROR", f"Unexpected error saving dataset '{file_name}'", [e, traceback.format_exc()], indent=log_indent)
-            return None, None, None
+        except LowDiskSpaceError:
+            raise
+        except OSError as error:
+            if error.errno == errno.ENOSPC:
+                raise LowDiskSpaceError("No disk space during download") from error
+            raise
+        except requests.RequestException as error:
+            return None, "resource_temporarily_unavailable", {"message": str(error)}
         finally:
-            if response:
-                response.close()
+            response.close()
+            if temporary and os.path.exists(temporary):
+                os.remove(temporary)
 
     def save_metadata(self, package, log_indent=2):
         try:
@@ -770,6 +726,8 @@ class OpenDataCrawler():
                     all_resources_complete = False
                     break
 
+            if not all_resources_complete:
+                package_status.pop("packageCompleted", None)
             if all_resources_complete and not package_status.get("packageCompleted"):
                 package_status["packageCompleted"] = datetime.now().isoformat()
 
@@ -806,164 +764,52 @@ class OpenDataCrawler():
             return False
 
     def handle_parse_resource(self, resource_meta, base_name, metadata_file_name, reparse_data=None, log_indent=4):
-        resource_crawler_info = utils.init_metadata(package=False)
-
-        if reparse_data:
-            logger("...", f"Re-parsing resource '{base_name}' from package '{metadata_file_name}'...", indent=log_indent)
-            resource = resource_meta
-            meta_media_type = reparse_data.get("metaMediaType")
+        info = utils.init_metadata(package=False, crawled=False)
+        if isinstance(resource_meta, dict) and (resource_meta.get("normalizedResource") or (resource_meta.get("fileName") and resource_meta.get("downloadURL") and resource_meta.get("mediaType"))):
+            resource = dict(resource_meta)
+            mime = resource.get("mediaType")
+        elif reparse_data:
+            resource = dict(resource_meta)
+            mime = resource.get("mediaType") or reparse_data.get("metaMediaType")
         else:
-            logger("...", f"Parsing resource '{base_name}' from package '{metadata_file_name}'...", indent=log_indent)
-            resource, meta_media_type = self.dms_instance.parse_resource(resource_meta, base_name)
+            resource, mime = self.dms_instance.parse_resource(resource_meta, base_name)
+        resource = resource or {"fileName": base_name}
+        resource["normalizedResource"] = True
+        mime, ext = utils.get_mime_and_ext(mime)
+        if not mime:
+            mime, ext = utils.get_resource_ext_info(SimpleNamespace(headers={}), resource.get("downloadURL"))
+        resource["mediaType"] = mime or "application/octet-stream"
+        clean_base = base_name.rsplit(".", 1)[0] if "." in base_name else base_name
+        resource["fileName"] = f"{clean_base}.{ext}" if ext else clean_base
+        if not resource.get("downloadURL"):
+            info["fileInfo"].update(utils.add_tag_explanations("invalid_download_url"))
+            info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
+        return resource, info
 
-        if reparse_data:
-            meta_media_type = reparse_data.get("metaMediaType") or meta_media_type
-
-        if not resource or not resource.get("downloadURL"):
-            raw_download_url = None
-            if isinstance(resource_meta, dict):
-                raw_download_url = resource_meta.get("downloadURL")
-                if not raw_download_url:
-                    raw_access_url = resource_meta.get("access_url")
-                    if isinstance(raw_access_url, list) and raw_access_url:
-                        raw_download_url = raw_access_url[0]
-                    elif isinstance(raw_access_url, str):
-                        raw_download_url = raw_access_url
-
-            resource_crawler_info["fileInfo"].update(utils.add_tag_explanations("invalid_download_url", {
-                "<download_url>": raw_download_url or "(missing)",
-                "<validation_reason>": "missing or unsupported download URL in metadata",
-            }))
-            resource_crawler_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
-            logger("WARNING", f"Missing or unsupported download URL for resource '{base_name}'", indent=log_indent)
-            return resource, resource_crawler_info
-
-        response, self.user_agent, error_tag, e = self.make_request(resource["downloadURL"], self.user_agent, return_tag=True, max_sec=self.max_sec, stream=True)
-        if not response:
-            error_message = utils.extract_error_message(e)
-            tag_values = utils.extract_error_tag_values(e)
-            if error_tag:
-                if error_tag != "resource_temporarily_unavailable":
-                    resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag, tag_values))
-                    logger("WARNING", f"Non-retryable error accessing resource '{base_name}' for parsing", error_message, indent=log_indent)
-                    resource_crawler_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
-                else:
-                    retry_tag_values = {"<metaMediaType>": meta_media_type}
-                    if tag_values:
-                        retry_tag_values.update(tag_values)
-                    resource_crawler_info["fileInfo"].update(utils.add_tag_explanations(error_tag, retry_tag_values))
-                    logger("WARNING", f"Retryable error accessing resource '{base_name}' for parsing", error_message, indent=log_indent)
-            else:
-                logger("ERROR", f"Error accessing resource '{base_name}'", error_message, indent=log_indent)
-
-            return resource, resource_crawler_info
-
-        try:
-            media_type, file_name, tag_val = utils.resolve_mediatype_conflict(meta_media_type, response, resource["downloadURL"], base_name)
-
-            resource["mediaType"] = media_type
-            resource["fileName"] = file_name
-            self.clear_recovered_resource_tags(resource_crawler_info)
-            if tag_val:
-                logger("WARNING", f"Detected a media type mismatch for '{resource['downloadURL']}'", indent=log_indent)
-                resource_crawler_info["fileMetadataChanges"].update(utils.add_tag_explanations("mimetype_mismatch", tag_val))
-
-            if reparse_data:
-                logger("OK", f"Successfully re-parsed resource '{resource['fileName']}' from package '{metadata_file_name}'", indent=log_indent)
-            else:
-                logger("OK", f"Successfully parsed resource '{resource['fileName']}' from package '{metadata_file_name}'", indent=log_indent)
-
-            return resource, resource_crawler_info
-        finally:
-            response.close()
-        
     def retry_temporarily_unavailable_resources(self, package, log_indent=2):
-        missing_resources = [
-            file_name for file_name, _ in package["crawlerInfo"]["resourcesInfo"].items()
-            if utils.is_completed(package, file_name, complete=False, unavailable=True)
-        ]
-
-        def reparse_resource(old_file_name):
-            resource_meta = package["resources"].get(old_file_name)
-            info = package["crawlerInfo"]["resourcesInfo"].get(old_file_name, {})
-
-            tag_info = info.get("fileInfo", {}).get(self.TEMP_UNAVAILABLE_INFO_KEY, {})
-            tag_values = tag_info.get("values", {})
-
-            if resource_meta and tag_values:
-                new_resource, new_info = self.handle_parse_resource(resource_meta, old_file_name, package["fileName"], reparse_data=tag_values)
-                if new_resource:
-                    return old_file_name, new_resource, new_info
-            return old_file_name, None, None
-
-        if missing_resources:
-            logger("...", f"Re-parsing {len(missing_resources)} temporarily unavailable resources...", indent=log_indent)
-            reparsed_resources = self.run_threaded_function(
-                items=missing_resources,
-                func=reparse_resource,
-                max_workers=self.max_resource_threads,
-                thread_name_prefix="r",
-            )
-
-            for old_file_name, new_resource, new_info in reparsed_resources:
-                if not new_resource:
-                    continue
-
-                new_file_name = new_resource["fileName"]
-                if new_file_name != old_file_name:
-                    package["resources"].pop(old_file_name, None)
-                    package["crawlerInfo"]["resourcesInfo"].pop(old_file_name, None)
-
-                package["resources"][new_file_name] = new_resource
-                package["crawlerInfo"]["resourcesInfo"][new_file_name] = new_info
-
+        utils.normalize_metadata(package)
+        for info in package.get("crawlerInfo", {}).get("resourcesInfo", {}).values():
+            if self.TEMP_UNAVAILABLE_INFO_KEY in info.get("fileInfo", {}):
+                info["fileInfo"].pop(self.TEMP_UNAVAILABLE_INFO_KEY, None)
+                info["fileStatus"].pop("fileCompleted", None)
         return package
 
     def init_and_parse_resources(self, metadata, distributions, log_indent=2):
-        logger("WORK", f"Processing {len(distributions)} resources from package '{metadata['identifier']}' ('{metadata['fileName']}')...", indent=log_indent)
-
         metadata["resources"] = {}
         metadata["crawlerInfo"]["resourcesInfo"] = {}
-
-        for idx, resource in enumerate(distributions):
-            base_name = utils.generate_short_filename(f"{metadata['fileName']}_{idx}")
-            metadata["resources"][base_name] = resource
-            resource_info = utils.init_metadata(package=False, crawled=False)
+        for raw in distributions:
+            resource, info = self.handle_parse_resource(raw, "pending", metadata["fileName"])
+            identity = resource.get("id") or resource.get("identifier") or resource.get("downloadURL")
+            if identity is None:
+                identity = json.dumps(resource, sort_keys=True, ensure_ascii=False)
+            base = utils.generate_short_filename(f"{metadata['fileName']}:resource:{identity}")
+            _, ext = utils.get_mime_and_ext(resource.get("mediaType"))
+            name = f"{base}.{ext}" if ext else base
+            resource["fileName"] = name
             if self.avoid_data:
-                resource_info = self.mark_resource_skipped_by_config(resource_info)
-            metadata["crawlerInfo"]["resourcesInfo"][base_name] = resource_info
-
-        if self.avoid_data:
-            logger("INFO", f"Skipping remote resource parsing for package '{metadata['identifier']}' because dataset downloads are disabled", indent=log_indent)
-            return
-
-        if self.num_resources:
-            logger("INFO", f"Delaying full resource parsing for package '{metadata['identifier']}' because num_resources={self.num_resources}", indent=log_indent)
-            return
-
-        def parse_resource_func(item):
-            idx, resource = item
-            base_name = utils.generate_short_filename(f"{metadata['fileName']}_{idx}")
-            parsed_resource, parsed_info = self.handle_parse_resource(resource, base_name, metadata["fileName"])
-            return base_name, resource, parsed_resource, parsed_info
-
-        logger("...", f"Parsing {len(distributions)} resources from package '{metadata['fileName']}'...", indent=log_indent)
-        parsed_resources = self.run_threaded_function(
-            items=list(enumerate(distributions)), func=parse_resource_func,
-            max_workers=self.max_resource_threads, thread_name_prefix="r"
-        )
-
-        for base_name, resource, parsed_resource, parsed_info in parsed_resources:
-            if not parsed_resource:
-                continue
-
-            new_file_name = parsed_resource["fileName"]
-            if new_file_name != base_name:
-                metadata["resources"].pop(base_name, None)
-                metadata["crawlerInfo"]["resourcesInfo"].pop(base_name, None)
-
-            metadata["resources"][new_file_name] = parsed_resource
-            metadata["crawlerInfo"]["resourcesInfo"][new_file_name] = parsed_info
+                info = self.mark_resource_skipped_by_config(info)
+            metadata["resources"][name] = resource
+            metadata["crawlerInfo"]["resourcesInfo"][name] = info
 
     def mark_resource_skipped_by_config(self, resource_info):
         normalized_info = dict(resource_info or {})
@@ -995,6 +841,21 @@ class OpenDataCrawler():
         _, inferred_ext = utils.get_mime_and_ext(media_type)
         return inferred_ext
 
+    def add_mimetype_mismatch(self, resource_info, old_media_type, old_file_name, new_media_type, new_file_name):
+        old_mime, old_ext = utils.get_mime_and_ext(old_media_type)
+        new_mime, new_ext = utils.get_mime_and_ext(new_media_type)
+        if not old_mime or not new_mime or old_mime == new_mime or new_mime in utils.GENERIC_MIME_TYPES:
+            return
+        clean_old = old_file_name.rsplit(".", 1)[0] if old_file_name and "." in old_file_name else old_file_name
+        clean_new = new_file_name.rsplit(".", 1)[0] if new_file_name and "." in new_file_name else new_file_name
+        values = {
+            "<mediaType_old>": old_mime,
+            "<fileName_old>": f"{clean_old}.{old_ext}" if old_ext and clean_old else old_file_name,
+            "<mediaType_new>": new_mime,
+            "<fileName_new>": f"{clean_new}.{new_ext}" if new_ext and clean_new else new_file_name,
+        }
+        resource_info.setdefault("fileMetadataChanges", {}).update(utils.add_tag_explanations("mimetype_mismatch", values))
+
     def resource_matches_filters(self, file_name, resource, log_indent=1):
         if self.avoid_data:
             return False
@@ -1021,7 +882,7 @@ class OpenDataCrawler():
             return False
 
         abs_path = path if os.path.isabs(path) else os.path.join(os.getcwd(), path)
-        return os.path.exists(abs_path)
+        return os.path.isfile(abs_path) or os.path.isfile(os.path.join(self.save_path, os.path.basename(path)))
 
     def prepare_resource_for_processing(self, package, resource_file_name, metadata_file_name):
         resource = package["resources"].get(resource_file_name)
@@ -1042,7 +903,7 @@ class OpenDataCrawler():
             resource_file_name = self.upsert_package_resource(package, resource_file_name, resource, resource_info)
             return resource_file_name, resource, resource_info
 
-        if not resource.get("mediaType") or not resource_info.get("fileStatus", {}).get("fileCrawled"):
+        if not resource.get("normalizedResource"):
             parsed_resource, parsed_info = self.handle_parse_resource(resource, resource_file_name, metadata_file_name)
             if parsed_resource:
                 resource = parsed_resource
@@ -1050,12 +911,31 @@ class OpenDataCrawler():
 
             resource_file_name = self.upsert_package_resource(package, resource_file_name, resource, resource_info)
 
+        if self.data_types and resource.get("mediaType") in {"application/octet-stream", "text/plain", "application/force-download"}:
+            response, self.user_agent, tag, error = self.make_request(resource.get("downloadURL"), self.user_agent, stream=True, return_tag=True)
+            if response is not None:
+                try:
+                    old_media_type = resource.get("mediaType")
+                    old_file_name = resource.get("fileName") or resource_file_name
+                    mime, name, mismatch = utils.resolve_mediatype_conflict(old_media_type, response, resource.get("downloadURL"), resource_file_name)
+                    if mismatch:
+                        resource_info.setdefault("fileMetadataChanges", {}).update(utils.add_tag_explanations("mimetype_mismatch", mismatch))
+                    if mime and mime != resource.get("mediaType"):
+                        resource["mediaType"], resource["fileName"] = mime, name
+                        resource_file_name = self.upsert_package_resource(package, resource_file_name, resource, resource_info)
+                    elif mime:
+                        self.add_mimetype_mismatch(resource_info, old_media_type, old_file_name, mime, name or old_file_name)
+                finally:
+                    response.close()
+            elif tag:
+                resource_info.setdefault("fileInfo", {}).update(utils.add_tag_explanations(tag, utils.extract_error_tag_values(error)))
+                resource_info.setdefault("fileStatus", {})["fileCrawled"] = datetime.now().isoformat()
         return resource_file_name, resource, resource_info
 
     def metadata_needs_rebuild(self, metadata_path):
         try:
             with open(metadata_path, "r", encoding="utf-8") as f:
-                package = json.load(f)
+                package = utils.normalize_metadata(json.load(f))
         except Exception:
             return True
 
@@ -1079,7 +959,7 @@ class OpenDataCrawler():
         return False
 
     def process_package_metadata(self, pkg_id, log_indent=1):
-        metadata_file_name = f"meta_{utils.generate_short_filename(f'{self.domain}_{pkg_id}')}.json"
+        metadata_file_name = self.metadata_file_name(pkg_id)
         metadata_path = os.path.join(self.save_path, metadata_file_name)
 
         try:
@@ -1091,8 +971,8 @@ class OpenDataCrawler():
                 if self.metadata_needs_rebuild(metadata_path):
                     logger("WARNING", f"Metadata file '{metadata_file_name}' is missing required fields or is invalid, rebuilding it", indent=log_indent)
                     try:
-                        os.remove(metadata_path)
-                        logger("DEL", f"Deleted invalid metadata file '{metadata_file_name}' before rebuild", indent=log_indent)
+                        os.replace(metadata_path, f"{metadata_path}.damaged.{time.time_ns()}")
+                        logger("INFO", "Preserved invalid metadata before rebuilding", indent=log_indent)
                     except Exception as e:
                         logger("ERROR", f"Failed to delete invalid metadata file '{metadata_file_name}'", e, indent=log_indent)
                         return
@@ -1100,7 +980,7 @@ class OpenDataCrawler():
                     logger("INFO", f"Remote metadata changed for package '{pkg_id}', refreshing local metadata", indent=log_indent)
                     try:
                         with open(metadata_path, "r", encoding="utf-8") as f:
-                            existing_package = json.load(f)
+                            existing_package = utils.normalize_metadata(json.load(f))
                     except Exception as e:
                         logger("WARNING", f"Could not read existing metadata file '{metadata_file_name}' before refresh; rebuilding from remote data only", e, indent=log_indent)
                 else:
@@ -1111,10 +991,13 @@ class OpenDataCrawler():
 
             package = self.get_package(pkg_id, metadata_file_name)
             if not package:
+                self.failed_packages.add(str(pkg_id))
                 return
 
-            if refresh_requested and existing_package and hasattr(self.dms_instance, "merge_existing_package_state"):
-                package = self.dms_instance.merge_existing_package_state(existing_package, package)
+            if refresh_requested and existing_package:
+                package = self.merge_existing_package_state(existing_package, package)
+            package.setdefault("resources", {})
+            package["crawlerInfo"]["packageStatus"]["metadataChecked"] = datetime.now().isoformat()
 
             if not package.get("resources"):
                 logger("WARNING", f"No distributions found in package '{pkg_id}'", indent=log_indent)
@@ -1130,7 +1013,7 @@ class OpenDataCrawler():
                     package.get("theme"),
                     utils.DATOSGOBESCRAWLER_THEME_MAP
                 )
-                if not (mapped_theme and any(cat in mapped_theme for cat in self.categories)):
+                if not (mapped_theme and any(cat.casefold() in {v.casefold() for v in utils.flatten_labels(mapped_theme) + utils.flatten_labels(package.get("theme"))} for cat in self.categories)):
                     logger(
                         "SKIP",
                         f"Package '{pkg_id}' does not match categories, skipping",
@@ -1142,12 +1025,15 @@ class OpenDataCrawler():
                     return
 
             metadata_saved = self.save_metadata(package)
+            if not metadata_saved:
+                self.failed_packages.add(str(pkg_id))
             if refresh_requested and metadata_saved:
                 self.clear_package_refresh_requirement(pkg_id)
 
         except LowDiskSpaceError:
             raise
         except Exception as e:
+            self.failed_packages.add(str(pkg_id))
             logger(
                 "ERROR",
                 f"Error processing metadata for package '{pkg_id}' ('{metadata_file_name}')",
@@ -1156,7 +1042,7 @@ class OpenDataCrawler():
             )
 
     def process_package(self, pkg_id, log_indent=1):
-        metadata_file_name = f"meta_{utils.generate_short_filename(f'{self.domain}_{pkg_id}')}.json"
+        metadata_file_name = self.metadata_file_name(pkg_id)
         try:
             metadata_path = os.path.join(self.save_path, metadata_file_name)
             logger("WORK", f"Processing package '{pkg_id}' ('{metadata_file_name}')...", indent=log_indent-1)
@@ -1170,10 +1056,12 @@ class OpenDataCrawler():
                 return
 
             with open(metadata_path, "r", encoding="utf-8") as f:
-                package = json.load(f)
+                package = utils.normalize_metadata(json.load(f))
 
-            if not self.num_resources:
-                package = self.retry_temporarily_unavailable_resources(package)
+            package = self.retry_temporarily_unavailable_resources(package)
+            for name, resource in package.get("resources", {}).items():
+                if resource.get("processingFingerprint") != self.processing_fingerprint() and self.resource_has_downloaded_file(resource):
+                    package["crawlerInfo"]["resourcesInfo"].get(name, {}).get("fileStatus", {}).pop("fileCompleted", None)
 
             if not package:
                 return
@@ -1187,7 +1075,7 @@ class OpenDataCrawler():
 
             if self.categories:
                 mapped_theme = utils.extract_mapped_field(package.get("theme"), utils.DATOSGOBESCRAWLER_THEME_MAP)
-                if not (mapped_theme and any(cat in mapped_theme for cat in self.categories)):
+                if not (mapped_theme and any(cat.casefold() in {v.casefold() for v in utils.flatten_labels(mapped_theme) + utils.flatten_labels(package.get("theme"))} for cat in self.categories)):
                     logger("SKIP", f"Package '{pkg_id}' ('{metadata_path}') does not match specified categories ({', '.join(self.categories)}), skipping all resources", indent=log_indent)
                     self.save_metadata(package)
                     return
@@ -1216,7 +1104,7 @@ class OpenDataCrawler():
                     if utils.is_completed(package, resource_file_name, complete=False, unavailable_permanent=True):
                         continue
 
-                    if self.resource_has_downloaded_file(resource) and self.resource_matches_filters(resource_file_name, resource, log_indent):
+                    if self.resource_has_downloaded_file(resource) and utils.is_completed(package, resource_file_name) and self.resource_matches_filters(resource_file_name, resource, log_indent):
                         completed_valid_resources += 1
                         if completed_valid_resources >= self.num_resources:
                             break
@@ -1246,7 +1134,7 @@ class OpenDataCrawler():
                         self.save_metadata(package)
                         return {"status": "deferred", "pkg_id": pkg_id, "host": defer_info["host"]}
 
-                    if self.resource_has_downloaded_file(updated_resource):
+                    if self.resource_has_downloaded_file(updated_resource) and updated_info.get("fileStatus", {}).get("fileCompleted"):
                         completed_valid_resources += 1
                         if completed_valid_resources >= self.num_resources:
                             break
@@ -1273,7 +1161,7 @@ class OpenDataCrawler():
                     self.save_metadata(package)
                     return {"status": "deferred", "pkg_id": pkg_id, "host": defer_info["host"]}
 
-                if utils.is_completed(package, file_name, unavailable=True):
+                if utils.is_completed(package, file_name, complete=False, unavailable=True):
                     continue
 
                 if not self.resource_matches_filters(file_name, resource, log_indent):
@@ -1298,6 +1186,7 @@ class OpenDataCrawler():
         except LowDiskSpaceError:
             raise
         except Exception as e:
+            self.failed_packages.add(str(pkg_id))
             logger("ERROR", f"Error processing package '{pkg_id}' ('{metadata_file_name}')", [e, traceback.format_exc()], indent=log_indent)
 
     def process_resource(self, resource, package, metadata_path, log_indent=3):
@@ -1311,13 +1200,19 @@ class OpenDataCrawler():
         resource_info["fileInfo"] = dict(resource_info.get("fileInfo", {}))
         resource_info["fileStatus"] = dict(resource_info.get("fileStatus", {}))
 
+        resource_info["fileStatus"].pop("fileCompleted", None)
+        resource_info["fileStatus"]["fileCrawled"] = datetime.now().isoformat()
         logger("...", f"Saving and processing resource '{resource_file_name}' from package '{metadata_path}'...", indent=log_indent)
+        for field in ("originalPath", "originalSha256", "originalSizeBytes"):
+            resource.pop(field, None)
         path, tag, e = self.save_dataset(download_url, resource_file_name)
         if path or tag:
             error_message = utils.extract_error_message(e)
             tag_values = utils.extract_error_tag_values(e)
             if path:
-                resource["path"] = os.path.relpath(path, start=os.getcwd())
+                resource["path"] = os.path.abspath(path)
+                transfer = self.download_results.pop(path, {})
+                resource["downloadHeaders"] = transfer.get("headers", resource.get("downloadHeaders", {}))
                 self.clear_recovered_resource_tags(resource_info)
                 resource_info["fileStatus"]["fileDownloaded"] = datetime.now().isoformat()
                 logger("SAVE", f"Resource '{resource_file_name}' from package '{metadata_path}' downloaded successfully", indent=log_indent)
@@ -1343,227 +1238,155 @@ class OpenDataCrawler():
 
         return resource_file_name, resource, resource_info
 
+    def processing_fingerprint(self):
+        options = {"version": 2, "rows": self.partial_dataset_rows, "sample": self.partial_dataset_sample_mode,
+                   "seed": self.partial_dataset_random_seed, "schema": self.extract_schema}
+        return hashlib.sha256(json.dumps(options, sort_keys=True).encode()).hexdigest()
+
     def process_dataset_file(self, resource_info, dataset_file_name, dataset_path, resource, log_indent=4):
-        if not os.path.exists(dataset_path):
-            logger("ERROR", f"Dataset file '{dataset_path}' does not exist", indent=log_indent)
+        if not os.path.isfile(dataset_path):
             return False
-
-        dataset_size = os.path.getsize(dataset_path)
-        processing_headroom = max(dataset_size * 2, 64 * 1024 * 1024)
-        self.ensure_disk_headroom(dataset_path, required_bytes=processing_headroom, context=f"processing dataset '{dataset_file_name}'", log_indent=log_indent)
-
-        raw_signature = utils.detect_raw_signature(dataset_path)
-        if raw_signature:
-            logger("INFO", f"Detected raw signature '{raw_signature}' for file '{dataset_path}'", indent=log_indent)
-        if raw_signature == "text/html":
-            old_file_name = resource.get("fileName") or dataset_file_name
-            old_media_type = resource.get("mediaType")
-            base_name = old_file_name.rsplit(".", 1)[0] if "." in old_file_name else old_file_name
-            new_file_name = f"{base_name}.html" if base_name else old_file_name
-
-            logger("WARNING", f"File '{dataset_path}' is actually an HTML page, not the expected downloadable dataset", indent=log_indent)
-            resource["mediaType"] = raw_signature
-            resource["fileName"] = new_file_name
-            resource.pop("path", None)
-            resource.pop("encoding", None)
-            resource.pop("delimiter", None)
-            resource.pop("schema", None)
-            resource.pop("size", None)
-            resource_info["fileInfo"].update(utils.add_tag_explanations("html_page_downloaded", {
-                "<mediaType_old>": old_media_type,
-                "<fileName_old>": old_file_name,
-                "<mediaType_new>": raw_signature,
-                "<fileName_new>": new_file_name,
-            }))
-            resource_info["fileStatus"].pop("fileDownloaded", None)
-            if os.path.exists(dataset_path):
-                try:
-                    os.remove(dataset_path)
-                    logger("DEL", f"Deleted discarded HTML content '{dataset_path}'", indent=log_indent)
-                except Exception as e:
-                    logger("ERROR", f"Failed to delete discarded HTML content '{dataset_path}'", e, indent=log_indent)
-            resource_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
-            return "completed_without_file"
-
-        if utils.MIME_TYPE_MAP.get(resource.get("mediaType"), {}).get("compressible", False):
-            temp_path, tag = utils.check_file_empty_or_strip(dataset_path)
-
-            if temp_path:
-                shutil.move(temp_path, dataset_path)
-                logger("FIX", f"File '{dataset_path}' content stripped and overwritten", indent=log_indent)
-                resource_info["binaryFileChanges"].update(utils.add_tag_explanations("stripped_data"))
-
-            if tag:
-                logger("WARNING", f"File '{dataset_path}' has no data or no valid content", indent=log_indent)
-                resource_info["fileInfo"].update(utils.add_tag_explanations(tag))
-                return False
-
-            try:
-                encoding, temp_path, raw_flags = utils.detect_best_encoding(dataset_path)
-                if encoding:
-                    resource["encoding"] = encoding
-                else:
-                    logger("ERROR", f"No matching encoding found for: {dataset_path}", indent=log_indent)
+        size = os.path.getsize(dataset_path)
+        self.ensure_disk_headroom(dataset_path, required_bytes=size, context="processing downloaded data")
+        checksum = resource.get("checksum")
+        if isinstance(checksum, str) and ":" in checksum:
+            algorithm, expected = checksum.split(":", 1)
+            if algorithm in {"md5", "sha256", "sha1"}:
+                with open(dataset_path, "rb") as source:
+                    actual = hashlib.file_digest(source, algorithm).hexdigest()
+                if actual.lower() != expected.lower():
+                    resource_info["fileInfo"].update(utils.add_tag_explanations("resource_temporarily_unavailable"))
+                    resource_info["fileStatus"].pop("fileCompleted", None)
                     return False
-
-                if temp_path:
-                    shutil.move(temp_path, dataset_path)
-                    logger("FIX", f"Overwrote cleaned content into '{dataset_path}'", indent=log_indent)
-                if raw_flags:
-                    resource_info["binaryFileChanges"].update(utils.add_tag_explanations(raw_flags, raw_flags))
-            except Exception as e:
-                logger("ERROR", f"Error while detecting encoding for: {dataset_path}", [e, traceback.format_exc()], indent=log_indent)
-                return False
-
-            raw_signature = utils.detect_raw_signature(dataset_path)
-            if raw_signature:
-                logger("INFO", f"Detected raw signature '{raw_signature}' for normalized file '{dataset_path}'", indent=log_indent)
-            if raw_signature == "text/html":
-                old_file_name = resource.get("fileName") or dataset_file_name
-                old_media_type = resource.get("mediaType")
-                base_name = old_file_name.rsplit(".", 1)[0] if "." in old_file_name else old_file_name
-                new_file_name = f"{base_name}.html" if base_name else old_file_name
-
-                logger("WARNING", f"Normalized file '{dataset_path}' is actually an HTML page, not the expected downloadable dataset", indent=log_indent)
-                resource["mediaType"] = raw_signature
-                resource["fileName"] = new_file_name
-                resource.pop("path", None)
-                resource.pop("encoding", None)
-                resource.pop("delimiter", None)
-                resource.pop("schema", None)
-                resource.pop("size", None)
-                resource_info["fileInfo"].update(utils.add_tag_explanations("html_page_downloaded", {
-                    "<mediaType_old>": old_media_type,
-                    "<fileName_old>": old_file_name,
-                    "<mediaType_new>": raw_signature,
-                    "<fileName_new>": new_file_name,
-                }))
-                resource_info["fileStatus"].pop("fileDownloaded", None)
-                if os.path.exists(dataset_path):
-                    try:
-                        os.remove(dataset_path)
-                        logger("DEL", f"Deleted discarded HTML content '{dataset_path}'", indent=log_indent)
-                    except Exception as e:
-                        logger("ERROR", f"Failed to delete discarded HTML content '{dataset_path}'", e, indent=log_indent)
-                resource_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
-                return "completed_without_file"
-
-        if os.path.getsize(dataset_path) > 0 and dataset_path.endswith((".csv", ".tsv")):
-            try:
-                max_fix_attempts = 2
-                delimiter_fix = None
-                temp_path = None
-                reconstructed_rows = 0
-                outer_quotes_removed = False
-                inner_quotes_fixed = 0
-                for attempt in range(max_fix_attempts):
-                    temp_path, reconstructed_rows, outer_quotes_removed, inner_quotes_fixed, delimiter_fix = utils.fix_tabular_data(dataset_path, resource["encoding"])
-
-                    if not temp_path:
-                        break
-
-                    shutil.move(temp_path, dataset_path)
-                    if attempt == 0:
-                        logger("FIX", f"Cleaned and standardized the tabular file '{dataset_path}'", indent=log_indent)
-                        resource_info["binaryFileChanges"].update(utils.add_tag_explanations("standardized_field_quotes"))
-                    else:
-                        logger("FIX", f"Reprocessing tabular file '{dataset_path}' after previous structural fixes", indent=log_indent)
-
-                    if reconstructed_rows:
-                        logger("FIX", f"Reconstructed {reconstructed_rows} multiline rows in tabular file '{dataset_path}' by merging quoted fields split across rows", indent=log_indent)
-                        resource_info["binaryFileChanges"].update(utils.add_tag_explanations("reconstructed_rows", {"<reconstructed_rows>": reconstructed_rows}))
-                    if outer_quotes_removed:
-                        logger("FIX", f"Removed unnecessary outer quotes wrapping entire rows in tabular file '{dataset_path}'", indent=log_indent)
-                        resource_info["binaryFileChanges"].update(utils.add_tag_explanations("stripped_outer_quotes"))
-                    if inner_quotes_fixed:
-                        logger("FIX", f"Fixed {inner_quotes_fixed} rows with malformed inner quotes in tabular file '{dataset_path}'", indent=log_indent + 2)
-                        resource_info["binaryFileChanges"].update(utils.add_tag_explanations("fixed_inner_quotes", {"<fixed_inner_quotes>": inner_quotes_fixed}))
-                    
-                    if delimiter_fix is None and (reconstructed_rows or outer_quotes_removed or inner_quotes_fixed):
-                        logger("FIX", f"Retrying delimiter detection on normalized file '{dataset_path}'", indent=log_indent + 2)
-                        continue
-                    else:
-                        break
-
-            except Exception as e:
-                logger("ERROR", f"Failed to clean tabular file '{dataset_path}'", [e, traceback.format_exc()], indent=log_indent)
-                return False
-
-            try:
-                delimiter, start_row, delimiter_stats = utils.detect_delimiter_consistent(
-                    dataset_path,
-                    resource["encoding"],
-                    return_stats=True,
-                )
-                if delimiter_stats.get("nonempty_lines", 0) <= 1:
-                    logger("WARNING", f"Tabular file '{dataset_path}' appears to contain only one line", indent=4)
-                    resource_info["binaryFileChanges"].update(utils.add_tag_explanations("one_line"))
-
-                if delimiter:
-                    if delimiter_fix != delimiter:
-                        logger("ERROR", f"Delimiter mismatch in '{dataset_path}', expected '{delimiter_fix}', detected '{delimiter} in tabular file '{dataset_path}'", indent=log_indent)
-
-                    resource["delimiter"] = delimiter
-
-                    if start_row:
-                        resource_info["fileInfo"].update(utils.add_tag_explanations("skip_rows", {"<skipped_rows>": start_row}))
-                        dialect = Dialect.from_descriptor({"delimiter": delimiter, "comment_rows": [start_row]})
-                    else:
-                        dialect = Dialect.from_descriptor({"delimiter": delimiter})
-
-                    if self.extract_schema:
-                        try:
-                            resource_metadata = describe(dataset_path, encoding=resource["encoding"], dialect=dialect).to_dict()
-                            resource["schema"] = resource_metadata.get("schema")
-                            logger("OK", f"Schema extracted from '{dataset_path}' (encoding: '{resource['encoding']}', delimiter: '{delimiter}', start_row: {start_row})", indent=4)
-                        except Exception as e:
-                            logger("ERROR", f"Failed to extract schema from file '{dataset_path}'", [e, traceback.format_exc()], indent=log_indent)
-                            return False
-
-                    if self.partial_dataset_rows is not None:
-                        try:
-                            sample_mode = str(self.partial_dataset_sample_mode or "first").strip().lower()
-                            if sample_mode not in {"first", "random"}:
-                                sample_mode = "first"
-                            sample_seed = self.partial_dataset_random_seed if sample_mode == "random" else None
-                            temp_path, kept_rows, total_rows = utils.trim_tabular_data_rows(
-                                dataset_path,
-                                resource["encoding"],
-                                self.partial_dataset_rows,
-                                start_row=start_row or 0,
-                                sample_mode=sample_mode,
-                                sample_seed=sample_seed,
-                            )
-                            if temp_path:
-                                shutil.move(temp_path, dataset_path)
-                                removed_rows = total_rows - kept_rows
-                                if sample_mode == "random":
-                                    sampling_details = f"a reproducible random sample (seed: {sample_seed})" if sample_seed is not None else "a random sample"
-                                else:
-                                    sampling_details = "the first rows"
-                                logger("FIX", f"Stored partial tabular dataset '{dataset_path}' after full download and post-processing: kept {kept_rows} data rows out of {total_rows} total data rows using {sampling_details}", indent=log_indent)
-                                resource_info["binaryFileChanges"].update(utils.add_tag_explanations("partial_dataset_trimmed", {
-                                    "<kept_rows>": kept_rows,
-                                    "<total_rows>": total_rows,
-                                    "<removed_rows>": removed_rows,
-                                    "<sampling_details>": sampling_details,
-                                }))
-                        except Exception as e:
-                            logger("ERROR", f"Failed to trim tabular file '{dataset_path}' to {self.partial_dataset_rows} data rows", [e, traceback.format_exc()], indent=log_indent)
-                            return False
-                else:
-                    resource_info["fileInfo"].update(utils.add_tag_explanations("no_delimiter_detected"))
-                    logger("WARNING", f"File '{dataset_path}' appears to not contain a delimiter, likely not a structured/tabular file", indent=log_indent)
-                    resource["size"] = humanize.naturalsize(os.path.getsize(dataset_path))
+        old_media_type = resource.get("mediaType")
+        old_file_name = resource.get("fileName") or dataset_file_name
+        mime, suggested_file_name, mismatch = utils.resolve_mediatype_conflict(old_media_type, SimpleNamespace(headers=resource.get("downloadHeaders", {})), resource.get("downloadURL"), dataset_file_name)
+        signature = utils.detect_raw_signature(dataset_path)
+        if signature:
+            mime = signature
+        if zipfile.is_zipfile(dataset_path):
+            with zipfile.ZipFile(dataset_path) as archive:
+                mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" if "xl/workbook.xml" in archive.namelist() else "application/zip"
+        if mime in {None, "application/octet-stream", "text/plain"}:
+            with open(dataset_path, "rb") as source:
+                prefix = source.read(512).lstrip(b"\xef\xbb\xbf \r\n\t")
+            if prefix.startswith((b"{", b"[")):
+                mime = "application/json"
+            elif prefix.startswith(b"%PDF-"):
+                mime = "application/pdf"
+        if mismatch:
+            resource_info.setdefault("fileMetadataChanges", {}).update(utils.add_tag_explanations("mimetype_mismatch", mismatch))
+        elif mime:
+            self.add_mimetype_mismatch(resource_info, old_media_type, old_file_name, mime, suggested_file_name or dataset_file_name)
+        if mime:
+            resource["mediaType"] = mime
+        if mime == "text/html":
+            resource_info["fileInfo"].update(utils.add_tag_explanations("html_page_downloaded"))
+            resource_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
+            resource.pop("path", None)
+            os.remove(dataset_path)
+            return "completed_without_file"
+        if mime in {"application/json", "text/json", "application/geo+json"}:
+            resource_info["fileInfo"]["jsonValidation"] = {"validated": size <= self.max_metadata_bytes, "maxBytes": self.max_metadata_bytes}
+            if size <= self.max_metadata_bytes:
+                try:
+                    with open(dataset_path, encoding="utf-8-sig") as source:
+                        payload = json.load(source)
+                    if isinstance(payload, dict) and (payload.get("success") is False or (set(payload) <= {"error", "message", "status", "code", "errors"} and (payload.get("error") or payload.get("errors")))):
+                        raise utils.PayloadError("API returned an error document")
+                except (ValueError, UnicodeError, utils.PayloadError) as error:
+                    resource_info["fileInfo"]["invalidPayload"] = {"reason": str(error)}
                     resource_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
-                    return True
-            except Exception as e:
-                logger("ERROR", f"Failed to detect delimiter for file '{dataset_path}'", [e, traceback.format_exc()], indent=log_indent)
+                    resource.pop("path", None)
+                    os.remove(dataset_path)
+                    return "completed_without_file"
+        _, extension = utils.get_mime_and_ext(mime)
+        if extension and not dataset_file_name.endswith("." + extension):
+            new_name = dataset_file_name.rsplit(".", 1)[0] + "." + extension
+            destination = os.path.join(self.save_path, new_name)
+            os.replace(dataset_path, destination)
+            dataset_path = destination
+            resource["fileName"] = new_name
+        resource["path"] = os.path.abspath(dataset_path)
+        if extension in {"csv", "tsv"}:
+            try:
+                tabular_result = utils.process_tabular(self, dataset_path, resource, resource_info, log_indent=log_indent)
+            except (ValueError, csv.Error, UnicodeError) as error:
+                resource_info["fileInfo"]["tabularProcessingError"] = {"reason": str(error)}
+                resource_info["fileStatus"].pop("fileCompleted", None)
                 return False
-
-        resource["size"] = humanize.naturalsize(os.path.getsize(dataset_path))
+            if tabular_result == "completed_without_file":
+                resource_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
+                resource.pop("path", None)
+                os.remove(dataset_path)
+                return "completed_without_file"
+            if tabular_result is False:
+                resource_info["fileStatus"].pop("fileCompleted", None)
+                return False
+        resource["sizeBytes"] = os.path.getsize(dataset_path)
+        resource["size"] = humanize.naturalsize(resource["sizeBytes"])
+        resource["processingFingerprint"] = self.processing_fingerprint()
         resource_info["fileStatus"]["fileCompleted"] = datetime.now().isoformat()
         return True
+
+    def merge_existing_package_state(self, existing, package):
+        utils.normalize_metadata(existing)
+        def identity(resource):
+            return str(resource.get("id") or resource.get("identifier") or resource.get("downloadURL"))
+        old_by_id = {identity(resource): (name, resource) for name, resource in existing.get("resources", {}).items()}
+        changed_package = existing.get("modified") != package.get("modified")
+        resources, infos = {}, {}
+        for name, resource in package.get("resources", {}).items():
+            info = package["crawlerInfo"]["resourcesInfo"].get(name, utils.init_metadata(package=False, crawled=False))
+            match = old_by_id.get(identity(resource))
+            if match:
+                old_name, old = match
+                version_keys = ("modified", "checksum", "remoteHash", "remoteSize")
+                signature_keys = ("downloadURL", "mediaType", *version_keys)
+                unchanged = all(old.get(key) == resource.get(key) for key in signature_keys)
+                has_version = any(resource.get(key) for key in ("modified", "checksum", "remoteHash"))
+                if unchanged and (not changed_package or has_version):
+                    resource = self.preserve_local_resource_fields(old, resource)
+                    name = resource.get("fileName") or old_name
+                    info = copy.deepcopy(existing.get("crawlerInfo", {}).get("resourcesInfo", {}).get(old_name, info))
+                if resource.get("processingFingerprint") != self.processing_fingerprint():
+                    info.get("fileStatus", {}).pop("fileCompleted", None)
+            resources[name] = resource
+            infos[name] = info
+        package["resources"] = resources
+        package["crawlerInfo"]["resourcesInfo"] = infos
+        return package
+
+    def metadata_file_name(self, key):
+        name = f"meta_{utils.generate_short_filename(f'{self.domain}_{key}')}.json"
+        if self.domain == "https://api.gbif.org" and not os.path.exists(os.path.join(self.save_path, name)):
+            legacy = f"meta_{utils.generate_short_filename(f'http://api.gbif.org_{key}')}.json"
+            if os.path.exists(os.path.join(self.save_path, legacy)):
+                return legacy
+        return name
+
+    def scan_local_requirements(self, packages, explicit=False):
+        pending = set()
+        ttl = utils.get_config_option(self.dms or "defaults", "metadata_ttl_seconds", int, utils.get_config_option("defaults", "metadata_ttl_seconds", int, 86400))
+        fingerprint = self.processing_fingerprint()
+        for key in packages:
+            name = self.metadata_file_name(key)
+            path = os.path.join(self.save_path, name)
+            if not os.path.exists(path):
+                continue
+            try:
+                with open(path, encoding="utf-8") as source:
+                    metadata = utils.normalize_metadata(json.load(source))
+                resources = metadata.get("resources", {})
+                if any(self.resource_matches_filters(n, r) and r.get("processingFingerprint") != fingerprint for n, r in resources.items()):
+                    pending.add(key)
+                checked = metadata.get("crawlerInfo", {}).get("packageStatus", {}).get("metadataChecked")
+                age = (datetime.now() - datetime.fromisoformat(checked)).total_seconds() if checked else float("inf")
+                if self.check_remote_updates and (explicit or age >= ttl or metadata.get("schemaVersion") != 2):
+                    self.packages_requiring_refresh.add(key)
+            except (OSError, ValueError, TypeError, AttributeError):
+                self.packages_requiring_refresh.add(key)
+        return pending
 
     def get_package_list(self):
         packages = self.dms_instance.get_package_list()

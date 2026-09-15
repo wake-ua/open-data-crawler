@@ -1,6 +1,7 @@
 from .filesystem import (
     ATOMIC_TEMP_PREFIX,
     TABULAR_TEMP_PREFIX,
+    file_lock,
     atomic_dump_json,
     atomic_write_bytes,
     cleanup_path_tempfiles,
@@ -12,6 +13,9 @@ from .filesystem import (
     is_empty_file,
 )
 from .metadata import (
+    normalize_metadata,
+    flatten_labels,
+    temporal_intervals,
     add_tag_explanations,
     extract_bracketed_lang_text,
     extract_first_nonempty_value,
@@ -33,6 +37,8 @@ from .metadata import (
     split_multivalue,
 )
 from .network import (
+    CatalogError,
+    PayloadError,
     build_invalid_redirect_error,
     clean_url,
     extract_namespaces,
@@ -49,6 +55,7 @@ from .network import (
     make_request,
     make_request_post,
     normalize_domain,
+    read_json,
 )
 from .resources import (
     AUTH_TOKENS,
@@ -98,6 +105,7 @@ from .tabular import (
     is_bad_encoding,
     needs_field_normalization,
     process_field,
+    process_tabular,
     quotes_balanced,
     remove_outer_quotes,
     resolve_mediatype_conflict,

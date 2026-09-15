@@ -11,7 +11,6 @@ from bs4 import BeautifulSoup
 from .network import is_url
 from .resources import CRAWLER_CHANGES_INFO
 
-
 def is_json(field):
     if not isinstance(field, str):
         return False
@@ -20,7 +19,6 @@ def is_json(field):
         return True
     except json.JSONDecodeError:
         return False
-
 
 def is_geojson(field):
     if isinstance(field, dict):
@@ -32,22 +30,28 @@ def is_geojson(field):
             return False
     return False
 
-
 def generate_short_filename(fname, ext=None):
     fname_hash = hashlib.sha1(fname.encode("utf-8")).hexdigest()
     return f"{fname_hash}.{ext}" if ext else fname_hash
 
-
 def extract_multilang_field(data, lang_field=None, value_field=None):
     result = {}
+    if isinstance(data, str):
+        return {"unknown": [data]} if data.strip() else {}
     if isinstance(data, list):
         for entry in data:
+            if not isinstance(entry, dict):
+                if isinstance(entry, str):
+                    result.setdefault("unknown", []).append(entry)
+                continue
             lang = (entry.get(lang_field, "unknown") or "").strip().lower()
             value = (entry.get(value_field) or "").strip()
             if value:
                 result.setdefault(lang, []).append(value)
     elif isinstance(data, dict):
         for lang, value in data.items():
+            if isinstance(value, list):
+                result[str(lang).lower()] = [v for v in value if isinstance(v, str) and v.strip()]
             if isinstance(value, str) and value.strip():
                 result[lang.strip().lower()] = [value.strip()]
 
@@ -55,7 +59,6 @@ def extract_multilang_field(data, lang_field=None, value_field=None):
         result[lang] = list(dict.fromkeys(result[lang]))
 
     return result
-
 
 def extract_mapped_field(field_content, mapping):
     if not field_content:
@@ -71,7 +74,7 @@ def extract_mapped_field(field_content, mapping):
             return {k: apply_fallback_template(v, field) for k, v in template.items()}
         return template
 
-    fields = [field_content] if isinstance(field_content, str) else field_content if isinstance(field_content, list) else []
+    fields = flatten_labels(field_content)
 
     fallback_template = mapping.get("MAP_FALLBACK")
     result = []
@@ -88,7 +91,6 @@ def extract_mapped_field(field_content, mapping):
 
     return result
 
-
 def extract_first_nonempty_value(field):
     if isinstance(field, dict):
         for value in field.values():
@@ -102,7 +104,6 @@ def extract_first_nonempty_value(field):
         return field.strip()
     return ""
 
-
 def split_multivalue(value, separator="//"):
     if not value or not isinstance(value, str):
         return []
@@ -111,7 +112,6 @@ def split_multivalue(value, separator="//"):
     else:
         parts = value.split(separator)
     return [part.strip() for part in parts if part and part.strip()]
-
 
 def extract_bracketed_lang_text(value, default_lang="es"):
     if not value or not isinstance(value, str):
@@ -129,7 +129,6 @@ def extract_bracketed_lang_text(value, default_lang="es"):
     clean_value = " ".join(unescape(value).split()).strip()
     return {default_lang: [clean_value]} if clean_value else {}
 
-
 def extract_first_lang_text(value, preferred_langs=("es", "en", "ca", "gl", "eu"), default_lang="es"):
     multi = extract_bracketed_lang_text(value, default_lang=default_lang)
     if not multi:
@@ -142,7 +141,6 @@ def extract_first_lang_text(value, preferred_langs=("es", "en", "ca", "gl", "eu"
     first_lang = next(iter(multi), None)
     return multi[first_lang][0] if first_lang else ""
 
-
 def normalize_no_html_text(text):
     if not text or not isinstance(text, str):
         return text
@@ -151,7 +149,6 @@ def normalize_no_html_text(text):
     text = " ".join(text.split())
 
     return text.strip()
-
 
 def get_country_label(code):
     if code:
@@ -162,7 +159,6 @@ def get_country_label(code):
         country = pycountry.countries.get(alpha_2=code.upper())
         return country.name if country else None
     return None
-
 
 def get_language_label(code):
     if code:
@@ -176,7 +172,6 @@ def get_language_label(code):
 
         return getattr(language, "name", None) if language else None
     return None
-
 
 def normalize_language_values(values):
     values = [values] if isinstance(values, str) else values if isinstance(values, list) else []
@@ -197,7 +192,6 @@ def normalize_language_values(values):
 
     return list(dict.fromkeys(normalized))
 
-
 def sanitize_json_keys(obj):
     if isinstance(obj, dict):
         sanitized = {}
@@ -214,20 +208,19 @@ def sanitize_json_keys(obj):
         return [sanitize_json_keys(item) for item in obj]
     return obj
 
-
 def snake_to_camel_key(key):
     if not isinstance(key, str) or "_" not in key:
         return key
     head, *tail = key.split("_")
     return head + "".join(part[:1].upper() + part[1:] for part in tail if part)
 
-
 def metadata_tag_key(tag):
     return snake_to_camel_key(tag)
 
-
 def prepare_metadata_for_save(package):
     metadata_copy = copy.deepcopy(package)
+    normalize_metadata(metadata_copy)
+    metadata_copy["schemaVersion"] = 2
     crawler_info = metadata_copy.get("crawlerInfo")
     if not isinstance(crawler_info, dict):
         return sanitize_json_keys(metadata_copy)
@@ -238,7 +231,6 @@ def prepare_metadata_for_save(package):
         package_status.pop("changedMetadata", None)
 
     return sanitize_json_keys(metadata_copy)
-
 
 def init_metadata(package=True, crawled=True):
     if package:
@@ -263,7 +255,6 @@ def init_metadata(package=True, crawled=True):
         base["fileStatus"]["fileCrawled"] = datetime.now().isoformat()
     return base
 
-
 def add_tag_explanations(tags, data_source=None):
     data_source = data_source or {}
 
@@ -280,13 +271,46 @@ def add_tag_explanations(tags, data_source=None):
             explanations[metadata_key] = {"reason": "(no explanation available)"}
             continue
 
-        tag_explanation = json.dumps(tag_content.get("tag_explanation", {}))
+        tag_explanation = copy.deepcopy(tag_content.get("tag_explanation", {}))
         tag_placeholders = tag_content.get("tag_placeholders", [])
-        for tag_placeholder in tag_placeholders:
-            tag_explanation = tag_explanation.replace(
-                tag_placeholder, str(data_source.get(tag_placeholder, f"<{tag_placeholder}>"))
-            )
-
-        explanations[metadata_key] = json.loads(tag_explanation)
+        def substitute(value):
+            if isinstance(value, str):
+                for placeholder in tag_placeholders:
+                    value = value.replace(placeholder, str(data_source.get(placeholder, placeholder)))
+                return value
+            if isinstance(value, dict):
+                return {k: substitute(v) for k, v in value.items()}
+            if isinstance(value, list):
+                return [substitute(v) for v in value]
+            return value
+        explanations[metadata_key] = substitute(tag_explanation)
 
     return explanations
+
+def flatten_labels(value):
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        value = list(value.values())
+    if isinstance(value, (list, tuple)):
+        return [label for item in value for label in flatten_labels(item)]
+    return []
+
+def normalize_metadata(package):
+    info = package.get("crawlerInfo", {})
+    for resource_info in info.get("resourcesInfo", {}).values():
+        for group in ("fileInfo", "fileStatus", "fileMetadataChanges", "binaryFileChanges"):
+            values = resource_info.get(group, {})
+            resource_info[group] = {metadata_tag_key(k): v for k, v in values.items()}
+    return package
+
+def temporal_intervals(value):
+    result = []
+    for interval in value if isinstance(value, list) else [value]:
+        if not isinstance(interval, dict):
+            continue
+        start = next((interval[k] for k in ("startDate", "start_date", "start", "gte", "begin") if interval.get(k)), None)
+        end = next((interval[k] for k in ("endDate", "end_date", "end", "lte") if interval.get(k)), None)
+        if start or end:
+            result.append({"startDate": start, "endDate": end})
+    return result

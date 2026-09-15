@@ -3,6 +3,12 @@ import json
 import os
 import re
 import sys
+import sqlite3
+from contextlib import closing
+from collections.abc import Mapping
+import tempfile
+import hashlib
+import time
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
@@ -14,6 +20,45 @@ from opendatacrawler.setup_logger import log_manager
 
 logger = log_manager.log
 
+class CatalogRows(Mapping):
+    def __init__(self, path):
+        self.path = path
+
+    def __getitem__(self, key):
+        row_id = self.resolve_id(key)
+        if row_id is None:
+            raise KeyError(key)
+        with closing(sqlite3.connect(self.path)) as database:
+            row = database.execute("SELECT payload FROM rows WHERE id=?", (row_id,)).fetchone()
+        if row is None:
+            raise KeyError(key)
+        return json.loads(row[0])
+
+    def resolve_id(self, key):
+        key = str(key)
+        with closing(sqlite3.connect(self.path)) as database:
+            row = database.execute("SELECT id FROM rows WHERE id=?", (key,)).fetchone()
+            if row is not None:
+                return row[0]
+            try:
+                row = database.execute("SELECT id FROM aliases WHERE alias=?", (key,)).fetchone()
+            except sqlite3.OperationalError:
+                return None
+            return row[0] if row is not None else None
+
+    def __iter__(self):
+        with closing(sqlite3.connect(self.path)) as database:
+            yield from (row[0] for row in database.execute("SELECT id FROM rows ORDER BY id"))
+
+    def __len__(self):
+        with closing(sqlite3.connect(self.path)) as database:
+            return database.execute("SELECT count(*) FROM rows").fetchone()[0]
+
+    def items(self):
+        with closing(sqlite3.connect(self.path)) as database:
+            for key, payload in database.execute("SELECT id, payload FROM rows ORDER BY id"):
+                yield key, json.loads(payload)
+
 class DatosGobEsCrawler:
     CATALOG_CSV_URL = "https://mycloud.red.es/index.php/s/X8pPWWsiEWYyBJR/download?path=/&files=datosgobes.csv"
     CATALOG_CSV_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "resources", "datosgobes_catalog.csv")
@@ -23,6 +68,11 @@ class DatosGobEsCrawler:
     }
     def __init__(self, odcrawler):
         self.odcrawler = odcrawler
+        cache = os.path.join(self.odcrawler.base_domain_path, ".cache")
+        os.makedirs(cache, exist_ok=True)
+        self.CATALOG_CSV_PATH = os.path.join(cache, "datosgobes_catalog.csv")
+        self.CATALOG_CSV_META_PATH = os.path.join(cache, "datosgobes_catalog_meta.json")
+        self.catalog_index_path = os.path.join(cache, "datosgobes.sqlite")
         self._catalog_rows_by_id = None
         self.odcrawler.serial_metadata_phase = False
 
@@ -30,6 +80,8 @@ class DatosGobEsCrawler:
         if not value or not isinstance(value, str):
             return {}
 
+        if utils.is_url(value.strip()):
+            return {"type": value.strip(), "value": value.strip().rstrip("/").rsplit("/", 1)[-1]}
         type_match = re.search(r"\[TYPE\](.*?)(?=\[VALUE\]|$)", value)
         value_match = re.search(r"\[VALUE\](.*)$", value)
         parsed = {}
@@ -43,12 +95,15 @@ class DatosGobEsCrawler:
         if not value or not isinstance(value, str):
             return {}
 
-        parts = [part.strip() for part in value.split("-") if part.strip()]
-        if len(parts) >= 2:
-            return {"startDate": parts[0], "endDate": parts[1]}
-        if parts:
-            return {"startDate": parts[0], "endDate": None}
-        return {}
+        date_pattern = r"\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?"
+        intervals = []
+        for part in utils.split_multivalue(value):
+            match = re.fullmatch(rf"\s*({date_pattern})?\s*(?:/| - |-)\s*({date_pattern})?\s*", part)
+            if match and any(match.groups()):
+                intervals.append({"startDate": match[1], "endDate": match[2]})
+            elif re.fullmatch(date_pattern, part):
+                intervals.append({"startDate": part, "endDate": None})
+        return intervals[0] if len(intervals) == 1 else intervals
 
     def _parse_distributions(self, value):
         if not value or not isinstance(value, str):
@@ -118,6 +173,12 @@ class DatosGobEsCrawler:
             elif key == "MEDIA_TYPE":
                 if current is not None and raw_val:
                     current["format"] = {"value": raw_val}
+            elif key == "BYTE_SIZE":
+                if current is not None and raw_val.isdigit():
+                    current["byteSize"] = int(raw_val)
+            elif key == "IDENTIFIER":
+                if current is not None and raw_val:
+                    current["identifier"] = raw_val
             elif key == "RELATION":
                 if current is not None and raw_val:
                     current["relation"] = raw_val
@@ -126,7 +187,7 @@ class DatosGobEsCrawler:
         return distributions
 
     def _extract_catalog_id(self, row):
-        for field in ("IDENTIFICADOR", "URL", "URL DE ACCESO"):
+        for field in ("URL", "URL DE ACCESO"):
             raw_value = row.get(field)
             if not raw_value or not isinstance(raw_value, str):
                 continue
@@ -136,6 +197,40 @@ class DatosGobEsCrawler:
             if "catalogo/" in raw_value:
                 return raw_value.rstrip("/").split("/")[-1]
         return None
+
+    def _extract_source_identifier(self, row):
+        raw_value = row.get("IDENTIFICADOR")
+        if not raw_value or not isinstance(raw_value, str):
+            return None
+        raw_value = raw_value.strip().rstrip("/")
+        return raw_value or None
+
+    def _catalog_access_url(self, row, package_id):
+        raw_url = row.get("URL")
+        parsed = urlparse(raw_url or "")
+        if parsed.netloc == "datos.gob.es" and "/catalogo/" in parsed.path:
+            return utils.fix_url(f"https://datos.gob.es/es/catalogo/{package_id}")
+        return utils.fix_url(raw_url or f"https://datos.gob.es/es/catalogo/{package_id}")
+
+    def _publisher_identifier(self, package_id):
+        prefix = str(package_id).split("-", 1)[0].upper()
+        if re.fullmatch(r"[A-Z]\d{8}", prefix):
+            return f"http://datos.gob.es/recurso/sector-publico/org/Organismo/{prefix}"
+        return None
+
+    def _resource_identifier_from_url(self, value):
+        if not value:
+            return None
+        match = re.search(r"/resource/([^/?#]+)/", value)
+        return match.group(1) if match else None
+
+    def _source_identifier_aliases(self, source_identifier):
+        if not source_identifier:
+            return []
+        aliases = [source_identifier.rstrip("/")]
+        if "catalogo/" in source_identifier:
+            aliases.append(source_identifier.rstrip("/").split("/")[-1])
+        return list(dict.fromkeys(alias for alias in aliases if alias))
 
     def _normalize_catalog_timestamp(self, value):
         if not value:
@@ -200,95 +295,98 @@ class DatosGobEsCrawler:
 
         return refresh_packages
 
+    def _index_csv(self, csv_path, index_path):
+        csv.field_size_limit(16 * 1024 * 1024)
+        count = 0
+        with closing(sqlite3.connect(index_path)) as database, database, open(csv_path, encoding="utf-8-sig", newline="") as source:
+            database.execute("CREATE TABLE rows (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+            database.execute("CREATE TABLE aliases (alias TEXT PRIMARY KEY, id TEXT NOT NULL)")
+            reader = csv.DictReader(source, strict=True)
+            required = {"URL", "TÍTULO", "DISTRIBUCIONES", "IDENTIFICADOR"}
+            if not required.issubset(set(reader.fieldnames or [])):
+                raise utils.CatalogError("datos.gob.es CSV does not contain required columns")
+            ambiguous_aliases = set()
+            for row in reader:
+                if None in row or any(value is None for value in row.values()):
+                    raise utils.CatalogError("Malformed or truncated datos.gob.es CSV record")
+                key = self._extract_catalog_id(row)
+                if not key:
+                    raise utils.CatalogError("datos.gob.es row has no catalog identifier")
+                if key in self.CATALOG_PACKAGE_IDS:
+                    continue
+                try:
+                    database.execute("INSERT INTO rows VALUES (?, ?)", (key, json.dumps(row, ensure_ascii=False)))
+                except sqlite3.IntegrityError as error:
+                    raise utils.CatalogError(f"Duplicate datos.gob.es catalog ID: {key}") from error
+                for alias in self._source_identifier_aliases(self._extract_source_identifier(row)):
+                    if alias == key or alias in ambiguous_aliases:
+                        continue
+                    try:
+                        database.execute("INSERT INTO aliases VALUES (?, ?)", (alias, key))
+                    except sqlite3.IntegrityError:
+                        database.execute("DELETE FROM aliases WHERE alias=?", (alias,))
+                        ambiguous_aliases.add(alias)
+                count += 1
+        if not count:
+            raise utils.CatalogError("datos.gob.es CSV catalog is empty")
+        return count
+
     def _load_catalog_rows(self):
         if self._catalog_rows_by_id is not None:
             return self._catalog_rows_by_id
-
-        utils.cleanup_path_tempfiles(os.path.dirname(self.CATALOG_CSV_PATH))
-
-        try:
-            csv.field_size_limit(sys.maxsize)
-        except OverflowError:
-            csv.field_size_limit(2**31 - 1)
-
-        headers = {
-            "Accept": "text/csv,application/octet-stream;q=0.9,*/*;q=0.8",
-            "User-Agent": self.odcrawler.user_agent,
-            "Connection": "keep-alive",
-        }
-
-        refresh_catalog = True
-        local_meta = {}
-        if os.path.exists(self.CATALOG_CSV_META_PATH):
+        with utils.file_lock(self.CATALOG_CSV_PATH + ".lock"):
+            local = {}
             try:
-                with open(self.CATALOG_CSV_META_PATH, "r", encoding="utf-8") as meta_file:
-                    local_meta = json.load(meta_file)
-            except Exception:
-                local_meta = {}
-
-        if os.path.exists(self.CATALOG_CSV_PATH):
-            try:
-                head_response = requests.head(self.CATALOG_CSV_URL, headers=headers, verify=False, timeout=self.odcrawler.max_sec, allow_redirects=True)
-                if head_response.ok:
-                    remote_size = head_response.headers.get("Content-Length")
-                    if remote_size and str(remote_size) == str(local_meta.get("content_length")):
-                        refresh_catalog = False
-                        logger("INFO", f"Using existing local datos.gob.es catalog CSV at '{self.CATALOG_CSV_PATH}' (same Content-Length)")
-                head_response.close()
-            except requests.RequestException:
-                refresh_catalog = False
-                logger("WARNING", f"Using existing local datos.gob.es catalog CSV at '{self.CATALOG_CSV_PATH}' because remote header check failed")
-
-        if refresh_catalog:
-            response, self.odcrawler.user_agent = self.odcrawler.make_request(self.CATALOG_CSV_URL, self.odcrawler.user_agent, headers=headers)
-            if response:
-                if utils.atomic_write_bytes(self.CATALOG_CSV_PATH, response.content):
-                    meta_payload = {
-                        "source_url": self.CATALOG_CSV_URL,
-                        "content_length": response.headers.get("Content-Length"),
-                    }
-                    utils.atomic_dump_json(self.CATALOG_CSV_META_PATH, meta_payload, indent=2)
-                    logger("INFO", f"datos.gob.es catalog CSV refreshed at '{self.CATALOG_CSV_PATH}'")
-                response.close()
-            elif not os.path.exists(self.CATALOG_CSV_PATH):
-                logger("ERROR", f"Error fetching datos.gob.es catalog CSV from '{self.CATALOG_CSV_URL}' and no local catalog file found")
-                self._catalog_rows_by_id = {}
-                return self._catalog_rows_by_id
-            else:
-                logger("WARNING", f"Using existing local datos.gob.es catalog CSV at '{self.CATALOG_CSV_PATH}' because remote refresh failed")
-
-        rows_by_id = {}
-        total_rows = 0
-        extracted_ids = 0
-        excluded_catalog_rows = 0
-        duplicate_ids = 0
-        try:
-            with open(self.CATALOG_CSV_PATH, encoding="utf-8-sig", errors="replace", newline="") as catalog_file:
-                reader = csv.DictReader(catalog_file)
-                for row in reader:
-                    row = {key: value for key, value in row.items() if key is not None}
-                    extra_fields = row.pop(None, None)
-                    if extra_fields:
-                        existing = row.get("DISTRIBUCIONES", "") or ""
-                        extras = [field for field in extra_fields if isinstance(field, str) and field.strip()]
-                        if extras:
-                            row["DISTRIBUCIONES"] = f"{existing},{','.join(extras)}" if existing else ",".join(extras)
-                    total_rows += 1
-                    package_id = self._extract_catalog_id(row)
-                    if package_id:
-                        extracted_ids += 1
-                    if package_id in self.CATALOG_PACKAGE_IDS:
-                        excluded_catalog_rows += 1
-                        continue
-                    if package_id:
-                        if package_id in rows_by_id:
-                            duplicate_ids += 1
-                        rows_by_id[package_id] = row
-        except Exception as e:
-            logger("ERROR", "Unexpected error parsing datos.gob.es fallback catalog CSV", e)
-            rows_by_id = {}
-
-        self._catalog_rows_by_id = rows_by_id
+                with open(self.CATALOG_CSV_META_PATH) as source:
+                    local = json.load(source)
+            except (OSError, ValueError):
+                pass
+            ttl = utils.get_config_option("datosgobes", "catalog_ttl_seconds", int, 86400)
+            ready = os.path.exists(self.catalog_index_path) and os.path.exists(self.CATALOG_CSV_PATH) and not local.get("refreshing")
+            fresh = ready and local.get("source_url") == self.CATALOG_CSV_URL and time.time() - local.get("checked_at", 0) < ttl
+            if not fresh:
+                headers = {"Accept": "text/csv"}
+                if ready and local.get("etag"):
+                    headers["If-None-Match"] = local["etag"]
+                elif ready and local.get("last_modified"):
+                    headers["If-Modified-Since"] = local["last_modified"]
+                response, self.odcrawler.user_agent = self.odcrawler.make_request(self.CATALOG_CSV_URL, self.odcrawler.user_agent, headers=headers, stream=True)
+                if response is None:
+                    raise utils.CatalogError("datos.gob.es catalog refresh failed; previous cache retained")
+                temp_csv = temp_index = None
+                try:
+                    response.raise_for_status()
+                    if response.status_code == 304 and ready:
+                        local["checked_at"] = time.time()
+                    else:
+                        digest = hashlib.sha256()
+                        total = 0
+                        maximum = utils.get_config_option("datosgobes", "catalog_max_mb", int, 1024) * 1024 * 1024
+                        with tempfile.NamedTemporaryFile(dir=os.path.dirname(self.CATALOG_CSV_PATH), prefix=utils.ATOMIC_TEMP_PREFIX, delete=False) as output:
+                            temp_csv = output.name
+                            for chunk in response.iter_content(1024 * 1024):
+                                total += len(chunk)
+                                if total > maximum:
+                                    raise utils.CatalogError("datos.gob.es catalog exceeds configured size limit")
+                                self.odcrawler.ensure_disk_headroom(temp_csv, required_bytes=len(chunk), context="caching catalog")
+                                digest.update(chunk); output.write(chunk)
+                            output.flush(); os.fsync(output.fileno())
+                        temp_index = temp_csv + ".sqlite"
+                        count = self._index_csv(temp_csv, temp_index)
+                        if not utils.atomic_dump_json(self.CATALOG_CSV_META_PATH, {**local, "refreshing": True}):
+                            raise utils.CatalogError("Could not record catalog replacement intent")
+                        os.replace(temp_csv, self.CATALOG_CSV_PATH)
+                        os.replace(temp_index, self.catalog_index_path)
+                        local = {"source_url": self.CATALOG_CSV_URL, "checked_at": time.time(), "sha256": digest.hexdigest(),
+                                 "sizeBytes": total, "count": count, "etag": response.headers.get("ETag"), "last_modified": response.headers.get("Last-Modified")}
+                    if not utils.atomic_dump_json(self.CATALOG_CSV_META_PATH, local, indent=2):
+                        raise utils.CatalogError("Could not persist catalog cache metadata")
+                finally:
+                    response.close()
+                    for path in (temp_csv, temp_index):
+                        if path and os.path.exists(path):
+                            os.remove(path)
+            self._catalog_rows_by_id = CatalogRows(self.catalog_index_path)
         return self._catalog_rows_by_id
 
     def get_package_list(self):
@@ -311,8 +409,12 @@ class DatosGobEsCrawler:
         else:
             resource["name"] = utils.extract_multilang_field(title, "_lang", "_value")
 
-        resource["downloadURL"] = utils.fix_url(resource_meta.get("accessURL") or resource_meta.get("downloadURL"))
+        resource["accessURL"] = utils.fix_url(resource_meta.get("accessURL"))
+        resource["downloadURL"] = utils.fix_url(resource_meta.get("downloadURL") or resource["accessURL"])
+        resource["identifier"] = resource_meta.get("identifier") or self._resource_identifier_from_url(resource["accessURL"])
         resource["modified"] = resource_meta.get("modified")
+        resource["remoteSize"] = resource_meta.get("byteSize")
+        resource["relation"] = resource_meta.get("relation")
 
         meta_media_type = resource_meta.get("format", {}).get("value")
 
@@ -332,73 +434,32 @@ class DatosGobEsCrawler:
         )
 
     def merge_existing_package_state(self, existing_package, package):
-        if not isinstance(existing_package, dict) or not isinstance(package, dict):
-            return package
-
-        existing_resources = existing_package.get("resources", {})
-        existing_resources_info = existing_package.get("crawlerInfo", {}).get("resourcesInfo", {})
-        new_resources = package.get("resources", {})
-        new_resources_info = package.get("crawlerInfo", {}).get("resourcesInfo", {})
-
-        if not isinstance(existing_resources, dict) or not isinstance(existing_resources_info, dict):
-            return package
-        if not isinstance(new_resources, dict) or not isinstance(new_resources_info, dict):
-            return package
-
-        existing_by_signature = {}
-        for old_file_name, old_resource in existing_resources.items():
-            if not isinstance(old_resource, dict):
-                continue
-            signature = self._build_resource_match_signature(old_resource)
-            if signature not in existing_by_signature:
-                old_info = existing_resources_info.get(old_file_name, utils.init_metadata(package=False, crawled=False))
-                existing_by_signature[signature] = (old_file_name, old_resource, old_info)
-
-        merged_resources = {}
-        merged_resources_info = {}
-        preserved_resources = 0
-
-        for new_file_name, new_resource in new_resources.items():
-            signature = self._build_resource_match_signature(new_resource)
-            entry = existing_by_signature.get(signature)
-            if not entry:
-                merged_resources[new_file_name] = new_resource
-                merged_resources_info[new_file_name] = new_resources_info.get(new_file_name, utils.init_metadata(package=False, crawled=False))
-                continue
-
-            _, old_resource, old_info = entry
-            merged_resource = self.odcrawler.preserve_local_resource_fields(old_resource, new_resource)
-
-            merged_resources[new_file_name] = merged_resource
-            merged_resources_info[new_file_name] = old_info
-            preserved_resources += 1
-
-        package["resources"] = merged_resources
-        package["crawlerInfo"]["resourcesInfo"] = merged_resources_info
-
-        if preserved_resources:
-            logger("INFO", f"datos.gob.es refresh preserved local state for {preserved_resources} unchanged resource(s) in package '{package.get('identifier')}'", indent=2)
-
-        return package
+        return self.odcrawler.merge_existing_package_state(existing_package, package)
 
     def get_package(self, package_id, metadata_file_name):
-        row = self._load_catalog_rows().get(package_id)
+        rows = self._load_catalog_rows()
+        row = rows.get(package_id)
         if not row:
             logger("WARNING", f"No catalog CSV row found for package '{package_id}'")
             return None
+        package_id = rows.resolve_id(package_id) or package_id
 
         metadata = utils.init_metadata()
         metadata["identifier"] = package_id
-        metadata["accessURL"] = utils.fix_url(f"https://datos.gob.es/es/catalogo/{package_id}")
+        metadata["accessURL"] = self._catalog_access_url(row, package_id)
         metadata["requestURL"] = self.CATALOG_CSV_URL
         metadata["fileName"] = metadata_file_name
         metadata["img"] = "https://datos.gob.es/sites/default/files/favicon.png"
+        source_identifier = self._extract_source_identifier(row)
+        if source_identifier and source_identifier != metadata["accessURL"].rstrip("/"):
+            metadata["sourceIdentifier"] = source_identifier
 
         metadata["title"] = utils.extract_bracketed_lang_text(row.get("TÍTULO"))
         metadata["description"] = utils.extract_bracketed_lang_text(row.get("DESCRIPCIÓN"))
         publisher_name = (row.get("ÓRGANO PUBLICADOR") or "").strip()
-        metadata["publisher"] = {"title": publisher_name, "name": publisher_name} if publisher_name else {}
+        metadata["publisher"] = {"identifier": self._publisher_identifier(package_id), "title": publisher_name, "name": publisher_name} if publisher_name else {}
         metadata["language"] = utils.normalize_language_values(utils.split_multivalue(row.get("IDIOMAS")))
+        metadata["languageURI"] = utils.split_multivalue(row.get("IDIOMAS"))
         metadata["keyword"] = utils.extract_bracketed_lang_text(row.get("ETIQUETAS"))
         metadata["theme"] = utils.split_multivalue(row.get("TEMÁTICAS"))
         metadata["accrualPeriodicity"] = self._parse_frequency(row.get("FRECUENCIA DE ACTUALIZACIÓN"))
@@ -408,6 +469,9 @@ class DatosGobEsCrawler:
         metadata["source"] = self.odcrawler.domain
         metadata["temporal"] = self._parse_temporal_range(row.get("COBERTURA TEMPORAL"))
         metadata["geo"] = utils.split_multivalue(row.get("COBERTURA GEOGRÁFICA"))
+        metadata["relatedResources"] = row.get("RECURSOS RELACIONADOS")
+        metadata["conformsTo"] = row.get("NORMATIVA")
+        metadata["valid"] = row.get("VIGENCIA DEL RECURSO")
 
         distributions = self._parse_distributions(row.get("DISTRIBUCIONES"))
         fallback_url = utils.fix_url(row.get("URL DE ACCESO"))

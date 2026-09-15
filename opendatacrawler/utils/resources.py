@@ -2,16 +2,13 @@ import configparser
 import json
 import os
 
-
 PACKAGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESOURCES_DIR = os.path.join(PACKAGE_DIR, "resources")
-CONFIG_PATH = os.path.join(PACKAGE_DIR, "config.ini")
-
+CONFIG_PATH = os.environ.get("ODC_CONFIG", os.path.join(PACKAGE_DIR, "config.ini"))
 
 def print_intro():
     with open(os.path.join(RESOURCES_DIR, "intro.txt"), "r", encoding="utf-8") as f:
         print(f.read())
-
 
 def load_resource(filename, fallback_value=None):
     with open(os.path.join(RESOURCES_DIR, filename), "r", encoding="utf-8") as f:
@@ -22,7 +19,6 @@ def load_resource(filename, fallback_value=None):
 
     return data
 
-
 def load_tokens():
     config = configparser.ConfigParser()
     config.read(CONFIG_PATH)
@@ -32,12 +28,10 @@ def load_tokens():
         for section in config.sections()
     }
 
-
 def load_config():
     config = configparser.ConfigParser()
     config.read(CONFIG_PATH)
     return config
-
 
 def _section_aliases(section):
     normalized = str(section).strip().lower()
@@ -46,7 +40,6 @@ def _section_aliases(section):
     if compact != normalized:
         aliases.append(compact)
     return aliases
-
 
 def get_config_option(section, option, cast=str, fallback=None):
     config = load_config()
@@ -69,18 +62,21 @@ def get_config_option(section, option, cast=str, fallback=None):
 
     return fallback
 
-
 def build_extension_to_mime_map(mime_map):
     ext_to_mime = {}
     for mime, info in mime_map.items():
         if isinstance(info, dict):
             exts = info.get("extensions")
             if exts and len(exts) > 0:
-                first_ext = exts[0].lower()
-                if first_ext not in ext_to_mime:
-                    ext_to_mime[first_ext] = mime
+                for ext in exts:
+                    ext_to_mime.setdefault(ext.lower(), mime)
+    ext_to_mime.update({
+        "json": "application/json", "xml": "application/xml",
+        "csv": "text/csv", "tsv": "text/tab-separated-values",
+        "zip": "application/zip", "px": "text/x-pcaxis",
+        "geojson": "application/geo+json",
+    })
     return ext_to_mime
-
 
 ZENODO_STATE_FILE = os.path.join(RESOURCES_DIR, "zenodo_state.json")
 AUTH_TOKENS = load_tokens()

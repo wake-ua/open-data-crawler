@@ -47,93 +47,47 @@ class CkanCrawler:
         try:
             with open(metadata_path, "r", encoding="utf-8") as f:
                 metadata = json.load(f)
-            return metadata.get("modified"), True, False
+            return metadata.get("metadataModified") or metadata.get("modified"), True, False
         except Exception as e:
             logger("WARNING", f"Could not read local metadata file '{metadata_file_name}' while checking for CKAN updates; the package will be refreshed", e)
             return None, True, True
 
     def _fetch_package_list_names(self, headers):
-        try:
-            resp, self.odcrawler.user_agent, err_tag, err = self.odcrawler.make_action_request(
-                "package_list",
-                params={},
-                headers=headers,
-                return_tag=True,
-                current_agent=self.odcrawler.user_agent,
-                max_sec=self.odcrawler.max_sec,
-            )
-            if not resp:
-                logger("ERROR", f"Error fetching package_list from '{self.odcrawler.get_print_domain()}'", err)
-                return []
-
-            payload = resp.json()
-            if not payload.get("success", False):
-                logger("ERROR", f"CKAN package_list returned success=false: {payload.get('error')}")
-                return []
-
-            ids = payload.get("result") or []
-            return ids if isinstance(ids, list) else []
-        except requests.RequestException as e:
-            logger("ERROR", f"Error fetching package_list from '{self.odcrawler.get_print_domain()}'", e)
-            return []
-        except Exception as e:
-            logger("ERROR", f"Unexpected error parsing package_list from '{self.odcrawler.get_print_domain()}'", e)
-            return []
+        response, self.odcrawler.user_agent = self.odcrawler.make_action_request("package_list", headers=headers)
+        data = utils.read_json(response, "CKAN package_list")
+        if not isinstance(data, dict) or data.get("success") is not True or not isinstance(data.get("result"), list):
+            raise utils.CatalogError("CKAN package_list returned an invalid envelope")
+        return list(dict.fromkeys(str(value) for value in data["result"]))
 
     def _fetch_package_search_results(self, headers, include_private=False, fields=None):
-        headers = {
-            **headers,
-        }
-        results = []
-        rows = 100
-        start = 0
-
+        results, seen = [], set()
+        expected = None
         while True:
-            params = {
-                "q": "*:*",
-                "rows": rows,
-                "start": start,
-            }
+            params = {"q": "*:*", "rows": 100, "start": len(results), "sort": "id asc"}
             if include_private:
                 params["include_private"] = True
             if fields:
                 params["fl"] = ",".join(fields)
-
-            try:
-                resp, self.odcrawler.user_agent, err_tag, err = self.odcrawler.make_action_request(
-                    "package_search",
-                    params=params,
-                    headers=headers,
-                    return_tag=True,
-                    current_agent=self.odcrawler.user_agent,
-                    max_sec=self.odcrawler.max_sec,
-                )
-
-                if not resp:
-                    logger("ERROR", f"Error fetching package_search from '{self.odcrawler.get_print_domain()}'", err)
-                    break
-
-                payload = resp.json()
-                if not payload.get("success", False):
-                    logger("ERROR", f"CKAN package_search returned success=false: {payload.get('error')}")
-                    break
-
-                result = payload.get("result") or {}
-                count = int(result.get("count") or 0)
-                batch = [ds for ds in (result.get("results") or []) if isinstance(ds, dict) and ds.get("name")]
-                results.extend(batch)
-
-                start += rows
-                if start >= count or not batch:
-                    break
-
-            except requests.RequestException as e:
-                logger("ERROR", f"Error fetching package_search from '{self.odcrawler.get_print_domain()}'", e)
+            response, self.odcrawler.user_agent = self.odcrawler.make_action_request("package_search", params=params, headers=headers)
+            data = utils.read_json(response, "CKAN package_search")
+            result = data.get("result") if isinstance(data, dict) and data.get("success") is True else None
+            if not isinstance(result, dict) or not isinstance(result.get("count"), int) or not isinstance(result.get("results"), list):
+                raise utils.CatalogError("CKAN package_search returned an invalid envelope")
+            if expected is None:
+                expected = result["count"]
+            if expected != result["count"]:
+                raise utils.CatalogError("CKAN count changed during enumeration; retry")
+            batch = result["results"]
+            keys = [item.get("name") for item in batch]
+            if any(not key or key in seen for key in keys) or len(set(keys)) != len(keys):
+                raise utils.CatalogError("CKAN duplicate or missing package names")
+            results.extend(batch); seen.update(keys)
+            if len(results) >= expected:
                 break
-            except Exception as e:
-                logger("ERROR", f"Unexpected error parsing package_search from '{self.odcrawler.get_print_domain()}'", e)
-                break
-
+            if not batch:
+                raise utils.CatalogError("CKAN pagination ended before reported count")
+        if len(results) != expected:
+            raise utils.CatalogError("CKAN received more datasets than reported count")
         return results
 
     def _detect_packages_requiring_refresh(self, package_summaries):
@@ -241,7 +195,7 @@ class CkanCrawler:
 
         resource["description"] = resource_meta.get("description")
         resource["state"] = resource_meta.get("state")
-        resource["modified"] = resource_meta.get("last_modified") or resource_meta.get("metadata_modified") or resource_meta.get("created")
+        resource["modified"] = resource_meta.get("last_modified") or resource_meta.get("metadata_modified")
         resource["created"] = resource_meta.get("created")
         if resource_meta.get("hash"):
             resource["remoteHash"] = resource_meta.get("hash")
@@ -250,7 +204,7 @@ class CkanCrawler:
 
         resource["downloadURL"] = utils.fix_url(resource_meta.get("download_url") or resource_meta.get("url") or resource_meta.get("original_url"))
 
-        if resource["id"] and resource_meta.get("datastore_active"):
+        if self.odcrawler.extract_schema and resource["id"] and resource_meta.get("datastore_active"):
             response, self.odcrawler.user_agent, *_ = self.odcrawler.make_action_request(
                 "datastore_search",
                 params={"resource_id": resource["id"], "limit": 0},
@@ -261,15 +215,18 @@ class CkanCrawler:
                 payload = response.json()
                 schema_data = payload.get("result") if payload.get("success", False) else None
                 if schema_data:
-                    resource["schema_og"] = {"fields": []}
+                    resource["sourceSchema"] = {"fields": []}
                     for field in schema_data.get("fields", []):
-                        resource["schema_og"]["fields"].append({
+                        if field.get("id") == "_id":
+                            continue
+                        resource["sourceSchema"]["fields"].append({
                             "name": field.get("id"),
                             "description": field.get("info", {}).get("notes", ""),
                             "type": field.get("type")
                         })
 
-                    resource["rawDataSchema"] = {k: v for k, v in schema_data.items() if k != "records"}
+                    if self.odcrawler.save_raw_data:
+                        resource["rawDataSchema"] = {k: v for k, v in schema_data.items() if k != "records"}
 
         meta_media_type = resource_meta.get("mimetype") or resource_meta.get("format")
 
@@ -296,69 +253,7 @@ class CkanCrawler:
         }
 
     def merge_existing_package_state(self, existing_package, package):
-        if not isinstance(existing_package, dict) or not isinstance(package, dict):
-            return package
-
-        existing_resources = existing_package.get("resources", {})
-        existing_resources_info = existing_package.get("crawlerInfo", {}).get("resourcesInfo", {})
-        new_resources = package.get("resources", {})
-        new_resources_info = package.get("crawlerInfo", {}).get("resourcesInfo", {})
-
-        if not isinstance(existing_resources, dict) or not isinstance(existing_resources_info, dict):
-            return package
-        if not isinstance(new_resources, dict) or not isinstance(new_resources_info, dict):
-            return package
-
-        existing_by_id = {}
-        existing_by_name = {}
-        for old_file_name, old_resource in existing_resources.items():
-            if not isinstance(old_resource, dict):
-                continue
-
-            old_info = existing_resources_info.get(old_file_name, utils.init_metadata(package=False, crawled=False))
-            entry = (old_file_name, old_resource, old_info)
-            resource_id = old_resource.get("id")
-            if resource_id and resource_id not in existing_by_id:
-                existing_by_id[resource_id] = entry
-            existing_by_name[old_file_name] = entry
-
-        merged_resources = {}
-        merged_resources_info = {}
-        preserved_resources = 0
-        changed_resources = 0
-
-        for new_file_name, new_resource in new_resources.items():
-            new_info = new_resources_info.get(new_file_name, utils.init_metadata(package=False, crawled=False))
-            entry = self._get_existing_resource_entry(existing_by_id, existing_by_name, new_file_name, new_resource)
-            if not entry:
-                merged_resources[new_file_name] = new_resource
-                merged_resources_info[new_file_name] = new_info
-                continue
-
-            _, old_resource, old_info = entry
-            if self._build_resource_refresh_signature(old_resource) != self._build_resource_refresh_signature(new_resource):
-                changed_resources += 1
-                merged_resources[new_file_name] = new_resource
-                merged_resources_info[new_file_name] = new_info
-                continue
-
-            merged_resource = self.odcrawler.preserve_local_resource_fields(old_resource, new_resource)
-
-            merged_resources[new_file_name] = merged_resource
-            merged_resources_info[new_file_name] = old_info
-            preserved_resources += 1
-
-        package["resources"] = merged_resources
-        package["crawlerInfo"]["resourcesInfo"] = merged_resources_info
-
-        if preserved_resources or changed_resources:
-            logger(
-                "INFO",
-                f"CKAN refresh preserved local state for {preserved_resources} unchanged resource(s) and marked {changed_resources} resource(s) for reprocessing in package '{package.get('identifier')}'",
-                indent=2,
-            )
-
-        return package
+        return self.odcrawler.merge_existing_package_state(existing_package, package)
 
     def get_package(self, package_id, metadata_file_name):
         url = utils.fix_url(f"{self.odcrawler.domain}/api/3/action/package_show?id={package_id}")
@@ -375,7 +270,6 @@ class CkanCrawler:
             return_tag=True,
         )
 
-        #response, self.odcrawler.user_agent, error_tag, e = self.odcrawler.make_request(url, self.odcrawler.user_agent, headers=headers, return_tag=True)
         if not response:
             error_message = utils.extract_error_message(e)
             tag_values = utils.extract_error_tag_values(e)
@@ -391,7 +285,7 @@ class CkanCrawler:
                 logger("ERROR", f"Error accessing package '{package_id}' ('{metadata_file_name}')", error_message, indent=2)
             return None
 
-        payload = response.json()
+        payload = utils.read_json(response, f"CKAN package_show {package_id}")
         if not payload.get("success", False):
             logger("WARNING", f"CKAN package_show returned success=false for package '{package_id}'", indent=2)
             metadata["crawlerInfo"]["packageInfo"].update(utils.add_tag_explanations("invalid_request"))
@@ -446,26 +340,18 @@ class CkanCrawler:
                 else:
                     metadata["theme"].append(theme)
 
-        metadata["accrualPeriodicity"] = data.get("accrualPeriodicity")
+        metadata["accrualPeriodicity"] = data.get("accrualPeriodicity") or data.get("frequency")
 
-        metadata["modified"] = data.get("metadata_modified", "")
-        metadata["issued"] = data.get("metadata_created", "")
+        metadata["metadataModified"] = data.get("metadata_modified")
+        metadata["modified"] = data.get("modified") or data.get("metadata_modified", "")
+        metadata["issued"] = data.get("issued") or data.get("metadata_created", "")
         metadata["license"] = data.get("license_url", "") or data.get("license_id", "")
         if not metadata["license"] and distributions:
             metadata["license"] = distributions[0].get("license", "")
 
         metadata["source"] = self.odcrawler.domain
 
-        temporals = data.get("temporal", {}) or data.get("temporals", {})
-        if not isinstance(temporals, list):
-            temporals = [temporals]
-        
-        for temporal in temporals:
-            if isinstance(temporal, dict):
-                metadata["temporal"] = {
-                    "startDate": temporal.get("startDate") or temporal.get("start_date"),
-                    "endDate": temporal.get("endDate") or temporal.get("end_date"),
-                }
+        metadata["temporal"] = utils.temporal_intervals(data.get("temporal_coverage") or data.get("temporal") or data.get("temporals"))
 
         location = data.get("location", "")
         spatial = data.get("spatial", "")

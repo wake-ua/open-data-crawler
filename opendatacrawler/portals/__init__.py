@@ -3,6 +3,7 @@ from .dataeuropaeucrawler import DataEuropaEuCrawler
 from .datosgobescrawler import DatosGobEsCrawler
 from .datosmadrides import DatosMadridEsCrawler
 from .gbifcrawler import GbifCrawler
+from .inecrawler import INECrawler
 from .zenodocrawler import ZenodoCrawler
 
 __all__ = [
@@ -11,5 +12,6 @@ __all__ = [
     "DatosGobEsCrawler",
     "DatosMadridEsCrawler",
     "GbifCrawler",
+    "INECrawler",
     "ZenodoCrawler",
 ]

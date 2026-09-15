@@ -2,7 +2,7 @@ import logging
 import threading
 import os
 import textwrap
-from datetime import datetime
+from datetime import datetime, timedelta
 import re
 
 SPECIAL_TAGS_ICONS = {
@@ -27,7 +27,7 @@ class LogManager:
         self._log_dir = os.path.join(os.getcwd(), "logs")
         os.makedirs(self._log_dir, exist_ok=True)
 
-        self._log_file_name = f"debug_{datetime.now().strftime("%Y_%m_%d_%H%M")}.log"
+        self._log_file_name = f"debug_{datetime.now().strftime("%Y_%m_%d_%H%M%S_%f")}_{os.getpid()}.log"
         self._log_file_path = os.path.join(self._log_dir, self._log_file_name)
 
         self._logger = logging.getLogger("myLogger")
@@ -93,32 +93,41 @@ class LogManager:
         if level == "print":
             print(final_message)
 
-    def clean_unused_logs(self, min_lines=2):
-        try:
-            deleted = 0
-            for file in os.listdir(self._log_dir):
-                file_path = os.path.join(self._log_dir, file)
-                if os.path.isfile(file_path) and file.endswith(".log"):
-                    try:
-                        with open(file_path, "r", encoding="utf-8") as f:
-                            lines = [line for line in f if line.strip()]
+    def clean_unused_logs(self, min_lines=2, older_than_seconds=60):
+        if not os.path.isdir(self._log_dir):
+            return 0
 
-                        if len(lines) <= min_lines:
-                            os.remove(file_path)
-                            deleted += 1
-                    except Exception as inner_e:
-                        self.log("ERROR", f"Could not read or delete log: {file}", inner_e)
-
-            if deleted:
-                self.log("OK", f"Cleaned {deleted} orphan/empty log file(s)")
-        except Exception as e:
-            self.log("ERROR", "Failed during orphan log cleanup", e)
+        removed = 0
+        cutoff = datetime.now() - timedelta(seconds=older_than_seconds)
+        active_path = os.path.abspath(self._log_file_path)
+        for name in os.listdir(self._log_dir):
+            if not re.fullmatch(r"debug_.*\.log", name):
+                continue
+            path = os.path.join(self._log_dir, name)
+            if os.path.abspath(path) == active_path or not os.path.isfile(path):
+                continue
+            try:
+                if datetime.fromtimestamp(os.path.getmtime(path)) > cutoff:
+                    continue
+                lines = 0
+                with open(path, "r", encoding="utf-8", errors="replace") as source:
+                    for lines, _ in enumerate(source, start=1):
+                        if lines >= min_lines:
+                            break
+                if lines < min_lines:
+                    os.remove(path)
+                    removed += 1
+            except OSError:
+                continue
+        return removed
 
     def move_to_domain(self, domain, move_file=True):
         target_dir = os.path.join(self._log_dir, domain)
         os.makedirs(target_dir, exist_ok=True)
 
         target_path = os.path.join(target_dir, self._log_file_name)
+        if move_file and os.path.abspath(target_path) == os.path.abspath(self._log_file_path):
+            return
 
         self._logger.removeHandler(self._handler)
         self._handler.close()

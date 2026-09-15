@@ -149,5 +149,16 @@
         "tag_explanation": {
             "reason": "The crawler intentionally skipped downloading and parsing this resource because the run was configured to store metadata only without dataset files"
         }
+    },
+    "inconsistent_tabular_rows": {
+        "tag_placeholders": ["<expected_columns>", "<checked_rows>", "<inconsistent_rows>"],
+        "tag_explanation": {
+            "reason": "The tabular file could be parsed after processing, but data rows still have inconsistent column counts: expected <expected_columns> columns after checking <checked_rows> rows and found <inconsistent_rows> inconsistent rows",
+            "values": {
+                "expectedColumns": "<expected_columns>",
+                "checkedRows": "<checked_rows>",
+                "inconsistentRows": "<inconsistent_rows>"
+            }
+        }
     }
 }

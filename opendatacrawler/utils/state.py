@@ -3,9 +3,8 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 
 from opendatacrawler.setup_logger import log_manager
-from .metadata import metadata_tag_key
+from .metadata import metadata_tag_key, normalize_metadata
 from .tabular import get_mime_and_ext
-
 
 logger = log_manager.log
 
@@ -22,15 +21,16 @@ PERMANENT_UNAVAILABLE_TAGS = {
         "invalid_download_url",
         "invalid_redirect_location",
         "too_many_redirects",
+        "html_page_downloaded",
+        "unauthorized_access",
+        "invalid_payload",
     }
 }
 TEMP_UNAVAILABLE_TAG = metadata_tag_key("resource_temporarily_unavailable")
 SKIPPED_BY_CONFIG_TAG = metadata_tag_key("dataset_skipped_by_config")
 
-
 def package_requires_retry(failed, pending):
     return bool(failed or pending)
-
 
 def recover_resume(save_path, accepted_types=None, num_resources=None, max_workers=None, avoid_data=False):
     packages_status = {}
@@ -122,33 +122,25 @@ def recover_resume(save_path, accepted_types=None, num_resources=None, max_worke
 
     return packages_status, total_successful, total_failed, total_unavailable_permanent, incomplete_packages
 
-
 def load_resume_entry(save_path, fname):
     meta_path = os.path.join(save_path, fname)
     identifier = fname.replace("meta_", "").replace(".json", "")
     try:
         with open(meta_path, "r", encoding="utf-8") as f:
-            meta = json.load(f)
-        identifier = meta.get("identifier") or identifier
+            meta = normalize_metadata(json.load(f))
+        identifier = str(meta.get("identifier") or identifier)
         return identifier, build_resume_entry(meta)
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        logger("ERROR", f"Could not decode {meta_path}; deleting damaged metadata so it can be rebuilt", e)
-        try:
-            os.remove(meta_path)
-            logger("DEL", f"Deleted damaged metadata file '{meta_path}'")
-        except Exception as delete_error:
-            logger("ERROR", f"Could not delete damaged metadata file '{meta_path}'", delete_error)
+        logger("ERROR", f"Could not decode {meta_path}; retaining damaged metadata for recovery", e)
         return identifier, None
     except Exception as e:
         logger("ERROR", f"Could not read {meta_path}; keeping metadata file and marking package as pending for safety", e)
         return identifier, None
 
-
 def resource_was_attempted(resource):
     file_info_keys = set(resource.get("fileInfoKeys", []) or [])
     non_skip_info_keys = file_info_keys - {SKIPPED_BY_CONFIG_TAG}
     return bool(resource.get("fileCrawled")) or bool(non_skip_info_keys)
-
 
 def compute_package_resume_status(entry, accepted_types=None, num_resources=None, existing_paths=None, save_path=None, avoid_data=False):
     failed = []
@@ -225,8 +217,8 @@ def compute_package_resume_status(entry, accepted_types=None, num_resources=None
 
     return failed, success, unavailable_permanent, pending
 
-
 def build_resume_entry(package, meta_file_name=None, meta_stat=None):
+    normalize_metadata(package)
     resources = {}
     resources_info = package.get("crawlerInfo", {}).get("resourcesInfo", {})
     for file_name, resource in package.get("resources", {}).items():
@@ -244,7 +236,6 @@ def build_resume_entry(package, meta_file_name=None, meta_stat=None):
 
     return {"identifier": package.get("identifier"), "resources": resources}
 
-
 def has_materialized_file(resource, existing_paths=None, save_path=None):
     path = resource.get("path")
     if not path:
@@ -261,7 +252,6 @@ def has_materialized_file(resource, existing_paths=None, save_path=None):
             return True
     return os.path.exists(abs_path)
 
-
 def is_completed(package, file_name, complete=True, unavailable=False, unavailable_permanent=False):
     if file_name:
         try:
@@ -276,6 +266,7 @@ def is_completed(package, file_name, complete=True, unavailable=False, unavailab
                 file_completed = info.get("fileCompleted")
                 file_info_keys = info.get("fileInfoKeys", [])
 
+            file_info_keys = {metadata_tag_key(k) for k in file_info_keys}
             if complete and file_completed:
                 return True
 

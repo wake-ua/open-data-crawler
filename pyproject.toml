@@ -29,8 +29,14 @@ dependencies = [
 [project.scripts]
 opendatacrawler = "opendatacrawler.__main__:main"
 
+[tool.setuptools]
+include-package-data = false
+
 [tool.setuptools.packages.find]
 include = ["opendatacrawler", "opendatacrawler.*"]
 
 [tool.setuptools.package-data]
-opendatacrawler = ["config.ini", "resources/*"]
+opendatacrawler = ["config.example.ini", "resources/*.json", "resources/*.txt"]
+
+[tool.setuptools.exclude-package-data]
+opendatacrawler = ["config.ini", "resources/*.csv", "resources/zenodo_state.json", "resources/*catalog*.json"]
