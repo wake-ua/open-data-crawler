@@ -297,8 +297,8 @@ And don't forget to give the project a star! Thanks for your support! 🌟
 
 4. Use helper functions from the `opendatacrawler/utils/` package and built-in logging:
   - **Network calls**: `self.odcrawler.make_request(url, self.odcrawler.user_agent, headers=...)`
-    > [!NOTE]
-    >  Reuse the returned agent value and close every response. Catalog failures must raise `CatalogError`; never return partial IDs as a successful enumeration.
+  > [!NOTE]
+  > Reuse the returned agent value and close every response. Catalog failures must raise `CatalogError`; never return partial IDs as a successful enumeration.
 
   - **File helpers**: `utils.generate_short_filename()`, `utils.get_mime_and_ext()`, `utils.get_extension_mime()`...
 
